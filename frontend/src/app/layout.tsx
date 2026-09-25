@@ -3,6 +3,7 @@ import { Plus_Jakarta_Sans } from "next/font/google";
 import { cookies } from "next/headers";
 import "./globals.css";
 import { Toaster } from "@/components/ui/Toast";
+import { VersionGuard } from "@/components/VersionGuard";
 import { AppFrame } from "@/components/AppFrame";
 import { AuthProvider } from "@/context/AuthProvider";
 import { SidebarProvider } from "@/context/SidebarProvider";
@@ -89,6 +90,7 @@ export default async function RootLayout({
           </SidebarProvider>
         </AuthProvider>
         <Toaster />
+        <VersionGuard />
       </body>
     </html>
   );

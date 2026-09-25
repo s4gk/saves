@@ -16,7 +16,9 @@ const SECRET = process.env.AUTH_SECRET ?? "nexus-dev-secret-change-me";
 // Paths reachable without a staff session (besides Next internals). El portal
 // del abonado (`/portal`) usa su propio token en localStorage, no la cookie de
 // staff.
-const PUBLIC_PATHS = ["/login", "/portal"];
+// `/version-app` y `/reporte-error` también: la pestaña vieja o el error pueden
+// llegar con la sesión ya vencida, y la respuesta no expone datos.
+const PUBLIC_PATHS = ["/login", "/portal", "/version-app", "/reporte-error"];
 
 function base64urlToBytes(b64url: string): Uint8Array {
   const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");

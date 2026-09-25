@@ -12,7 +12,7 @@ import { useAuth } from "@/context/AuthProvider";
 import { mensajeDeError } from "@/lib/errores";
 import { MOTIVO_GEO, formatearDistancia, pedirUbicacion } from "@/lib/geo";
 import { formatearDuracion, type Ruta } from "@/lib/mapa";
-import { COLOR_ESTADO, type PuntoMapa } from "@/components/map/Mapa";
+import { COLOR_ESTADO, type PuntoMapa } from "@/components/map/puntos";
 
 const Mapa = dynamic(() => import("@/components/map/Mapa").then((m) => m.Mapa), {
   ssr: false,

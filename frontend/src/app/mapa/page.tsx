@@ -12,7 +12,7 @@ import { useAuth } from "@/context/AuthProvider";
 import { useRequest } from "@/lib/useRequest";
 import { PERM } from "@/lib/auth";
 import type { BranchOpt } from "@/lib/network";
-import { COLOR_ESTADO, type PuntoMapa } from "@/components/map/Mapa";
+import { COLOR_ESTADO, type PuntoMapa } from "@/components/map/puntos";
 import { CENTRO_POR_DEFECTO } from "@/lib/geo";
 import {
   COLOR_TECNICO_FRIO,

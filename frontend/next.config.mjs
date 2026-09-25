@@ -1,5 +1,15 @@
 /** @type {import('next').NextConfig} */
+// Identidad de la build: la misma cadena va a `.next/BUILD_ID` y a la variable que
+// lleva el navegador. `VersionGuard` las compara (vía `/version-app`, que lee el
+// BUILD_ID del disco) para saber si la pestaña quedó vieja tras un despliegue.
+// `next build` evalúa este archivo varias veces y en procesos hijos: se guarda en el
+// entorno la primera vez para que todas las evaluaciones den la MISMA cadena.
+process.env.NEXT_PUBLIC_BUILD_ID ??= `b${Date.now().toString(36)}`;
+const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID;
+
 const nextConfig = {
+  generateBuildId: async () => BUILD_ID,
+  env: { NEXT_PUBLIC_BUILD_ID: BUILD_ID },
   reactStrictMode: true,
   // El build VALIDA TIPOS. Antes llevaba `typescript.ignoreBuildErrors: true` por
   // picos de memoria que mataban el build en esta máquina; medido el 2026-07-20, ya

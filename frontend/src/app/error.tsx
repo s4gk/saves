@@ -2,12 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icon";
+import { BUILD_ACTUAL, hayBuildNueva, recargarUnaVez } from "@/lib/version";
 
-const CLAVE_RECARGA = "error:recarga-por-despliegue";
-
-/** ¿Falló la descarga de un trozo de JS (build vieja tras un despliegue)? */
+/** ¿Falló la descarga de un trozo de JS o CSS (build vieja tras un despliegue)? */
 const esTrozoViejo = (e: Error | undefined): boolean =>
-  e?.name === "ChunkLoadError" || /Failed to load chunk|Loading chunk .* failed|dynamically imported module/i.test(e?.message ?? "");
+  e?.name === "ChunkLoadError" ||
+  /Failed to load chunk|Loading (CSS )?chunk .* failed|dynamically imported module|Failed to find Server Action|Unexpected token '<'/i.test(
+    e?.message ?? "",
+  );
 
 /**
  * Frontera de error de la aplicación.
@@ -35,18 +37,36 @@ export default function Error({
     console.error("Error no controlado en la interfaz:", error);
 
     // Pestaña abierta desde ANTES de un despliegue: pide los trozos de JS de la build
-    // vieja, que ya no existen (404), y cae aquí aunque la pantalla esté sana — visto
-    // en Agendamiento el 2026-09-22. Recargar trae la build nueva. Una sola vez por
-    // minuto, para no entrar en bucle si el trozo falta de verdad.
-    if (esTrozoViejo(error)) {
+    // vieja, que ya no existen, y cae aquí aunque la pantalla esté sana — visto en
+    // Agendamiento el 2026-09-22 y otra vez el 2026-09-25 ("a algunos nos sigue
+    // saliendo"). No siempre llega como ChunkLoadError: por eso además se pregunta
+    // al servidor si ya sirve otra build. Si es así, recargar lo arregla.
+    let vivo = true;
+    (async () => {
+      const vieja = esTrozoViejo(error) || (await hayBuildNueva()) === true;
+      const recargado = vieja && vivo && recargarUnaVez();
+      // Todo error que llega aquí queda en el log del servidor (`[ErrorPantalla]`),
+      // también los que se arreglan recargando: así se ve si hay una pantalla rota
+      // de verdad y a quién le pasa.
       try {
-        const ultima = Number(sessionStorage.getItem(CLAVE_RECARGA) ?? 0);
-        if (Date.now() - ultima > 60_000) {
-          sessionStorage.setItem(CLAVE_RECARGA, String(Date.now()));
-          window.location.reload();
-        }
-      } catch { /* sin sessionStorage: se queda el aviso con el botón */ }
-    }
+        await fetch("/reporte-error", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          keepalive: true,
+          body: JSON.stringify({
+            ruta: window.location.pathname + window.location.search,
+            mensaje: error?.message,
+            digest: error?.digest,
+            pila: error?.stack,
+            build: BUILD_ACTUAL,
+            recargado,
+          }),
+        });
+      } catch { /* sin red: queda en la consola */ }
+    })();
+    return () => {
+      vivo = false;
+    };
   }, [error]);
 
   /**
