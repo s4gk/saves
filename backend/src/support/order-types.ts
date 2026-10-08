@@ -161,6 +161,8 @@ export const DETALLES_POR_CLASE: Record<ClaseOrden, string[]> = {
     'Subir megas',
     'Bajar megas',
     'Punto nuevo',
+    // Pedido 2026-10-05: no viene del legacy, se abrió para la web.
+    'Punto Adicional',
     'Toma Adicional',
     'Equipo adicional',
     'AgregarInternet',
@@ -323,17 +325,24 @@ export function esReconexion(tipo?: string | null): boolean {
  * El TRASLADO de domicilio: el cliente se muda y hay que llevarle el servicio a la
  * casa nueva. Es el otro detalle del catálogo que necesita un dato que ninguno más
  * pide —la dirección destino— y el único que trae un cargo propio: el producto
- * 'Traslado' del catálogo, 30.000 sin IVA, como lo lleva facturando el legacy
- * (3.875 renglones).
+ * 'Traslado' del catálogo, sin IVA (50.000 desde el 2026-09-28; el legacy lo
+ * facturó a 30.000 en 3.875 renglones).
  */
 export const TRASLADO = 'Traslado';
+
+/**
+ * El TRASLADO INTERNO: mover el equipo de sitio dentro de la misma vivienda. No
+ * cambia la dirección ni el puerto, pero desde el 2026-09-28 se cobra: 25.000, la
+ * mitad del traslado de domicilio (ver `billing/cargos-orden.ts`).
+ */
+export const TRASLADO_INTERNO = 'Traslado interno De Equipos Red en cliente final';
 
 /**
  * ¿Esta orden mueve al cliente de casa?
  *
  * A propósito NO cubre 'Traslado interno De Equipos Red en cliente final', que es
  * mover el equipo de sitio DENTRO de la misma vivienda: ese no cambia la dirección
- * ni se cobra como traslado. Por eso se compara el texto entero y no `includes`,
+ * (tiene su propio cargo, `TRASLADO_INTERNO`). Por eso se compara el texto entero y no `includes`,
  * que es como lo mira la cascada de cierre (donde sí valen los dos, porque la nota
  * que deja sirve para ambos).
  */

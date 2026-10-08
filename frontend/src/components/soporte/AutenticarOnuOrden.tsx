@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Field";
 import { Icon } from "@/components/Icon";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
 import { mensajeDeError } from "@/lib/errores";
@@ -86,6 +87,8 @@ const modoVelocidad = (m: Modo) => m === "VELOCIDAD" || m === "AMBOS";
 type EquipoInv = { code: number; serial: string | null; bodega: string | null; status: string | null };
 type Candidato = {
   sn: string; fsp: string; model: string | null; vendor: string | null; mac: string | null;
+  /** OLT que la está viendo: en sedes con dos OLT (Yopal) el mismo puerto existe en las dos. */
+  oltId?: string | null; olt?: string | null;
   /**
    * Minutos que lleva anunciándose (`Ont autofind time` de la OLT). Es el dato
    * que separa la ONU recién conectada del ruido: el autofind de VILLANUEVA
@@ -118,7 +121,7 @@ type Auto = {
   deStock: boolean;
   motivo: string;
 };
-type VlanPuerto = { fsp: string; vlan: number | null; origen: string | null; ok: boolean | null; falta: string[]; vlanCatalogoId: string | null; branchId: string | null };
+type VlanPuerto = { oltId?: string | null; fsp: string; vlan: number | null; origen: string | null; ok: boolean | null; falta: string[]; vlanCatalogoId: string | null; branchId: string | null };
 type Estado = {
   /**
    * Por dónde se le da servicio a este abonado. `MIKROTIK` = tecnología sin OLT
@@ -163,9 +166,11 @@ type Estado = {
     reservado: boolean; anunciandose: boolean; sn: string | null; haceMin: number | null;
     impedimento: string | null; autenticada: boolean;
     /** Dónde la tiene dada de alta la OLT (leído en vivo por su serial). */
-    autenticadaEn?: { fsp: string; ontId: number; descripcion: string; runState: string } | null;
+    autenticadaEn?: { olt?: string; fsp: string; ontId: number; descripcion: string; runState: string } | null;
   } | null;
-  onuActual: { sn: string | null; frame: number | null; slot: number | null; port: number | null; ontId: number | null; runState: string | null } | null;
+  onuActual: { sn: string | null; frame: number | null; slot: number | null; port: number | null; ontId: number | null; runState: string | null; enOlt?: boolean | null } | null;
+  /** Las ONUs del abonado según la OLT en vivo (`enOlt`), para elegir cuál re-autenticar. */
+  onusRevisadas?: { sn: string; frame: number | null; slot: number | null; port: number | null; ontId: number | null; runState: string | null; enOlt: boolean | null }[];
   /**
    * ¿La VLAN del puerto donde está la ONU llega al PPPoE? (existe en la OLT, sale
    * por el uplink, y el Mikrotik tiene su interfaz y servidor PPPoE). `ok: false`
@@ -214,6 +219,22 @@ type Resultado = {
     run_state: string | null; config_state: string | null; match_state: string | null;
     servicePorts: string[]; avisos: string[]; nota?: string | null;
   } | null;
+  /** 'SENAL_RECHAZADA': la potencia no cumple el protocolo 4.5 y la ONU no quedó autenticada. */
+  codigo?: string;
+  /** Prueba de señal del protocolo 4.5: lo que recibe la ONU y cómo quedó. */
+  senal?: SenalOrden | null;
+  /** Se rechazó por señal y el alta recién hecha se quitó de la OLT. */
+  altaDeshecha?: boolean;
+};
+
+type SenalOrden = {
+  nivel: "OPTIMO" | "MARGINAL" | "CRITICO" | "SIN_LECTURA";
+  rx: number | null;
+  oltRx: number | null;
+  aprobada: boolean;
+  etiqueta: string;
+  accion: string;
+  forzada?: { por: string | null; motivo: string };
 };
 
 /** Etiqueta del desplegable: lo que el técnico necesita para reconocer SU equipo. */
@@ -223,6 +244,42 @@ function desdeHace(min: number | null | undefined): string | null {
   if (min < 60) return `hace ${min} min`;
   if (min < 60 * 24) return `hace ${Math.round(min / 60)} h`;
   return `hace ${Math.round(min / (60 * 24))} días`;
+}
+
+/**
+ * Una comprobación en UNA línea. El bloque llegó a apilar ocho recuadros de
+ * texto antes del botón y el técnico se perdía (2026-10-02): ahora cada cosa
+ * dice en una frase si está bien o no, y la explicación larga queda plegada
+ * para quien la necesite.
+ */
+type Tono = "ok" | "info" | "aviso" | "error";
+function Linea({ tono, titulo, abierta, children }: {
+  tono: Tono;
+  titulo: React.ReactNode;
+  /** Sale desplegada: el detalle trae algo que hay que pulsar o leer sí o sí. */
+  abierta?: boolean;
+  children?: React.ReactNode;
+}) {
+  const fondo = tono === "aviso" ? "bg-warning-soft" : tono === "error" ? "bg-error-soft" : "";
+  const color = tono === "ok" ? "text-success-text" : tono === "aviso" ? "text-warning-text" : tono === "error" ? "text-error-text" : "text-text-tertiary";
+  const cabecera = (
+    <>
+      <Icon name={tono === "ok" ? "check" : tono === "info" ? "info" : "alert-triangle"} size={14} className={`mt-0.5 shrink-0 ${color}`} />
+      <span className="min-w-0 flex-1 text-text-primary">{titulo}</span>
+    </>
+  );
+  if (!children) {
+    return <div className={`flex items-start gap-2 px-3 py-2 text-[12.5px] ${fondo}`}>{cabecera}</div>;
+  }
+  return (
+    <details open={abierta} className={`group px-3 py-2 text-[12.5px] ${fondo}`}>
+      <summary className="flex cursor-pointer list-none items-start gap-2 [&::-webkit-details-marker]:hidden">
+        {cabecera}
+        <Icon name="chevron-down" size={14} className="mt-0.5 shrink-0 text-text-tertiary transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="mt-1 pl-[22px] text-[12px] leading-relaxed text-text-secondary">{children}</div>
+    </details>
+  );
 }
 
 /**
@@ -236,66 +293,59 @@ function desdeHace(min: number | null | undefined): string | null {
  * elegir a mano sin que se viera el motivo de verdad.
  */
 function EquipoDelCliente({ e, onUsar }: { e: NonNullable<Estado["equipoAsignado"]>; onUsar: (sn: string) => void }) {
-  const nombre = (
+  const serial = <span className="font-mono font-semibold">{e.serial || e.sn || "sin serial"}</span>;
+  const ficha = (
     <>
-      <span className="font-mono font-semibold text-text-primary">{e.serial || e.sn || "sin serial"}</span>
-      {" · código "}<span className="font-semibold text-text-primary">{e.code}</span>
-      {e.bodega ? ` · bodega ${e.bodega}` : ""}
+      {e.reservado ? "Apartado para esta orden" : "Asignado al cliente"} · código <b>{e.code}</b>
+      {e.bodega ? ` · bodega ${e.bodega}` : ""}.
     </>
   );
-  const titulo = e.reservado ? "Equipo apartado para esta orden" : "Equipo asignado al cliente";
 
   // Listo: la OLT lo ve y nada impide montarlo. Es el caso en que el automático
   // lo elige solo, así que aquí solo se confirma en una línea.
   if (e.anunciandose && !e.impedimento) {
     return (
-      <div className="rounded-lg border border-success/40 bg-success-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
-        <Icon name="check" size={13} className="mr-1 inline text-success-text" />
-        {titulo}: {nombre}. La OLT ya lo está viendo{desdeHace(e.haceMin) ? ` (apareció ${desdeHace(e.haceMin)})` : ""}:
-        <b> listo para autenticar</b>.
-      </div>
+      <Linea tono="ok" titulo={<>Equipo del cliente {serial}: <b>listo para autenticar</b></>}>
+        {ficha} La OLT ya lo está viendo{desdeHace(e.haceMin) ? ` (apareció ${desdeHace(e.haceMin)})` : ""}.
+      </Linea>
     );
   }
   // Dada de alta en la OLT pero sin que el sistema lo supiera (alta de SmartOLT o
   // del cliente anterior). No sale en el autofind por eso, no por la fibra: se dice
-  // dónde está y se ofrece adoptarla para este cliente sin volver a darla de alta.
+  // dónde está y se ofrece usarla para este cliente: el servidor borra el alta
+  // vieja y la vuelve a autenticar (desde 2026-10-05; antes la adoptaba).
   if (e.autenticadaEn) {
     const a = e.autenticadaEn;
     return (
-      <div className="rounded-lg border border-warning bg-warning-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
-        <Icon name="alert-triangle" size={13} className="mr-1 inline text-warning-text" />
-        {titulo}: {nombre}. <b>Ya está autenticado en la OLT</b> en el puerto {a.fsp} · ONT {a.ontId}
-        {a.descripcion ? <> con el nombre «<span className="font-mono">{a.descripcion}</span>»</> : null}
-        {a.runState ? ` (${a.runState})` : ""}, por eso no aparece en la lista de espera.
+      <Linea tono="aviso" abierta titulo={<>Equipo del cliente {serial}: <b>ya está autenticado</b> en {a.olt ? `${a.olt} ` : ""}{a.fsp} · ONT {a.ontId}</>}>
+        {ficha} Por eso no aparece en la lista de espera
+        {a.descripcion ? <>; en la OLT tiene el nombre «<span className="font-mono">{a.descripcion}</span>»</> : null}
+        {a.runState ? ` (${a.runState})` : ""}.
         {e.sn && (
           <button type="button" className="ml-1 font-semibold text-brand hover:underline" onClick={() => onUsar(e.sn!)}>
             Usarlo en este cliente
           </button>
         )}
-        <span className="mt-1 block text-text-tertiary">
-          Se aprovecha el alta que ya tiene: se le pone el nombre y la velocidad de este cliente sin desconectarlo.
+        <span className="block text-text-tertiary">
+          Se borra el alta que tiene y se vuelve a autenticar a nombre de este cliente, con la velocidad de su plan. Tarda hasta un minuto y medio mientras la OLT la vuelve a ver.
         </span>
-      </div>
+      </Linea>
     );
   }
   // Ya tiene alta: no sale en el autofind y eso es lo normal, no un problema.
   if (e.autenticada) {
     return (
-      <p className="text-[11.5px] text-text-tertiary">
-        <Icon name="info" size={13} className="mr-1 inline" />
-        {titulo}: {nombre}. Ya está autenticado en la OLT, por eso no aparece en la lista de espera.
-      </p>
+      <Linea tono="info" titulo={<>Equipo del cliente {serial}: ya está autenticado</>}>
+        {ficha} Por eso no aparece en la lista de espera.
+      </Linea>
     );
   }
   return (
-    <div className="rounded-lg border border-warning bg-warning-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
-      <Icon name="alert-triangle" size={13} className="mr-1 inline text-warning-text" />
-      {titulo}: {nombre}.{" "}
-      <b>La OLT todavía no lo ve</b>, así que no está listo para autenticar: compruebe que está conectado
-      a la fibra y encendido, y refresque. Si el técnico montó otro equipo, elíjalo abajo — al autenticarlo,
-      este vuelve solo a la bodega.
+    <Linea tono="aviso" titulo={<>Equipo del cliente {serial}: <b>la OLT todavía no lo ve</b></>}>
+      {ficha} Compruebe que está conectado a la fibra y encendido, y refresque. Si el técnico montó otro
+      equipo, elíjalo arriba — al autenticarlo, este vuelve solo a la bodega.
       {e.impedimento && <span className="mt-1 block text-error-text">{e.impedimento}</span>}
-    </div>
+    </Linea>
   );
 }
 
@@ -306,7 +356,7 @@ function etiquetaCandidato(c: Candidato): string {
   const hace = desdeHace(c.haceMin);
   if (hace) partes.push(hace);
   if (c.model) partes.push(c.model);
-  if (c.fsp) partes.push(`puerto ${c.fsp}`);
+  if (c.fsp) partes.push(`puerto ${c.fsp}${c.olt ? ` de ${c.olt}` : ""}`);
   // La bodega de la que salió el equipo va en la propia línea: es el dato con el
   // que el técnico reconoce si es suyo o si lo cogió de otro sitio.
   if (c.equipo?.bodega) partes.push(`bodega ${c.equipo.bodega}`);
@@ -335,6 +385,14 @@ function fraseDelAuto(a: Auto): string {
     : "Este serial no está en el inventario.";
 }
 
+/** Lo mismo en cinco palabras, para el renglón de comprobaciones. */
+function tituloDelAuto(a: Auto): string {
+  const eq = a.equipo;
+  if (a.origen === "DEL_ABONADO") return eq?.reservado ? `Es el equipo reservado para esta orden (código ${eq.code})` : "Es el equipo que ya tiene el cliente";
+  if (a.origen === "BODEGA_SEDE") return `Sale de la bodega ${eq?.bodega ?? "de su sede"}${eq ? ` (código ${eq.code})` : ""}`;
+  return eq ? `Serial sin registrar: se le carga la unidad ${eq.code}` : "Serial sin registrar en el inventario";
+}
+
 export function AutenticarOnuOrden({
   ticketId, tipo, estadoOrden, onDone,
 }: {
@@ -344,7 +402,7 @@ export function AutenticarOnuOrden({
   estadoOrden?: string | null;
   onDone?: () => void;
 }) {
-  const { authFetch } = useAuth();
+  const { authFetch, isSuperadmin } = useAuth();
   const modo = modoDeOrden(tipo);
   /** Cambia el texto del bloque: aquí la ONU de la TV puede estar ya autenticada. */
   const porAgregarInternet = esAgregarInternet((tipo ?? "").toLowerCase());
@@ -367,6 +425,12 @@ export function AutenticarOnuOrden({
    * el toast la pantalla se quedaba igual y parecía que el botón no hacía nada.
    */
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Lo último que se mandó a autenticar: si la señal se rechaza, el
+   * superadministrador puede repetirlo tal cual, forzado y con motivo.
+   */
+  const [ultimoAutenticar, setUltimoAutenticar] = useState<Record<string, unknown> | null>(null);
+  const [motivoForzar, setMotivoForzar] = useState("");
   /** Serial escrito a mano: la ONU no está en el autofind porque YA está autenticada. */
   const [manual, setManual] = useState(false);
   /** El técnico ha pedido elegir él la ONU, teniendo el sistema una elegida. */
@@ -374,6 +438,17 @@ export function AutenticarOnuOrden({
   /** Equipo del inventario al que corresponde la ONU, cuando su SN no está registrado. */
   const [equipmentId, setEquipmentId] = useState("");
   const [inventario, setInventario] = useState<{ id: string; code: number; serial: string | null; mac: string | null; warehouse: string | null }[]>([]);
+  /** La ONU a la que se le cambia la velocidad (en «subir megas»: la que se desautentica). */
+  const [snVel, setSnVel] = useState("");
+  const [confirmaReaut, setConfirmaReaut] = useState(false);
+  /** Qué está haciendo el botón pulsado, para el aviso mientras la OLT trabaja. */
+  const [trabajando, setTrabajando] = useState<string | null>(null);
+  const resultadoRef = useRef<HTMLDivElement | null>(null);
+  // El resultado sale al pie de una tarjeta larga: se lleva a la vista para que
+  // nadie se quede sin saber si quedó (2026-09-24, orden 509094).
+  useEffect(() => {
+    if (res || error) resultadoRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [res, error]);
 
   const cargar = useCallback(async () => {
     setCargando(true);
@@ -394,6 +469,7 @@ export function AutenticarOnuOrden({
       setSn(d.auto?.sn ?? suya?.sn ?? (libres.length === 1 ? libres[0].sn : ""));
       setEquipmentId("");
       setAMano(false);
+      setSnVel(d.onuActual?.sn ?? "");
     } catch (e) {
       toast(mensajeDeError(e), "alert-triangle");
       setEst(null);
@@ -419,17 +495,29 @@ export function AutenticarOnuOrden({
 
   if (!modo) return null;
 
-  async function ejecutar(url: string, body?: unknown) {
+  async function ejecutar(url: string, body?: Record<string, unknown>, queHace?: string) {
+    if (url.endsWith("/onu/autenticar")) {
+      const resto = { ...(body ?? {}) };
+      delete resto.forzarSenal;
+      setUltimoAutenticar(resto);
+    }
     setBusy(true);
     setRes(null);
     setError(null);
+    setTrabajando(queHace ?? null);
     try {
       const r = await authFetch(url, { method: "POST", body: JSON.stringify(body ?? {}) });
-      const d = await r.json();
+      // Si el proxy corta por tiempo la respuesta no es JSON, pero la OLT pudo
+      // terminar igual: se dice así y se vuelve a consultar.
+      const d = await r.json().catch(() => {
+        void cargar();
+        onDone?.();
+        throw new Error("La OLT tardó demasiado en responder y no llegó la confirmación. Pulse «Refrescar» y revise las notas de la orden: ahí queda anotado si se hizo.");
+      });
       if (!r.ok) throw new Error(d?.message || "No se pudo completar la operación");
       setRes(d);
       if (d.ok) {
-        toast(d.dryRun ? "Plan generado (dry-run)" : "Listo", "check");
+        toast(d.dryRun ? "Plan generado (dry-run)" : (d.message || "Listo"), "check");
         onDone?.();
         void cargar();
       } else {
@@ -443,6 +531,7 @@ export function AutenticarOnuOrden({
       toast(msg, "alert-triangle");
     } finally {
       setBusy(false);
+      setTrabajando(null);
     }
   }
 
@@ -550,10 +639,9 @@ export function AutenticarOnuOrden({
                 <Icon name="gauge" size={13} className="text-brand" />
                 {/* `trafficIn` es el índice `inbound` = columna RX = BAJADA del
                     abonado; `trafficOut` (`outbound`/TX) es la subida. */}
-                <b className="text-text-primary">Velocidad del plan:</b>
                 {vel.mbpsIn != null ? `${vel.mbpsIn.toLocaleString("es-CO")} Mbps bajada` : `traffic-table ${vel.trafficIn ?? "—"} bajada`}
-                {" / "}
-                {vel.mbpsOut != null ? `${vel.mbpsOut.toLocaleString("es-CO")} Mbps subida` : `traffic-table ${vel.trafficOut ?? "—"} subida`}
+                {" · "}
+                {vel.mbpsOut != null ? `${vel.mbpsOut.toLocaleString("es-CO")} subida` : `traffic-table ${vel.trafficOut ?? "—"} subida`}
               </span>
             )}
           </div>
@@ -584,85 +672,60 @@ export function AutenticarOnuOrden({
               {soloManual && (
                 <div className="rounded-lg border border-warning bg-warning-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
                   <Icon name="alert-triangle" size={13} className="mr-1 inline text-warning-text" />
-                  {est.bloqueo!.message} Si el equipo <b>ya estaba autenticado</b> (instalación anterior o
-                  dada de alta desde SmartOLT), escriba abajo el serial de su etiqueta: se aprovecha el alta
-                  que ya tiene y solo se le ajusta lo que le falte.
+                  {est.bloqueo!.message} Si el equipo <b>ya estaba autenticado</b>, escriba el serial de su
+                  etiqueta: se aprovecha el alta que ya tiene.
                 </div>
               )}
 
-              {/* La caja que el papel dice que es suya, y si la OLT la ve.
-                  Sin esto, un cliente CON equipo asignado veía "elija a mano" sin
-                  enterarse de que su equipo no era ninguna de las que suenan, y
-                  no había forma de saber si ya se podía autenticar o no. */}
-              {est.equipoAsignado && (
-                <EquipoDelCliente
-                  e={est.equipoAsignado}
-                  onUsar={(s) => { setAMano(true); setManual(true); setSn(s); setEquipmentId(""); }}
-                />
-              )}
-              {(est.onusDelCliente?.length ?? 0) > 1 && (
-                <div className="rounded-lg border border-warning bg-warning-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
-                  <Icon name="alert-triangle" size={13} className="mr-1 inline text-warning-text" />
-                  <b>El cliente tiene {est.onusDelCliente!.length} ONUs autenticadas a su nombre:</b>{" "}
-                  {est.onusDelCliente!.map((o) => `${o.sn} en ${o.olt?.name ?? "OLT"} ${o.frame}/${o.slot}/${o.port} ONT ${o.ontId} (${o.runState ?? "—"})`).join(" · ")}.
-                  {" "}Si una es el equipo retirado, hay que eliminarla en Red › OLT: autenticar la nueva no la borra.
-                </div>
-              )}
-
+              {/* 1 · QUÉ se va a autenticar. Es lo único que el técnico tiene que
+                  mirar de verdad, así que va grande y arriba. */}
               {autoListo && est.auto && (
-                <div className="rounded-lg border border-brand/40 bg-brand-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
-                  <p>
-                    <Icon name="wand-sparkles" size={13} className="mr-1 inline text-brand" />
-                    Se autenticará la ONU <span className="font-mono font-semibold text-text-primary">{est.auto.sn}</span>
-                    {desdeHace(est.auto.haceMin) ? `, que apareció ${desdeHace(est.auto.haceMin)}` : ""}
-                    {" — "}{fraseDelAuto(est.auto)}
-                  </p>
-                  {/* El único caso en que el automático sigue adelante avisando:
-                      no quedaban unidades en la bodega de la sede. El cliente
-                      navega igual; lo que queda pendiente es el inventario. */}
-                  {est.auto.motivo && (
-                    <p className="mt-1 text-warning-text">
-                      <Icon name="alert-triangle" size={13} className="mr-1 inline" />
-                      {est.auto.motivo}
-                    </p>
-                  )}
+                <div className="rounded-lg border border-brand/40 bg-brand-soft px-3 py-2.5">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-text-tertiary">ONU que se va a autenticar</div>
+                  <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2">
+                    <span className="break-all font-mono text-[17px] font-bold text-text-primary">{est.auto.sn}</span>
+                    {desdeHace(est.auto.haceMin) && (
+                      <span className="text-[12px] text-text-secondary">apareció {desdeHace(est.auto.haceMin)}</span>
+                    )}
+                  </div>
                   {/* La comprobación que ningún dato puede hacer por él: dos
                       instalaciones a la vez en la misma sede ven la misma ONU
                       recién aparecida, y el sistema no sabe en qué casa está.
                       Un vistazo a la etiqueta lo resuelve; sin pedirlo, el
                       automático sería confiar a ciegas. */}
-                  <p className="mt-1 text-text-tertiary">
-                    Compruebe que coincide con el serial de la etiqueta del equipo que acaba de instalar.
+                  <p className="mt-1 text-[12px] text-text-secondary">
+                    Compárela con la etiqueta del equipo instalado.{" "}
+                    <button type="button" className="font-semibold text-brand hover:underline" onClick={() => setAMano(true)}>
+                      ¿No es esa? Elegir otra
+                    </button>
                   </p>
-                  <button type="button" className="mt-1 font-semibold text-brand hover:underline" onClick={() => setAMano(true)}>
-                    No es esa: prefiero elegirla yo
-                  </button>
+                  {/* El único caso en que el automático sigue adelante avisando:
+                      no quedaban unidades en la bodega de la sede. El cliente
+                      navega igual; lo que queda pendiente es el inventario. */}
+                  {est.auto.motivo && (
+                    <p className="mt-1 text-[12px] text-warning-text">
+                      <Icon name="alert-triangle" size={13} className="mr-1 inline" />
+                      {est.auto.motivo}
+                    </p>
+                  )}
                 </div>
-              )}
-              {/* Por qué NO se decide sola: dos ONUs anunciándose, ninguna del
-                  cliente, una de otra bodega… El técnico tiene que saber qué mira. */}
-              {!autoListo && !escribiendo && est.auto && !est.auto.sn && (
-                <p className="text-[11.5px] text-text-tertiary">
-                  <Icon name="info" size={13} className="mr-1 inline" />
-                  {est.auto.motivo}
-                </p>
               )}
 
               {!autoListo && (<>
               {escribiendo ? (
-                <label className="text-[12px] text-text-secondary">
+                <label className="text-[12px] font-semibold text-text-secondary">
                   Serial (SN) de la ONU instalada
                   <input
                     value={sn}
                     onChange={(e) => setSn(e.target.value.toUpperCase().trim())}
                     placeholder="Ej.: 5A544547C9E3311B o ZTEGC9E3311B"
-                    className="mt-0.5 w-full rounded-lg border border-border-default bg-surface px-3 py-1.5 font-mono text-[12.5px] text-text-primary"
+                    className="mt-0.5 w-full rounded-lg border border-border-default bg-surface px-3 py-1.5 font-mono text-[12.5px] font-normal text-text-primary"
                   />
                 </label>
               ) : (
-                <label className="text-[12px] text-text-secondary">
+                <label className="text-[12px] font-semibold text-text-secondary">
                   ONU a autenticar
-                  <Select value={sn} onChange={(e) => setSn(e.target.value)} className="mt-0.5">
+                  <Select value={sn} onChange={(e) => setSn(e.target.value)} className="mt-0.5 font-normal">
                     <option value="">— Elija el equipo instalado ({est.candidatos.length} esperando) —</option>
                     {est.candidatos.map((c) => (
                       <option key={c.sn} value={c.sn}>{etiquetaCandidato(c)}</option>
@@ -673,8 +736,7 @@ export function AutenticarOnuOrden({
               <p className="text-[11.5px] text-text-tertiary">
                 {escribiendo ? (
                   <>
-                    Se busca ese serial en la OLT: si está esperando, se autentica; si ya estaba dado de alta,
-                    se adopta sin tocar su enlace (el abonado no se queda sin servicio).
+                    Si está esperando se autentica; si ya estaba dado de alta, se desautentica y se vuelve a autenticar en este cliente.
                     {!soloManual && (
                       <button type="button" className="ml-1 font-semibold text-brand hover:underline" onClick={() => { setManual(false); setSn(""); }}>
                         Volver a la lista
@@ -683,7 +745,7 @@ export function AutenticarOnuOrden({
                   </>
                 ) : (
                   <>
-                    Ordenadas por la que apareció hace menos. ★ equipo ya registrado a este abonado · ⚠ revise el aviso · ⛔ instalado en otro cliente, no se puede usar.
+                    Primero la más reciente. ★ del abonado · ⚠ con aviso · ⛔ de otro cliente.
                     <button type="button" className="ml-1 font-semibold text-brand hover:underline" onClick={() => { setManual(true); setSn(""); }}>
                       ¿No aparece el suyo?
                     </button>
@@ -691,8 +753,8 @@ export function AutenticarOnuOrden({
                 )}
               </p>
 
-              {/* Lo que pasa con el equipo elegido: de qué bodega salió, si está
-                  en otro cliente (no se deja seguir) o si no está en inventario. */}
+              {/* Lo que pasa con el equipo elegido: si está en otro cliente (no
+                  se deja seguir) o trae un aviso. Esto SÍ va en recuadro: frena. */}
               {elegida?.impedimento && (
                 <p className="rounded-lg border border-error-text/40 bg-error-soft px-3 py-2 text-[12.5px] leading-relaxed text-text-secondary">
                   <Icon name="alert-triangle" size={13} className="mr-1 inline text-error-text" />
@@ -705,22 +767,20 @@ export function AutenticarOnuOrden({
                   {elegida.aviso} Revise que sea el equipo que usted instaló antes de continuar.
                 </p>
               )}
-              {elegida?.equipo && !elegida.impedimento && (
-                <p className="text-[11.5px] text-text-tertiary">
-                  Equipo <b>{elegida.equipo.code}</b> · bodega {elegida.equipo.bodega ?? "—"}
-                  {elegida.equipo.status ? ` · ${elegida.equipo.status}` : ""} — al autenticar queda registrado a nombre del abonado.
-                </p>
-              )}
 
               {/* SN que no está en el inventario. No se inventa una unidad nueva:
                   se pregunta a cuál corresponde y se le graba el serial bueno.
                   Es opcional — el alta en la OLT no depende de esto. */}
               {sinRegistrar && (
-                <div className="rounded-lg border border-border-subtle bg-surface-2 p-3">
-                  <p className="mb-1.5 text-[12px] text-text-secondary">
-                    Este serial no está en el inventario. Si sabe a qué equipo de bodega corresponde,
-                    indíquelo: quedará a nombre del abonado y se le corregirá el serial con el que
-                    reporta la OLT. <span className="text-text-tertiary">(opcional)</span>
+                <details className="group rounded-lg border border-border-subtle bg-surface-2 px-3 py-2">
+                  <summary className="flex cursor-pointer list-none items-start gap-2 text-[12.5px] text-text-primary [&::-webkit-details-marker]:hidden">
+                    <Icon name="info" size={14} className="mt-0.5 shrink-0 text-text-tertiary" />
+                    <span className="min-w-0 flex-1">Este serial no está en el inventario <span className="text-text-tertiary">· indicar el equipo (opcional)</span></span>
+                    <Icon name="chevron-down" size={14} className="mt-0.5 shrink-0 text-text-tertiary transition-transform group-open:rotate-180" />
+                  </summary>
+                  <p className="mb-1.5 mt-1 text-[12px] text-text-secondary">
+                    Si sabe a qué equipo de bodega corresponde, indíquelo: quedará a nombre del abonado y se
+                    le corregirá el serial con el que reporta la OLT.
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <Select value={equipmentId} onChange={(e) => setEquipmentId(e.target.value)} className="min-w-[240px] flex-1">
@@ -737,34 +797,88 @@ export function AutenticarOnuOrden({
                       onChange={(e) => void buscarInventario(e.target.value)}
                     />
                   </div>
-                </div>
+                </details>
               )}
               </>)}
-              {/* La otra mitad del trabajo, dicha antes de hacerla: autenticar la
-                  ONU le da ENLACE, pero quien le da internet es su secret en la
-                  Mikrotik, y este cliente todavía no lo tiene. */}
-              {est.altaMikrotikPendiente && (
-                <p className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-1.5 text-[11.5px] text-text-secondary">
-                  <Icon name="info" size={13} className="mr-1 inline text-text-tertiary" />
-                  Este abonado todavía no tiene datos de conexión en la Mikrotik. Al autenticar se le crean
-                  solos —usuario, clave y su secret con el perfil del plan—: no hace falta ir a crearlos a mano.
-                </p>
-              )}
+
               {(() => {
                 // El aviso del puerto de la ONU que está elegida (o, sin elegir, el primero).
                 const norm = (f: string) => f.replace(/\s+/g, "");
-                const v = (elegida?.fsp ? est.vlanPuertos?.find((x) => norm(x.fsp) === norm(String(elegida.fsp))) : null) ?? est.vlanPuerto;
-                return v ? <AvisoVlanPuerto v={v} /> : null;
+                const v = (elegida?.fsp ? est.vlanPuertos?.find((x) => norm(x.fsp) === norm(String(elegida.fsp)) && (!x.oltId || !elegida.oltId || x.oltId === elegida.oltId)) : null) ?? est.vlanPuerto;
+                const a = est.auto;
+                return (<>
+                  {/* La VLAN rota es lo único de la lista que deja al cliente sin
+                      internet aunque todo lo demás salga bien: no se pliega. */}
+                  {v?.ok === false && <AvisoVlanPuerto v={v} />}
+
+                  {/* 2 · Comprobaciones, una por línea. El detalle se abre al tocar. */}
+                  <div className="divide-y divide-border-subtle overflow-hidden rounded-lg border border-border-subtle">
+                    {/* La caja que el papel dice que es suya, y si la OLT la ve.
+                        Sin esto, un cliente CON equipo asignado veía "elija a mano" sin
+                        enterarse de que su equipo no era ninguna de las que suenan. */}
+                    {est.equipoAsignado && (
+                      <EquipoDelCliente
+                        e={est.equipoAsignado}
+                        onUsar={(x) => { setAMano(true); setManual(true); setSn(x); setEquipmentId(""); }}
+                      />
+                    )}
+                    {/* De dónde sale la elegida. Si es la del cliente y ya se dijo
+                        arriba que está lista, repetirlo sería ruido. */}
+                    {autoListo && a && !(a.origen === "DEL_ABONADO" && est.equipoAsignado?.anunciandose) && (
+                      <Linea tono="info" titulo={tituloDelAuto(a)}>{fraseDelAuto(a)}</Linea>
+                    )}
+                    {/* Por qué NO se decide sola: dos ONUs anunciándose, ninguna del
+                        cliente, una de otra bodega… El técnico tiene que saber qué mira. */}
+                    {!autoListo && !escribiendo && a && !a.sn && a.motivo && (
+                      <Linea tono="info" titulo="Hay que elegirla a mano" abierta>{a.motivo}</Linea>
+                    )}
+                    {!autoListo && elegida?.equipo && !elegida.impedimento && (
+                      <Linea
+                        tono="ok"
+                        titulo={<>Equipo <b>{elegida.equipo.code}</b> · bodega {elegida.equipo.bodega ?? "—"}{elegida.equipo.status ? ` · ${elegida.equipo.status}` : ""}</>}
+                      >
+                        Al autenticar queda registrado a nombre del abonado.
+                      </Linea>
+                    )}
+                    {(est.onusDelCliente?.length ?? 0) > 1 && (
+                      <Linea tono="aviso" titulo={<><b>El cliente tiene {est.onusDelCliente!.length} ONUs autenticadas</b> a su nombre</>}>
+                        {est.onusDelCliente!.map((o) => `${o.sn} en ${o.olt?.name ?? "OLT"} ${o.frame}/${o.slot}/${o.port} ONT ${o.ontId} (${o.runState ?? "—"})`).join(" · ")}.
+                        {" "}Si una es el equipo retirado, hay que eliminarla en Red › OLT: autenticar la nueva no la borra.
+                      </Linea>
+                    )}
+                    {est.onuActual?.sn && (est.onusDelCliente?.length ?? 0) <= 1 && (
+                      <Linea tono="info" titulo={<>Ya tiene vinculada la ONU <span className="font-mono">{est.onuActual.sn}</span></>}>
+                        {est.onuActual.slot != null ? `Está en ${est.onuActual.frame}/${est.onuActual.slot}/${est.onuActual.port}. ` : ""}
+                        Si es un cambio de equipo, retire la anterior desde Red › OLT cuando termine.
+                      </Linea>
+                    )}
+                    {v && v.ok !== false && <AvisoVlanPuerto v={v} />}
+                    {/* La otra mitad del trabajo, dicha antes de hacerla: autenticar la
+                        ONU le da ENLACE, pero quien le da internet es su secret en la
+                        Mikrotik, y este cliente todavía no lo tiene. */}
+                    {est.altaMikrotikPendiente && (
+                      <Linea tono="info" titulo="Su usuario y clave de internet se crean solos al autenticar">
+                        Este abonado todavía no tiene datos de conexión en la Mikrotik. Se le crean usuario, clave y
+                        su secret con el perfil del plan: no hace falta ir a crearlos a mano.
+                      </Linea>
+                    )}
+                    {/* Protocolo 4.5: la OLT solo da la señal de una ONU ya autenticada, así
+                        que el aviso va SIEMPRE antes del botón; el servidor mide y deshace
+                        el alta si no cumple (ver senal-optica-aceptacion.ts). */}
+                    <Linea tono="aviso" titulo={<>Señal RX exigida: <b>entre -15 y -24 dBm</b></>}>
+                      Mida con el power meter antes de autenticar. El sistema mide la señal en la OLT: si está por
+                      fuera de ese rango (Marginal -25 a -27 · Crítico peor que -28) <b>la ONU no queda autenticada</b> y
+                      tiene que corregir la fibra (limpieza, macrocurvaturas, estrangulamientos, conector, empalmes o
+                      drop) y volver a intentar.
+                    </Linea>
+                  </div>
+                </>);
               })()}
-              {est.onuActual?.sn && (
-                <p className="rounded-lg bg-surface-2 px-3 py-1.5 text-[11.5px] text-text-tertiary">
-                  Ojo: este abonado ya tiene la ONU <span className="font-mono">{est.onuActual.sn}</span> vinculada
-                  {est.onuActual.slot != null ? ` en ${est.onuActual.frame}/${est.onuActual.slot}/${est.onuActual.port}` : ""}.
-                  Si es un cambio de equipo, retire la anterior desde Red › OLT cuando termine.
-                </p>
-              )}
+
+              {/* 3 · El botón. A todo el ancho en el celular, que es donde se usa. */}
               <div className="flex justify-end">
                 <Button
+                  className="w-full sm:w-auto"
                   disabled={busy || (!autoListo && !puedeAutenticar)}
                   onClick={() => void ejecutar(
                     `/support/tickets/${ticketId}/onu/autenticar`,
@@ -775,10 +889,10 @@ export function AutenticarOnuOrden({
                   )}
                 >
                   <Icon name="wand-sparkles" size={15} className="mr-1" />
-                  {busy ? "Autenticando…"
+                  {busy ? "Autenticando y midiendo señal…"
                     : !est.live ? "Generar plan (dry-run)"
                     : autoListo ? "Autenticar automáticamente"
-                    : escribiendo ? "Autenticar o adoptar ONU"
+                    : escribiendo ? "Autenticar ONU"
                     : "Autenticar ONU"}
                 </Button>
               </div>
@@ -805,30 +919,86 @@ export function AutenticarOnuOrden({
                   Queda en el mismo puerto y con la misma configuración; el cliente pierde la conexión unos segundos mientras se vuelve a autenticar.
                 </p>
               )}
-              <p className="text-[12.5px] text-text-secondary">
-                ONU del abonado: <span className="font-mono font-semibold text-text-primary">{est.onuActual?.sn ?? "—"}</span>
-                {est.onuActual?.slot != null && <span className="ml-2 text-text-tertiary">puerto {est.onuActual.frame}/{est.onuActual.slot}/{est.onuActual.port}</span>}
-                {est.onuActual?.runState && <span className="ml-2 text-text-tertiary">({est.onuActual.runState})</span>}
-              </p>
-              <div className="flex justify-end">
-                {/* Sin ONU vinculada no hay service-port que tocar. En modo AMBOS
-                    eso ya no bloquea la pantalla —arriba puede autenticar—, pero
-                    el botón sí tiene que estar apagado y decir por qué. */}
-                <Button
-                  disabled={busy || !est.onuActual?.sn}
-                  onClick={() => void ejecutar(`/support/tickets/${ticketId}/onu/velocidad`)}
-                >
-                  <Icon name="gauge" size={15} className="mr-1" />
-                  {busy ? (subeMegas ? "Re-autenticando…" : "Aplicando…")
-                    : !est.onuActual?.sn ? "Sin ONU vinculada"
-                    : !est.live ? "Generar plan (dry-run)"
-                    : subeMegas ? "Re-autenticar con el plan nuevo" : "Aplicar velocidad del plan"}
-                </Button>
-              </div>
+              {(() => {
+                const revisadas = est.onusRevisadas ?? [];
+                const elegida = revisadas.find((o) => o.sn === snVel) ?? est.onuActual;
+                const pos = (o: { frame: number | null; slot: number | null; port: number | null; ontId: number | null }) =>
+                  o.slot != null ? `${o.frame}/${o.slot}/${o.port}${o.ontId != null ? ` · ONT ${o.ontId}` : ""}` : "";
+                const enOlt = (o: { enOlt?: boolean | null; runState: string | null }) =>
+                  o.enOlt === false ? "no está en la OLT" : o.runState ?? "";
+                const noEsta = elegida?.enOlt === false;
+                return (<>
+                  {revisadas.length > 1 ? (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[12px] text-text-secondary">El abonado tiene {revisadas.length} ONUs vinculadas. ¿Cuál tiene instalada?</span>
+                      <Select value={snVel} onChange={(e) => setSnVel(e.target.value)} className="font-mono">
+                        {revisadas.map((o) => (
+                          <option key={o.sn} value={o.sn}>
+                            {o.sn} · {pos(o) || "sin puerto"} · {enOlt(o) || "—"}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : (
+                    <p className="text-[12.5px] text-text-secondary">
+                      ONU del abonado: <span className="font-mono font-semibold text-text-primary">{elegida?.sn ?? "—"}</span>
+                      {elegida && pos(elegida) && <span className="ml-2 text-text-tertiary">puerto {pos(elegida)}</span>}
+                      {elegida && enOlt(elegida) && <span className="ml-2 text-text-tertiary">({enOlt(elegida)})</span>}
+                    </p>
+                  )}
+                  {noEsta && (
+                    <p className="rounded-lg border border-warning bg-warning-soft px-3 py-1.5 text-[11.5px] text-text-secondary">
+                      <Icon name="alert-triangle" size={13} className="mr-1 inline text-warning-text" />
+                      La OLT no tiene dada de alta la ONU {elegida?.sn}: no hay nada que desautenticar. Si el cliente tiene otro equipo, autentíquelo arriba.
+                    </p>
+                  )}
+                  <div className="flex justify-end">
+                    {/* Sin ONU vinculada no hay service-port que tocar. En modo AMBOS
+                        eso ya no bloquea la pantalla —arriba puede autenticar—, pero
+                        el botón sí tiene que estar apagado y decir por qué. */}
+                    <Button
+                      disabled={busy || !elegida?.sn || noEsta}
+                      onClick={() => subeMegas && est.live
+                        ? setConfirmaReaut(true)
+                        : void ejecutar(`/support/tickets/${ticketId}/onu/velocidad`, elegida?.sn ? { sn: elegida.sn } : {})}
+                    >
+                      <Icon name={subeMegas ? "refresh-cw" : "gauge"} size={15} className="mr-1" />
+                      {busy ? (subeMegas ? "Re-autenticando…" : "Aplicando…")
+                        : !elegida?.sn ? "Sin ONU vinculada"
+                        : !est.live ? "Generar plan (dry-run)"
+                        : subeMegas ? "Desautenticar y volver a autenticar" : "Aplicar velocidad del plan"}
+                    </Button>
+                  </div>
+                  <ConfirmDialog
+                    open={confirmaReaut}
+                    title="Desautenticar y volver a autenticar"
+                    icon="refresh-cw"
+                    confirmLabel="Desautenticar y volver a autenticar"
+                    message={<>Se borra la ONU <b className="font-mono">{elegida?.sn}</b> de la OLT y se vuelve a dar de alta en el mismo puerto con las megas de <b>{est.plan?.name ?? "el plan de la orden"}</b>.</>}
+                    detail="El cliente pierde la conexión unos segundos. Si el alta nueva falla, se intenta dejar como estaba con la velocidad anterior."
+                    onClose={() => setConfirmaReaut(false)}
+                    onConfirm={() => {
+                      setConfirmaReaut(false);
+                      void ejecutar(`/support/tickets/${ticketId}/onu/velocidad`, { sn: elegida?.sn },
+                        `Desautenticando la ONU ${elegida?.sn ?? ""} y volviéndola a autenticar con ${est.plan?.name ?? "el plan de la orden"}…`);
+                    }}
+                  />
+                </>);
+              })()}
             </div>
             )}
           </>)}
 
+          <div ref={resultadoRef} />
+          {busy && trabajando && (
+            <div className="mt-3 flex items-center gap-2 rounded-lg border border-brand/30 bg-brand/5 p-3 text-[12.5px] text-text-primary">
+              <Icon name="loader" size={15} className="shrink-0 animate-spin text-brand" />
+              <div>
+                <div className="font-semibold">{trabajando}</div>
+                <p className="mt-0.5 text-text-secondary">Puede tardar hasta un minuto. No cierre ni recargue la página.</p>
+              </div>
+            </div>
+          )}
           {error && (
             <div className="mt-3 flex items-start gap-2 rounded-lg border border-error-subtle bg-error-soft p-3 text-[12px] text-text-primary">
               <Icon name="alert-triangle" size={14} className="mt-0.5 shrink-0 text-error-text" />
@@ -840,6 +1010,35 @@ export function AutenticarOnuOrden({
           )}
 
           {res && <ResultadoOnu res={res} />}
+          {/* Solo el superadministrador puede saltarse el protocolo, y con motivo:
+              queda en las notas de la orden. */}
+          {res?.codigo === "SENAL_RECHAZADA" && isSuperadmin && ultimoAutenticar && (
+            <div className="mt-2 flex flex-col gap-2 rounded-lg border border-border-subtle bg-surface-2 p-3 text-[12px]">
+              <div className="font-semibold text-text-primary">Autenticar de todos modos (superadministrador)</div>
+              <textarea
+                value={motivoForzar}
+                onChange={(e) => setMotivoForzar(e.target.value)}
+                rows={2}
+                maxLength={500}
+                placeholder="Motivo (mínimo 10 caracteres). Queda en las notas de la orden."
+                className="w-full rounded-md border border-border-default bg-surface-1 px-2 py-1.5 text-[12.5px] text-text-primary"
+              />
+              <div className="flex justify-end">
+                <Button
+                  variant="secondary"
+                  disabled={busy || motivoForzar.trim().length < 10}
+                  onClick={() => void ejecutar(
+                    `/support/tickets/${ticketId}/onu/autenticar`,
+                    { ...ultimoAutenticar, forzarSenal: motivoForzar.trim() },
+                    "Autenticando con la señal fuera de rango…",
+                  )}
+                >
+                  <Icon name="alert-triangle" size={14} className="mr-1" />
+                  Forzar autenticación
+                </Button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -860,8 +1059,9 @@ function ResultadoOnu({ res }: { res: Resultado }) {
     <div className={`mt-3 rounded-lg border p-3 text-[12px] ${problema ? "border-warning bg-warning-soft" : "border-success-text/30 bg-success-soft"}`}>
       <div className="flex items-center gap-1.5 font-semibold text-text-primary">
         <Icon name={problema ? "alert-triangle" : "check"} size={14} className={problema ? "text-warning-text" : "text-success-text"} />
-        {res.ok ? (res.message ?? "Listo") : (res.error ?? "No se pudo completar")}
+        {res.ok ? (res.message ?? "Listo") : res.codigo === "SENAL_RECHAZADA" ? "ONU no autenticada: la señal no cumple el protocolo" : (res.error ?? "No se pudo completar")}
       </div>
+      {res.senal && <BloqueSenal senal={res.senal} deshecha={res.altaDeshecha} rechazada={res.codigo === "SENAL_RECHAZADA"} />}
       {res.ontId && (
         <div className="mt-1">
           {res.adoptada ? "ONT-ID" : "ONT-ID asignado"}: <span className="font-mono font-bold">{res.ontId}</span>{res.fsp ? ` · puerto ${res.fsp}` : ""}
@@ -897,13 +1097,6 @@ function ResultadoOnu({ res }: { res: Resultado }) {
           <b>Mikrotik:</b> {res.altaMikrotik.mensaje}
         </div>
       )}
-      {res.equipo && (
-        <div className="mt-1 text-text-secondary">
-          Equipo <b>{res.equipo.code}</b> registrado a nombre del abonado
-          {res.equipo.bodega ? ` · salió de la bodega ${res.equipo.bodega}` : ""}
-          {res.equipo.serialCorregido ? " · se corrigió su serial con el que reporta la OLT" : ""}.
-        </div>
-      )}
       {/* El automático siguió adelante pero el inventario quedó a medias (no
           había unidades en la bodega de la sede). Se dice: alguien tiene que
           cargarle el equipo a mano. */}
@@ -925,21 +1118,6 @@ function ResultadoOnu({ res }: { res: Resultado }) {
           {res.liberacion.avisos.map((a, i) => <li key={`lib-${i}`}>{a}</li>)}
         </ul>
       )}
-      {!!res.conciliacion?.liberados?.length && (
-        <div className="mt-1 text-text-secondary">
-          El equipo reservado {res.conciliacion.liberados.join(", ")} no fue el instalado: volvió a la bodega.
-        </div>
-      )}
-      {res.conciliacion?.devuelto != null && (
-        <div className="mt-1 text-text-secondary">
-          ONU anterior <b>{res.conciliacion.devuelto}</b> retirada de la ficha y devuelta a la bodega como «Por revisar».
-        </div>
-      )}
-      {res.despues && (
-        <div className="mt-1 text-text-secondary">
-          Traffic-table: bajada {res.antes?.traffic_in} → <b>{res.despues.traffic_in}</b> · subida {res.antes?.traffic_out} → <b>{res.despues.traffic_out}</b>
-        </div>
-      )}
       {v && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           <Badge label={`estado: ${v.run_state ?? "—"}`} tone={/online/i.test(v.run_state ?? "") ? "success" : "error"} />
@@ -953,8 +1131,75 @@ function ResultadoOnu({ res }: { res: Resultado }) {
         </ul>
       )}
       {v?.nota && !v.avisos?.length && <p className="mt-1.5 text-[11.5px] text-text-tertiary">{v.nota}</p>}
-      {!!res.commands?.length && (
-        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/80 p-2 font-mono text-[11px] text-green-300">{res.commands.join("\n")}</pre>
+      {/* Lo que no cambia lo que el técnico hace ahora (inventario, índices de
+          velocidad, comandos) queda a un toque: antes alargaba el recuadro y
+          tapaba si había quedado o no. */}
+      {(res.equipo || !!res.conciliacion?.liberados?.length || res.conciliacion?.devuelto != null || res.despues || !!res.commands?.length) && (
+        <details open={!!res.dryRun} className="mt-2 text-[12px]">
+          <summary className="cursor-pointer font-semibold text-brand">Ver detalle</summary>
+          {res.equipo && (
+            <div className="mt-1 text-text-secondary">
+              Equipo <b>{res.equipo.code}</b> registrado a nombre del abonado
+              {res.equipo.bodega ? ` · salió de la bodega ${res.equipo.bodega}` : ""}
+              {res.equipo.serialCorregido ? " · se corrigió su serial con el que reporta la OLT" : ""}.
+            </div>
+          )}
+          {!!res.conciliacion?.liberados?.length && (
+            <div className="mt-1 text-text-secondary">
+              El equipo reservado {res.conciliacion.liberados.join(", ")} no fue el instalado: volvió a la bodega.
+            </div>
+          )}
+          {res.conciliacion?.devuelto != null && (
+            <div className="mt-1 text-text-secondary">
+              ONU anterior <b>{res.conciliacion.devuelto}</b> retirada de la ficha y devuelta a la bodega como «Por revisar».
+            </div>
+          )}
+          {res.despues && (
+            <div className="mt-1 text-text-secondary">
+              Traffic-table: bajada {res.antes?.traffic_in} → <b>{res.despues.traffic_in}</b> · subida {res.antes?.traffic_out} → <b>{res.despues.traffic_out}</b>
+            </div>
+          )}
+          {!!res.commands?.length && (
+            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/80 p-2 font-mono text-[11px] text-green-300">{res.commands.join("\n")}</pre>
+          )}
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** "-21,35 dBm", como se lee en el medidor. */
+function dbmTexto(v: number | null): string {
+  return v == null ? "sin lectura" : `${v.toFixed(2).replace(".", ",")} dBm`;
+}
+
+/**
+ * Prueba de señal del protocolo 4.5: solo autentica con -15 a -24 dBm en la ONU.
+ * Si se rechazó, dice qué revisar —lo mismo que pide el protocolo— para que el
+ * técnico corrija la fibra y vuelva a pulsar.
+ */
+function BloqueSenal({ senal, deshecha, rechazada }: { senal: SenalOrden; deshecha?: boolean; rechazada: boolean }) {
+  const tono = senal.nivel === "OPTIMO" ? "success" : senal.nivel === "MARGINAL" ? "warning" : "error";
+  return (
+    <div className="mt-1.5 rounded-md border border-border-subtle bg-surface-1 p-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-text-secondary">Señal RX de la ONU:</span>
+        <span className="font-mono font-bold text-text-primary">{dbmTexto(senal.rx)}</span>
+        <Badge label={senal.etiqueta} tone={tono} />
+        {senal.oltRx != null && <span className="text-text-tertiary">· OLT RX {dbmTexto(senal.oltRx)}</span>}
+      </div>
+      {!senal.aprobada && <p className="mt-1 text-text-primary"><b>Qué hacer:</b> {senal.accion}</p>}
+      {rechazada && (
+        <p className={`mt-1 ${deshecha === false ? "font-semibold text-error-text" : "text-text-secondary"}`}>
+          {deshecha === false
+            ? "No se pudo quitar el alta de la OLT: quítela desde Red › OLT antes de reintentar."
+            : "La ONU no quedó autenticada. Corrija y vuelva a pulsar «Autenticar»: se mide otra vez. Rango exigido: -15 a -24 dBm."}
+        </p>
+      )}
+      {senal.forzada && (
+        <p className="mt-1 text-warning-text">
+          Autenticada fuera del protocolo por {senal.forzada.por ?? "el superadministrador"}: {senal.forzada.motivo}
+        </p>
       )}
     </div>
   );
@@ -1072,18 +1317,16 @@ function AvisoVlanPuerto({ v }: { v: VlanPuerto }) {
   const enlace = v.branchId && v.vlan ? `/red/vlans?sede=${v.branchId}&q=${v.vlan}` : null;
   if (v.ok === true) {
     return (
-      <p className="text-[11.5px] text-text-tertiary">
-        <Icon name="check" size={13} className="mr-1 inline text-success-text" />
-        VLAN {v.vlan} de {v.fsp}: completa en la OLT, el uplink y el Mikrotik.
-      </p>
+      <Linea tono="ok" titulo={<>VLAN {v.vlan} del puerto {v.fsp}: completa</>}>
+        Está en la OLT, sale por el uplink y el Mikrotik tiene su servidor PPPoE.
+      </Linea>
     );
   }
   if (v.ok === null) {
     return v.falta.length ? (
-      <p className="text-[11.5px] text-text-tertiary">
-        <Icon name="info" size={13} className="mr-1 inline" />
-        No se pudo comprobar la VLAN{v.vlan ? ` ${v.vlan}` : ""} de {v.fsp}: {v.falta.join("; ")}.
-      </p>
+      <Linea tono="info" titulo={<>No se pudo comprobar la VLAN{v.vlan ? ` ${v.vlan}` : ""} de {v.fsp}</>}>
+        {v.falta.join("; ")}.
+      </Linea>
     ) : null;
   }
   return (

@@ -130,7 +130,7 @@ function Vlans({ urlInicial }: { urlInicial: Record<string, string> }) {
 
   const sede =
     sedeId === SIN_SEDE
-      ? { id: SIN_SEDE, name: "VLANs sin sede", naps: 0, vlans: huerfanas }
+      ? { id: SIN_SEDE, legacyId: 0, name: "VLANs sin sede", naps: 0, vlans: huerfanas, office: null }
       : branches.find((b) => b.id === sedeId);
 
   // Vista B: el catálogo de la sede elegida.
@@ -162,7 +162,7 @@ function SedesConVlans({ branches, huerfanas, onPick }: { branches: BranchOpt[];
     : branches;
   const filas: BranchOpt[] = sedeSearch.trim() || huerfanas === 0
     ? list
-    : [...list, { id: SIN_SEDE, name: "Sin sede", naps: 0, vlans: huerfanas }];
+    : [...list, { id: SIN_SEDE, legacyId: 0, name: "Sin sede", naps: 0, vlans: huerfanas, office: null }];
 
   return (
     <>

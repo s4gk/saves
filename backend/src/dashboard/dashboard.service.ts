@@ -6,8 +6,11 @@ import { AuthUser } from '../auth/current-user.decorator';
 import { BadRequestException, ForbiddenException } from '../core/http/errores';
 import { sedesDe, whereSedePorSuscriptor, whereSedeSuscriptor } from '../common/sede-scope';
 import { SQL_NOTA_SALDO } from '../treasury/cierre-legacy';
+import { WOMPI_ID } from '../treasury/cierre-informe';
+import { SEDE_BANCO } from '../treasury/caja-scope';
 import { FIN_IMPORTACION, whereAbonadoNuevo } from '../common/abonado-nuevo';
 import { whereRetiro } from '../common/abonado-retirado';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Lo que NO es plata que entre o salga de la empresa, y por eso no cuenta como recaudo
@@ -38,9 +41,56 @@ function comoFecha(ymd: string): Date {
 
 const ES_YMD = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Último día del mes de una fecha 'YYYY-MM-DD'. */
+function finDeMes(ymd: string): string {
+  const d = comoFecha(`${ymd.slice(0, 7)}-01`);
+  d.setUTCMonth(d.getUTCMonth() + 1);
+  d.setUTCDate(0);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Suma `n` días (negativo resta) a una fecha 'YYYY-MM-DD'. */
+function masDias(ymd: string, n: number): string {
+  const d = comoFecha(ymd);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * El periodo contra el que se compara el elegido, para las flechas de las tarjetas.
+ *
+ * Si el rango arranca el día 1 se compara MES CONTRA MES con los mismos días: "este
+ * mes" al 26 de septiembre se mide contra el 1-26 de agosto, no contra los 26 días
+ * anteriores (que partirían agosto en dos y comparan un mes incompleto con otro). Y un
+ * mes entero (1 al último) se mide contra el mes entero anterior, aunque tenga otro
+ * número de días. Cualquier otro rango se compara con la ventana del mismo largo
+ * inmediatamente anterior.
+ */
+export function rangoAnterior(r: Rango): Rango {
+  if (r.desde.endsWith('-01')) {
+    // Cuántos meses abarca el rango: se retrocede lo mismo, ni uno más.
+    const meses = (Number(r.hasta.slice(0, 4)) - Number(r.desde.slice(0, 4))) * 12
+      + Number(r.hasta.slice(5, 7)) - Number(r.desde.slice(5, 7)) + 1;
+    const d = comoFecha(r.desde);
+    d.setUTCMonth(d.getUTCMonth() - meses);
+    const desde = d.toISOString().slice(0, 10);
+    const h = comoFecha(`${r.hasta.slice(0, 7)}-01`);
+    h.setUTCMonth(h.getUTCMonth() - meses);
+    const mesHasta = h.toISOString().slice(0, 10);
+    const fin = finDeMes(mesHasta);
+    const hasta = r.hasta === finDeMes(r.hasta)
+      ? fin
+      : [`${mesHasta.slice(0, 7)}-${r.hasta.slice(8, 10)}`, fin].sort()[0];
+    return { desde, hasta, granularidad: r.granularidad };
+  }
+  const dias = Math.round((comoFecha(r.hasta).getTime() - comoFecha(r.desde).getTime()) / 86_400_000) + 1;
+  return { desde: masDias(r.desde, -dias), hasta: masDias(r.desde, -1), granularidad: r.granularidad };
+}
+
 export type Rango = { desde: string; hasta: string; granularidad: 'dia' | 'mes' };
 
-type Punto = { month: string; income: number; expense: number };
+/** `wompi` y `bancos` son PARTE de `income` (no se suman aparte): ver `recaudoPorCanal`. */
+type Punto = { month: string; income: number; expense: number; wompi: number; bancos: number };
 
 /**
  * Completa con ceros los tramos sin un solo movimiento.
@@ -50,7 +100,7 @@ type Punto = { month: string; income: number; expense: number };
  * ve igual que un día normal. Se rellena aquí y no con `generate_series` porque el
  * LEFT JOIN contra Transaction (498k filas) multiplicaba por diez el coste.
  */
-function rellenarSerie(rango: Rango, filas: { m: string; income: number; expense: number }[]): Punto[] {
+function rellenarSerie(rango: Rango, filas: { m: string; income: number; expense: number; wompi: number; bancos: number }[]): Punto[] {
   const porClave = new Map(filas.map((r) => [r.m, r]));
   const puntos: Punto[] = [];
   const fin = comoFecha(rango.hasta);
@@ -61,7 +111,7 @@ function rellenarSerie(rango: Rango, filas: { m: string; income: number; expense
     const iso = cursor.toISOString().slice(0, 10);
     const clave = rango.granularidad === 'dia' ? iso : iso.slice(0, 7);
     const hit = porClave.get(clave);
-    puntos.push({ month: clave, income: hit?.income ?? 0, expense: hit?.expense ?? 0 });
+    puntos.push({ month: clave, income: hit?.income ?? 0, expense: hit?.expense ?? 0, wompi: hit?.wompi ?? 0, bancos: hit?.bancos ?? 0 });
     if (rango.granularidad === 'dia') cursor.setUTCDate(cursor.getUTCDate() + 1);
     else cursor.setUTCMonth(cursor.getUTCMonth() + 1);
   }
@@ -118,6 +168,40 @@ function enLista(columna: Prisma.Sql, valores: number[]): Prisma.Sql {
   return Prisma.sql`${columna} IN (${Prisma.join(valores)})`;
 }
 
+/**
+ * `id` null = saldos a favor aplicados a una factura (método `Balance`): no pasaron por
+ * ninguna caja, así que van uno por SEDE DEL CLIENTE (`sede`, el legacyId) para poder
+ * abrirlos filtrados. La plata ya se contó en la caja por la que entró el adelanto.
+ */
+type CuentaRecaudo = { id: number | null; nombre: string; total: number; n: number; sede?: number | null };
+
+/**
+ * Por dónde entró el recaudo, a partir de la suma por cuenta:
+ *  - VENTANILLA: las cajas de las sedes (`branchLegacy` ≠ 0) — lo que se cobró en la oficina.
+ *  - WOMPI: la pasarela (`WOMPI_ID`), el cliente paga desde el celular.
+ *  - BANCOS: el resto de cuentas de banco (`branchLegacy` = 0): Bancolombia por cargue de
+ *    Excel/corresponsal, Banco de Bogotá, Efecty… con el detalle de cada una.
+ * Siempre los tres, aunque estén en cero: que falte Wompi en un mes es un dato.
+ */
+export function recaudoPorCanal(filas: {
+  cuenta: number | null; nombre: string | null; sede: number | null; total: number; n: number;
+  sedeCliente?: number | null; nombreSedeCliente?: string | null;
+}[]) {
+  const canal = (nombre: 'ventanilla' | 'wompi' | 'bancos') => ({ canal: nombre, total: 0, n: 0, cuentas: [] as CuentaRecaudo[] });
+  const ventanilla = canal('ventanilla'), wompi = canal('wompi'), bancos = canal('bancos');
+  for (const f of filas) {
+    const c = f.cuenta === WOMPI_ID ? wompi : f.sede === SEDE_BANCO ? bancos : ventanilla;
+    const total = Number(f.total), n = Number(f.n);
+    c.total += total; c.n += n;
+    if (f.cuenta == null) {
+      c.cuentas.push({ id: null, nombre: `Saldos a favor · ${f.nombreSedeCliente ?? 'Sin sede'}`, total, n, sede: f.sedeCliente ?? null });
+    } else {
+      c.cuentas.push({ id: f.cuenta, nombre: f.nombre ?? `Cuenta ${f.cuenta}`, total, n });
+    }
+  }
+  return [ventanilla, wompi, bancos];
+}
+
 export class DashboardService implements OnModuleInit {
   constructor(private readonly prisma: PrismaService) {}
 
@@ -161,12 +245,36 @@ export class DashboardService implements OnModuleInit {
     // contra lo que se valida la sede pedida.
     const catalogo = await this.sedesCacheado(permitidas);
     const sedes = filtroDeSede(permitidas, catalogo.map((b) => b.id), sede);
-    const [stock, periodo] = await Promise.all([
+    const anterior = rangoAnterior(rango);
+    const [stock, periodo, previo] = await Promise.all([
       this.stockCacheado(sedes),
       this.periodoCacheado(rango, sedes, permitidas),
+      this.periodoCacheado(anterior, sedes, permitidas),
     ]);
     return {
       rango,
+      // Las mismas cifras del periodo anterior (ver `rangoAnterior`), para que cada
+      // tarjeta diga si va mejor o peor. Sólo los totales: la serie y los rankings del
+      // periodo anterior no se pintan.
+      comparacion: {
+        desde: anterior.desde,
+        hasta: anterior.hasta,
+        facturado: previo.facturacion.total,
+        ingresos: previo.tesoreria.ingresos,
+        // Por canal, para que Ventanilla/Wompi/Bancos digan también si subieron o bajaron.
+        canales: Object.fromEntries(previo.tesoreria.canales.map((c) => [c.canal, c.total])),
+        egresos: previo.tesoreria.egresos,
+        ordenes: previo.soporte.total,
+        nuevos: previo.nuevosAbonados,
+        retiros: previo.retirosAbonados,
+      },
+      // Cuándo se calcularon las cifras que se entregan: la caché puede servirlas con
+      // hasta un minuto (o lo que tarde el refresco) de antigüedad, y la pantalla lo
+      // dice como "actualizado hace…". Vale la parte más vieja de las dos.
+      calculadoEn: new Date(Math.min(
+        this.stock.get(`stock|${claveSede(sedes)}`)?.at ?? Date.now(),
+        this.periodo.get(this.clavePeriodo(rango, sedes, permitidas))?.at ?? Date.now(),
+      )).toISOString(),
       // Qué sede está mirando (null = todas), para que la pantalla no tenga que
       // adivinar si su filtro se aplicó.
       sede: sedes && sedes.length === 1 ? sedes[0] : null,
@@ -219,8 +327,12 @@ export class DashboardService implements OnModuleInit {
   private periodoCacheado(rango: Rango, sedes: number[] | null, permitidas: number[] | null) {
     // `permitidas` entra en la clave porque el ranking por sede NO se filtra (ver
     // `computePeriodo`): dos usuarios con distinto alcance no pueden compartirlo.
-    const clave = `periodo|${rango.desde}|${rango.hasta}|${claveSede(sedes)}|${claveSede(permitidas)}`;
+    const clave = this.clavePeriodo(rango, sedes, permitidas);
     return this.cacheado(this.periodo, clave, () => this.computePeriodo(rango, sedes, permitidas), DashboardService.MAX_RANGOS);
+  }
+
+  private clavePeriodo(rango: Rango, sedes: number[] | null, permitidas: number[] | null) {
+    return `periodo|${rango.desde}|${rango.hasta}|${claveSede(sedes)}|${claveSede(permitidas)}`;
   }
 
   /** Catálogo del desplegable de sedes, ya acotado a las del usuario. */
@@ -228,7 +340,7 @@ export class DashboardService implements OnModuleInit {
     const clave = `sedes|${claveSede(permitidas)}`;
     return this.cacheado(this.sedes, clave, async () => {
       const filas = await this.prisma.branch.findMany({
-        where: permitidas ? { legacyId: { in: permitidas } } : {},
+        where: { ...SEDE_ACTIVA, ...(permitidas ? { legacyId: { in: permitidas } } : {}) },
         select: { legacyId: true, name: true },
         orderBy: { name: 'asc' },
       });
@@ -277,11 +389,15 @@ export class DashboardService implements OnModuleInit {
       this.prisma.equipment.count({ where: sedes ? { warehouse: { branchLegacy: { in: sedes } } } : {} }),
       this.prisma.port.groupBy({ by: ['status'], _count: { _all: true }, where: sedes ? { nap: { is: { branch: { is: { legacyId: { in: sedes } } } } } } : {} }),
       this.prisma.$queryRaw<{ v: number }[]>`SELECT COALESCE(SUM(price*qty),0)::float v FROM "Material" WHERE qty < 100000 ${filtroMaterial}`,
+      // Sólo la mora RECUPERABLE: el que sigue siendo cliente (ACTIVO) y el que está
+      // cortado pero en gestión de cobro (CARTERA). Fuera quedan RETIRADO, DEPURADO y
+      // compañía: esa plata ya no se cobra y tapaba a los que sí se pueden recuperar.
       this.prisma.$queryRaw<{ id: string; name: string; bal: number }[]>`
         SELECT s.id, COALESCE(NULLIF(TRIM(s."fullName"),''), TRIM(CONCAT(s."firstName",' ',s."lastName1")), s."companyName",'—') name,
                SUM(i.total - i."paidAmount")::float bal
         FROM "SubInvoice" i JOIN "Subscriber" s ON s.id = i."subscriberId" ${joinSedeDeudor}
-        WHERE i.status IN ('DUE','PARTIAL') GROUP BY s.id, name ORDER BY bal DESC LIMIT 8`,
+        WHERE i.status IN ('DUE','PARTIAL') AND s.status IN ('ACTIVO','CARTERA')
+        GROUP BY s.id, name ORDER BY bal DESC LIMIT 10`,
       this.prisma.subscriber.groupBy({ by: ['status'], _count: { _all: true }, where: deSede }),
     ]);
 
@@ -325,8 +441,11 @@ export class DashboardService implements OnModuleInit {
 
     // La caja y la compra no cuelgan de un abonado, así que su sede se traduce antes:
     //  · el movimiento la hereda de SU CAJA (`CashAccount.branchLegacy`, 0 = banco),
-    //    igual que el filtro de /tesoreria. OJO: al filtrar por sede el recaudo deja
-    //    fuera los BANCOS, que son de toda la empresa (ahí entra lo del portal de pagos).
+    //    igual que el filtro de /tesoreria. Los BANCOS (Wompi, Bancolombia) no son de
+    //    ninguna sede: su movimiento cuenta para la sede de la FICHA DEL CLIENTE que
+    //    pagó, igual que «Bancos» en el cierre (`sedeDelMovimiento`). Sin eso Yopal en
+    //    sept-2026 mostraba 32 M de recaudo contra 103 M facturados: faltaban 59 M
+    //    del portal de pagos. Un gasto de banco (sin cliente) sigue sin sede.
     //  · la orden de compra guarda el NOMBRE de la sede en `branchRef` ("Yopal").
     const [cajasDeSede, nombresDeSede] = await Promise.all([
       sedes
@@ -337,14 +456,23 @@ export class DashboardService implements OnModuleInit {
         ? this.prisma.branch.findMany({ where: { legacyId: { in: sedes } }, select: { name: true } }).then((bs) => bs.map((b) => b.name))
         : Promise.resolve(null),
     ]);
-    const filtroCaja = cajasDeSede ? Prisma.sql`AND ${enLista(Prisma.sql`"cashAccountId"`, cajasDeSede)}` : Prisma.empty;
+    const filtroCaja = cajasDeSede && sedes
+      ? Prisma.sql`AND (${enLista(Prisma.sql`"cashAccountId"`, cajasDeSede)}
+          OR ("cashAccountId" IN (SELECT "legacyId" FROM "CashAccount" WHERE "branchLegacy" = 0)
+              AND "subscriberId" IN (SELECT s.id FROM "Subscriber" s JOIN "Branch" b ON b.id = s."branchId"
+                                     WHERE ${enLista(Prisma.sql`b."legacyId"`, sedes)}))
+          -- Sin caja (saldos a favor aplicados): son de la sede del cliente, como en tesorería.
+          OR ("cashAccountId" IS NULL
+              AND "subscriberId" IN (SELECT s.id FROM "Subscriber" s JOIN "Branch" b ON b.id = s."branchId"
+                                     WHERE ${enLista(Prisma.sql`b."legacyId"`, sedes)})))`
+      : Prisma.empty;
     // Acotado, el JOIN con Branch tiene que ser INTERNO: con un LEFT, los abonados de
     // otras sedes no desaparecerían — caerían todos juntos en la fila "Sin sede".
     const joinSedeRanking = permitidas
       ? Prisma.sql`JOIN "Branch" b ON b.id = s."branchId" AND ${enLista(Prisma.sql`b."legacyId"`, permitidas)}`
       : Prisma.sql`LEFT JOIN "Branch" b ON b.id = s."branchId"`;
 
-    const [facturado, byInvStatus, caja, supportByStatus, ordersAgg, series, topTypes, nuevos, ventasSede, retiros] = await Promise.all([
+    const [facturado, byInvStatus, caja, porCuenta, supportByStatus, ordersAgg, series, topTypes, nuevos, ventasSede, retiros] = await Promise.all([
       // Lo FACTURADO excluye las anuladas. El sync marca CANCELED las facturas que el
       // legacy borró (2.847 solo en agosto, 197 M COP): contarlas inflaba el panel un
       // 57% contra el legacy, y descuadraba contra /reportes, que sí las filtra.
@@ -362,12 +490,30 @@ export class DashboardService implements OnModuleInit {
                COALESCE(SUM(debit) FILTER (WHERE type='EXPENSE'),0)::float egresos
         FROM "Transaction"
         WHERE status='VIGENTE' AND "date" BETWEEN ${desde}::date AND ${hasta}::date ${filtroCaja} ${SIN_MOVIMIENTO_INTERNO}`,
+      // El MISMO recaudo, cuenta por cuenta, para decir por dónde entró: ventanilla (las
+      // cajas de las sedes), Wompi o consignación en los bancos. Mismos filtros que la
+      // suma de arriba, así que las partes suman al peso el total de la tarjeta.
+      // Lo que no lleva caja (saldos a favor aplicados) se parte por la sede del cliente.
+      this.prisma.$queryRaw<{ cuenta: number | null; nombre: string | null; sede: number | null; sedeCliente: number | null; nombreSedeCliente: string | null; total: number; n: number }[]>`
+        SELECT t."cashAccountId" cuenta, c.holder nombre, c."branchLegacy" sede,
+               b."legacyId" "sedeCliente", b.name "nombreSedeCliente", SUM(t.credit)::float total, COUNT(*)::int n
+        FROM (SELECT "cashAccountId", credit, "subscriberId" FROM "Transaction"
+              WHERE status='VIGENTE' AND type='INCOME' AND "date" BETWEEN ${desde}::date AND ${hasta}::date ${filtroCaja} ${SIN_MOVIMIENTO_INTERNO}) t
+        LEFT JOIN "CashAccount" c ON c."legacyId" = t."cashAccountId"
+        LEFT JOIN "Subscriber" s ON t."cashAccountId" IS NULL AND s.id = t."subscriberId"
+        LEFT JOIN "Branch" b ON b.id = s."branchId"
+        GROUP BY 1, 2, 3, 4, 5 ORDER BY total DESC`,
       this.prisma.ticket.groupBy({ by: ['status'], _count: { _all: true }, where: { created: enRango, ...deSede } }),
       this.prisma.supplyOrder.aggregate({ _sum: { total: true }, _count: { _all: true }, where: { orderDate: enRango, ...(nombresDeSede ? { branchRef: { in: nombresDeSede } } : {}) } }),
-      this.prisma.$queryRaw<{ m: string; income: number; expense: number }[]>`
+      // Wompi y bancos: las mismas cuentas que `recaudoPorCanal`, para que la gráfica
+      // pinte por día lo que la tarjeta «Recaudo por canal» suma en el periodo.
+      this.prisma.$queryRaw<{ m: string; income: number; expense: number; wompi: number; bancos: number }[]>`
         SELECT to_char(date_trunc(${unidad}::text, "date"), ${formato}::text) m,
                COALESCE(SUM(credit) FILTER (WHERE type='INCOME'),0)::float income,
-               COALESCE(SUM(debit) FILTER (WHERE type='EXPENSE'),0)::float expense
+               COALESCE(SUM(debit) FILTER (WHERE type='EXPENSE'),0)::float expense,
+               COALESCE(SUM(credit) FILTER (WHERE type='INCOME' AND "cashAccountId" = ${WOMPI_ID}),0)::float wompi,
+               COALESCE(SUM(credit) FILTER (WHERE type='INCOME' AND "cashAccountId" <> ${WOMPI_ID}
+                 AND "cashAccountId" IN (SELECT "legacyId" FROM "CashAccount" WHERE "branchLegacy" = ${SEDE_BANCO})),0)::float bancos
         FROM "Transaction"
         WHERE status='VIGENTE' AND "date" BETWEEN ${desde}::date AND ${hasta}::date ${filtroCaja} ${SIN_MOVIMIENTO_INTERNO}
         GROUP BY 1 ORDER BY 1`,
@@ -400,7 +546,7 @@ export class DashboardService implements OnModuleInit {
       },
       tesoreria: (() => {
         const { ingresos = 0, egresos = 0 } = caja[0] ?? {};
-        return { ingresos, egresos, balance: ingresos - egresos };
+        return { ingresos, egresos, balance: ingresos - egresos, canales: recaudoPorCanal(porCuenta) };
       })(),
       soporte: {
         pendientes: (supStatus['PENDIENTE'] ?? 0) + (supStatus['REALIZANDO'] ?? 0),

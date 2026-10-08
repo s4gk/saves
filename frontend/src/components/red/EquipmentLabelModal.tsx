@@ -17,7 +17,7 @@ export function equipQrValue(code: number): string {
 /**
  * Etiqueta física del equipo (sticker con QR). Se usa estilo inline para que
  * la ventana de impresión la renderice idéntica sin cargar el CSS de la app.
- * El sticker mide ~50×30 mm (formato de rótulo de activo común).
+ * Tres renglones centrados: «VESTEL - EQUIPO», el código del equipo y el QR.
  */
 function Sticker({ equip }: { equip: LabelEquip }) {
   const value = equipQrValue(equip.code);
@@ -26,9 +26,10 @@ function Sticker({ equip }: { equip: LabelEquip }) {
       className="eq-sticker"
       style={{
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
-        gap: "10px",
-        width: "62mm",
+        gap: "4px",
+        width: "40mm",
         padding: "3mm",
         border: "1px solid #cbd5e1",
         borderRadius: "6px",
@@ -37,16 +38,12 @@ function Sticker({ equip }: { equip: LabelEquip }) {
         breakInside: "avoid",
         fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
         color: "#0d1526",
+        lineHeight: 1.15,
       }}
     >
+      <span style={{ fontSize: "10px", letterSpacing: "1px", fontWeight: 800 }}>VESTEL - EQUIPO</span>
+      <span style={{ fontSize: "20px", fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{equip.code}</span>
       <QRCodeSVG value={value} size={104} level="M" marginSize={0} />
-      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "1px", lineHeight: 1.15 }}>
-        <span style={{ fontSize: "8px", letterSpacing: "1px", color: "#586576", fontWeight: 700 }}>VESTEL · EQUIPO</span>
-        <span style={{ fontSize: "20px", fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>#{equip.code}</span>
-        {equip.brand ? <span style={{ fontSize: "10px", fontWeight: 600 }}>{equip.brand}</span> : null}
-        {equip.mac ? <span style={{ fontSize: "9px", color: "#45525f", fontFamily: "ui-monospace, monospace" }}>MAC {equip.mac}</span> : null}
-        {equip.serial ? <span style={{ fontSize: "9px", color: "#586576", fontFamily: "ui-monospace, monospace" }}>S/N {equip.serial}</span> : null}
-      </div>
     </div>
   );
 }
@@ -73,27 +70,20 @@ function printStickers(stickerHtml: string, copies: number) {
  */
 async function stickerToPng(svg: SVGSVGElement, equip: LabelEquip): Promise<Blob> {
   const S = 4;
-  const PAD = 11, QR = 104, GAP = 10;
+  const PAD = 11, QR = 104, GAP = 4;
   const sans = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
-  const mono = "ui-monospace, Menlo, Consolas, monospace";
   const lines: { text: string; font: string; size: number; color: string; spacing?: number }[] = [
-    { text: "VESTEL · EQUIPO", font: `700 8px ${sans}`, size: 8, color: "#586576", spacing: 1 },
-    { text: `#${equip.code}`, font: `800 20px ${sans}`, size: 20, color: "#0d1526" },
+    { text: "VESTEL - EQUIPO", font: `800 10px ${sans}`, size: 10, color: "#0d1526", spacing: 1 },
+    { text: String(equip.code), font: `800 20px ${sans}`, size: 20, color: "#0d1526" },
   ];
-  if (equip.brand) lines.push({ text: equip.brand, font: `600 10px ${sans}`, size: 10, color: "#0d1526" });
-  if (equip.mac) lines.push({ text: `MAC ${equip.mac}`, font: `9px ${mono}`, size: 9, color: "#45525f" });
-  if (equip.serial) lines.push({ text: `S/N ${equip.serial}`, font: `9px ${mono}`, size: 9, color: "#586576" });
 
   const measure = document.createElement("canvas").getContext("2d")!;
-  const textW = Math.max(
-    ...lines.map((l) => {
-      measure.font = l.font;
-      return measure.measureText(l.text).width + (l.spacing ?? 0) * l.text.length;
-    }),
-  );
-  const textH = lines.reduce((h, l) => h + l.size * 1.15, 0) + (lines.length - 1);
-  const W = Math.ceil(Math.max(234, PAD * 2 + QR + GAP + textW));
-  const H = PAD * 2 + Math.max(QR, textH);
+  const widthOf = (l: (typeof lines)[number]) => {
+    measure.font = l.font;
+    return measure.measureText(l.text).width + (l.spacing ?? 0) * l.text.length;
+  };
+  const W = Math.ceil(Math.max(151, PAD * 2 + QR, PAD * 2 + Math.max(...lines.map(widthOf))));
+  const H = Math.ceil(PAD * 2 + lines.reduce((h, l) => h + l.size * 1.15 + GAP, 0) + QR);
 
   const canvas = document.createElement("canvas");
   canvas.width = W * S;
@@ -110,7 +100,23 @@ async function stickerToPng(svg: SVGSVGElement, equip: LabelEquip): Promise<Blob
   ctx.fill();
   ctx.stroke();
 
-  // QR desde el SVG ya pintado
+  // Texto centrado arriba
+  ctx.textBaseline = "top";
+  let y = PAD;
+  for (const l of lines) {
+    ctx.font = l.font;
+    ctx.fillStyle = l.color;
+    const off = (l.size * 1.15 - l.size) / 2;
+    let cx = (W - widthOf(l)) / 2;
+    if (l.spacing) {
+      for (const ch of l.text) { ctx.fillText(ch, cx, y + off); cx += ctx.measureText(ch).width + l.spacing; }
+    } else {
+      ctx.fillText(l.text, cx, y + off);
+    }
+    y += l.size * 1.15 + GAP;
+  }
+
+  // QR desde el SVG ya pintado, debajo del código
   const clone = svg.cloneNode(true) as SVGSVGElement;
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("width", String(QR * S));
@@ -120,26 +126,9 @@ async function stickerToPng(svg: SVGSVGElement, equip: LabelEquip): Promise<Blob
     const img = new Image();
     await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = rej; img.src = url; });
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(img, PAD, (H - QR) / 2, QR, QR);
+    ctx.drawImage(img, (W - QR) / 2, y, QR, QR);
   } finally {
     URL.revokeObjectURL(url);
-  }
-
-  // Texto, centrado verticalmente como en el flex de la vista previa
-  ctx.textBaseline = "top";
-  let y = (H - textH) / 2;
-  const x = PAD + QR + GAP;
-  for (const l of lines) {
-    ctx.font = l.font;
-    ctx.fillStyle = l.color;
-    const off = (l.size * 1.15 - l.size) / 2;
-    if (l.spacing) {
-      let cx = x;
-      for (const ch of l.text) { ctx.fillText(ch, cx, y + off); cx += ctx.measureText(ch).width + l.spacing; }
-    } else {
-      ctx.fillText(l.text, x, y + off);
-    }
-    y += l.size * 1.15 + 1;
   }
 
   return new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("toBlob"))), "image/png"));

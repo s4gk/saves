@@ -1,5 +1,5 @@
 import { GeoService } from './geo.service';
-import { MapQueryDto, PingDto, RouteDto, SetSubscriberLocationDto } from './dto/geo.dto';
+import { MapQueryDto, PingDto, RouteDto, SetBranchOfficeDto, SetSubscriberLocationDto } from './dto/geo.dto';
 import { AuthUser } from '../auth/current-user.decorator';
 
 /** Mapa: abonados, cajas NAP y última posición conocida de los funcionarios. */
@@ -17,7 +17,9 @@ export class GeoController {
   /**
    * Dónde está cada funcionario. Más restringido que el resto del módulo a
    * propósito: saber dónde está un compañero es información de jefatura, no algo
-   * que deba ver cualquiera que entre al mapa.
+   * que deba ver cualquiera que entre al mapa. La cajera también la ve (2026-10-05,
+   * «para ver dónde están los técnicos»), pero sólo los técnicos de SU sede: el
+   * recorte lo hace el servicio con `sedesDe`.
    */
   technicians(user: AuthUser, horas?: string) {
     const h = Number(horas);
@@ -53,5 +55,10 @@ export class GeoController {
     dto: SetSubscriberLocationDto,
   ) {
     return this.geo.setSubscriberLocation(user, id, dto);
+  }
+
+  /** Mueve el pin de la oficina de una sede (gerencia, administración y sistemas). */
+  setBranchOffice(id: string, dto: SetBranchOfficeDto) {
+    return this.geo.setBranchOffice(id, dto);
   }
 }

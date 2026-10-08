@@ -57,8 +57,9 @@ export const REPORTS: ReportMeta[] = [
       { param: "agrupar", label: "Agrupar", from: () => [{ value: "mes", label: "Por mes" }, { value: "dia", label: "Por día" }] },
       { param: "sede", label: "Sede", from: opciones((d) => d?.opciones?.sedes, (x) => x.id, (x) => x.nombre) },
     ] },
-  { key: "facturacion", label: "Resumen de facturación", icon: "receipt", dated: false, group: "gerencia",
-    desc: "Cuánto se facturó, cuánto se pagó y cuánta cartera quedó", endpoint: "/billing/stats" },
+  { key: "facturacion", label: "Resumen de facturación", icon: "receipt", dated: true, group: "gerencia",
+    desc: "Cuánto se facturó, cuánto se pagó y cuánta cartera quedó. Sin fechas: el año en curso", endpoint: "/billing/stats",
+    filters: [{ param: "sede", label: "Sede", from: opciones((d) => d?.opciones?.sedes, (x) => x.id, (x) => x.nombre) }] },
   { key: "recaudo", label: "Recaudo", icon: "banknote", dated: true, group: "gerencia",
     desc: "Ingresos vigentes por caja y por método de pago",
     filters: [{ param: "sede", label: "Sede", from: opciones((d) => d?.opciones?.sedes, (x) => x.id, (x) => x.nombre) }] },
@@ -102,12 +103,12 @@ export const REPORTS: ReportMeta[] = [
     desc: "Clientes que entran en ciclo de corte y reconexión",
     filters: [{ param: "sede", label: "Sede", from: opciones((d) => d?.opciones?.sedes, (x) => x.id, (x) => x.nombre) }] },
   { key: "ordenes", label: "Órdenes de servicio", icon: "headphones", dated: true, group: "operacion",
-    desc: "Volumen de órdenes por estado, tipo y técnico asignado",
+    desc: "Cómo va el trabajo mes a mes y de qué son las revisiones: motivo, barrio, caja NAP y VLAN. Sin cortes ni reconexiones",
     // La sede sale del abonado de la orden (la orden no la lleva). Es el recorte que
     // más se pide de viva voz: "las órdenes de Villanueva en junio".
     filters: [{ param: "sede", label: "Sede", from: opciones((d) => d?.opciones?.sedes, (x) => x.id, (x) => x.nombre) }] },
   { key: "cortes-activaciones", label: "Cortes y activaciones", icon: "activity", dated: true, group: "operacion",
-    desc: "Cuántos clientes se cortaron, activaron, suspendieron o retiraron",
+    desc: "Cortes, reconexiones, suspensiones, retiros e instalaciones desde las órdenes cerradas, por servicio y con registro del router",
     filters: [{ param: "sede", label: "Sede", from: opciones((d) => d?.opciones?.sedes, (x) => x.id, (x) => x.nombre) }] },
   { key: "estado-clientes", label: "Estado de clientes", icon: "users", dated: false, group: "operacion",
     desc: "Cómo está repartida la base de clientes por estado y por sede", endpoint: "/reports/estadisticas-servicios" },
@@ -190,7 +191,8 @@ export function buildExportDoc(rep: string, label: string, data: any, from: stri
           { cells: ["Facturas emitidas", data.total ?? 0] },
           { cells: ["Total facturado", data.facturadoTotal ?? 0], bold: true },
           { cells: ["Facturas pagadas", data.pagadas ?? 0] },
-          { cells: ["Cartera pendiente", data.carteraTotal ?? 0] },
+          { cells: ["Pendiente de lo facturado en el periodo", data.pendientePeriodo ?? 0] },
+          { cells: ["Cartera pendiente (histórica)", data.carteraTotal ?? 0] },
           { cells: ["Facturas en mora", data.carteraFacturas ?? 0] },
         ],
       });
@@ -225,6 +227,14 @@ export function buildExportDoc(rep: string, label: string, data: any, from: stri
       });
       break;
     case "ordenes":
+      if ((data.mesAMes ?? []).length) {
+        doc.tables.push({
+          heading: "Mes a mes (sin cortes ni reconexiones)",
+          columns: [{ label: "Mes" }, { label: "Creadas", align: "right" }, { label: "Reclamos", align: "right" }, { label: "Instalaciones", align: "right" },
+            { label: "Días promedio para resolver", align: "right" }, { label: "% en ≤ 2 días", align: "right" }, { label: "Sin cerrar", align: "right" }, { label: "Anuladas", align: "right" }],
+          rows: data.mesAMes.map((m: any) => ({ cells: [m.mes + (m.enCurso ? " (en curso)" : ""), m.creadas, m.reclamos, m.instalaciones, m.diasPromedio ?? "—", m.pctEnDosDias ?? "—", m.abiertas, m.anuladas] })),
+        });
+      }
       doc.tables.push({
         heading: "Por estado",
         columns: [{ label: "Estado" }, { label: "Cantidad", align: "right" }],
@@ -240,6 +250,54 @@ export function buildExportDoc(rep: string, label: string, data: any, from: stri
         columns: [{ label: "Técnico" }, { label: "Cantidad", align: "right" }],
         rows: (data.porTecnico ?? []).map((r: any) => ({ cells: [r.tecnico, r.count] })),
       });
+      // El detalle de las revisiones viaja en el export completo: es lo que se le
+      // pasa al de red para que vaya a mirar una caja, y si no sale aquí hay que
+      // volver a la pantalla a copiarlo a mano.
+      if (data.revisiones?.total) {
+        const rv = data.revisiones;
+        const ventana = `revisiones del ${rv.desde} al ${rv.hasta}`;
+        doc.tables.push({
+          heading: `De qué son las revisiones (${ventana})`,
+          columns: [{ label: "Motivo" }, { label: "Internet", align: "right" }, { label: "TV", align: "right" },
+            { label: "TV e internet", align: "right" }, { label: "Total", align: "right" }],
+          rows: (rv.porSintoma ?? []).map((r: any) => ({ cells: [r.sintoma, r.internet, r.tv, r.combo, r.total] })),
+        });
+        doc.tables.push({
+          heading: rv.por100Promedio == null
+            ? "Revisiones por barrio"
+            : `Revisiones por barrio (media de la empresa: ${rv.por100Promedio} por 100 abonados)`,
+          columns: [{ label: "Barrio" }, { label: "Sede" }, { label: "Revisiones", align: "right" },
+            { label: "Clientes", align: "right" }, { label: "Abonados del barrio", align: "right" }, { label: "Por 100 abonados", align: "right" }],
+          rows: (rv.porBarrio ?? []).map((r: any) => ({ cells: [r.barrio, r.sede ?? "—", r.revisiones, r.clientes, r.abonados ?? "—", r.por100 ?? "—"] })),
+        });
+        doc.tables.push({
+          heading: "Revisiones por caja NAP",
+          columns: [{ label: "Caja" }, { label: "VLAN", align: "right" }, { label: "Detalle" }, { label: "Sede" },
+            { label: "Puertos", align: "right" }, { label: "Revisiones", align: "right" }, { label: "Clientes", align: "right" }],
+          rows: (rv.porCaja ?? []).map((r: any) => ({ cells: [r.caja, r.vlan ?? "—", r.detalle ?? "—", r.sede ?? "—", r.puertos ?? "—", r.revisiones, r.clientes] })),
+        });
+        doc.tables.push({
+          heading: "Revisiones por VLAN",
+          columns: [{ label: "VLAN", align: "right" }, { label: "Detalle" }, { label: "OLT" }, { label: "Sede" },
+            { label: "Revisiones", align: "right" }, { label: "Clientes", align: "right" }],
+          rows: (rv.porVlan ?? []).map((r: any) => ({ cells: [r.vlan ?? "—", r.detalle ?? "—", r.olt ?? "—", r.sede ?? "—", r.revisiones, r.clientes] })),
+        });
+        doc.tables.push({
+          heading: "Revisiones por tecnología",
+          columns: [{ label: "Tecnología" }, { label: "Revisiones", align: "right" }],
+          rows: (rv.porTecnologia ?? []).map((r: any) => ({ cells: [r.tecnologia, r.revisiones] })),
+        });
+        if ((rv.reincidentes ?? []).length) {
+          doc.tables.push({
+            heading: "Clientes con 3 o más revisiones",
+            columns: [{ label: "Abonado", align: "right" }, { label: "Cliente" }, { label: "Barrio" }, { label: "Sede" },
+              { label: "Caja" }, { label: "Motivos" }, { label: "Revisiones", align: "right" }, { label: "Última" }],
+            rows: rv.reincidentes.map((r: any) => ({
+              cells: [r.abonado, r.nombre ?? "—", r.barrio, r.sede ?? "—", r.caja ?? "—", r.sintomas ?? "—", r.revisiones, r.ultima],
+            })),
+          });
+        }
+      }
       break;
     case "tecnicos": {
       const eq = data.equipo;
@@ -413,17 +471,43 @@ export function buildExportDoc(rep: string, label: string, data: any, from: stri
         rows: (data.porSede ?? []).map((r: any) => ({ cells: [r.sede, r.total, r.activos, r.cortados, r.cartera] })),
       });
       break;
-    case "cortes-activaciones":
+    case "cortes-activaciones": {
+      const etiqueta = (e: string) => (data.resumen ?? []).find((r: any) => r.evento === e)?.label ?? e;
+      const router = (con: number | null, sin: number | null) => (con == null ? "—" : `${con} / ${sin}`);
       doc.tables.push({
-        columns: [{ label: "Evento" }, { label: "Cantidad", align: "right" }],
-        rows: [
-          { cells: ["Activaciones", data.activaciones ?? 0] },
-          { cells: ["Cortes", data.cortes ?? 0] },
-          { cells: ["Suspensiones", data.suspensiones ?? 0] },
-          { cells: ["Retiros", data.retiros ?? 0] },
-        ],
+        heading: "Resumen",
+        columns: [{ label: "Evento" }, { label: "Órdenes", align: "right" }, { label: "Clientes", align: "right" },
+          { label: "Router sí / sin registro", align: "right" }, { label: "Anuladas", align: "right" }, { label: "Sin cerrar", align: "right" }],
+        rows: (data.resumen ?? []).map((r: any) => ({ cells: [r.label, r.hechos, r.clientes, router(r.conRouter, r.sinRouter), r.anuladas, r.abiertas] })),
       });
+      doc.tables.push({
+        heading: "Por servicio",
+        columns: [{ label: "Evento" }, { label: "Servicio" }, { label: "Órdenes", align: "right" }, { label: "Clientes", align: "right" },
+          { label: "Router sí / sin registro", align: "right" }, { label: "Anuladas", align: "right" }, { label: "Sin cerrar", align: "right" }],
+        rows: (data.filas ?? []).map((f: any) => ({ cells: [etiqueta(f.evento), f.servicio === "General" ? "—" : f.servicio, f.hechos, f.clientes, router(f.conRouter, f.sinRouter), f.anuladas, f.abiertas] })),
+      });
+      if ((data.routerSinOrden?.porDia ?? []).length) {
+        const ACCION: Record<string, string> = { CUT: "Corte", MOROSO_ON: "Pasado a MOROSOS", RECONNECT: "Reconexión", MOROSO_OFF: "Sacado de MOROSOS" };
+        doc.tables.push({
+          heading: "En el router sin orden (no suman)",
+          columns: [{ label: "Día" }, { label: "Acción" }, { label: "Acciones", align: "right" }, { label: "Clientes", align: "right" }],
+          rows: data.routerSinOrden.porDia.map((r: any) => ({ cells: [r.fecha, ACCION[r.accion] ?? r.accion, r.acciones, r.clientes] })),
+        });
+      }
+      doc.tables.push({
+        heading: data.detalleTotal > (data.detalle ?? []).length ? `Cliente por cliente (primeros ${data.detalle.length} de ${data.detalleTotal})` : "Cliente por cliente",
+        columns: [{ label: "Cierre" }, { label: "Abonado", align: "right" }, { label: "Cliente" }, { label: "Sede" }, { label: "Evento" },
+          { label: "Servicio" }, { label: "Tipo de orden" }, { label: "Orden", align: "right" }, { label: "Router" }],
+        rows: (data.detalle ?? []).map((d: any) => ({ cells: [
+          d.fecha, d.abonado, d.nombre ?? "", d.sede ?? "", etiqueta(d.evento), d.servicio === "General" ? "" : d.servicio, d.tipo,
+          d.orden ?? "sin orden", d.router == null ? "—" : d.router ? "Registrado" : "Sin registro",
+        ] })),
+      });
+      if ((data.notas ?? []).length) {
+        doc.tables.push({ heading: "Cómo leer este reporte", columns: [{ label: "Nota" }], rows: data.notas.map((n: string) => ({ cells: [n] })) });
+      }
       break;
+    }
     case "altas-retiros":
       doc.tables.push({
         columns: [{ label: "Movimiento" }, { label: "Cantidad", align: "right" }],
@@ -477,13 +561,17 @@ export function buildExportDoc(rep: string, label: string, data: any, from: stri
       doc.tables.push({
         heading: "Detalle por usuario",
         columns: [
-          { label: "Abonado" }, { label: "Cliente" }, { label: "Sede" }, { label: "Resultado" }, { label: "Estado" },
+          { label: "Último pago" }, { label: "Abonado" }, { label: "Cliente" }, { label: "Sede" },
           { label: "Debía el día 1", align: "right", money: true }, { label: "Pagó en el mes", align: "right", money: true },
           { label: "Queda de lo viejo", align: "right", money: true }, { label: "Factura nueva", align: "right", money: true },
           { label: "Pendiente total", align: "right", money: true },
+          { label: "Resultado" }, { label: "Estado" }, { label: "Observaciones" },
         ],
         rows: (data.items ?? []).map((x: any) => ({
-          cells: [x.abonado, x.nombre, x.sede, etiqueta[x.categoria] ?? x.categoria, x.estadoFinal ?? "", x.deudaInicial, x.pagado, x.deudaVieja, x.deudaNueva, x.deudaFinal],
+          cells: [
+            x.ultimoPago ?? "", x.abonado, x.nombre, x.sede, x.deudaInicial, x.pagado, x.deudaVieja, x.deudaNueva, x.deudaFinal,
+            (etiqueta[x.categoria] ?? x.categoria) + (x.manual ? " (a mano)" : ""), x.estadoFinal ?? "", x.observaciones ?? "",
+          ],
         })),
       });
       doc.tables.push({

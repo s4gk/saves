@@ -230,7 +230,6 @@ export default function PlanesPage() {
                     <div className="flex items-center gap-2">
                       <span className={`truncate text-[14px] font-semibold ${p.active ? "text-text-primary" : "text-text-tertiary"}`}>{p.name}</span>
                       <Badge tone="info" label={SERVICE_KIND_LABEL[p.kind]} />
-                      {!p.active && <Badge tone="warning" label="Oculto" />}
                     </div>
                     <div className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-text-tertiary">
                       <span className="font-mono">{p.pppProfile || "sin perfil"}</span>

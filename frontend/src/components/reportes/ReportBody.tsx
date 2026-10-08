@@ -20,7 +20,7 @@ import { Tendencias } from "./Tendencias";
 import { IndiceRecaudo, Arpu, CapacidadRed, Reincidencia, Permanencia } from "./IspReportes";
 
 /** Elige el cuerpo del reporte. Único sitio que conoce la lista completa. */
-export function ReportBody({ rep, data, from, to }: { rep: string; data: any; from: string; to: string }) {
+export function ReportBody({ rep, data, from, to, recargar }: { rep: string; data: any; from: string; to: string; recargar?: () => Promise<void> }) {
   switch (rep) {
     case "tendencias": return <Tendencias data={data} />;
     case "indice-recaudo": return <IndiceRecaudo data={data} />;
@@ -29,11 +29,11 @@ export function ReportBody({ rep, data, from, to }: { rep: string; data: any; fr
     case "reincidencia": return <Reincidencia data={data} />;
     case "permanencia": return <Permanencia data={data} />;
     case "facturacion": return <Facturacion data={data} />;
-    case "recaudo": return <Recaudo data={data} />;
+    case "recaudo": return <Recaudo data={data} from={from} to={to} />;
     case "ventas-sede": return <VentasSede data={data} />;
     case "ingresos-egresos": return <IngresosEgresos data={data} />;
     case "cartera": return <TopDeudores data={data} />;
-    case "cartera-seguimiento": return <CarteraSeguimiento data={data} />;
+    case "cartera-seguimiento": return <CarteraSeguimiento data={data} recargar={recargar} />;
     case "iva": return <ReporteIva data={data} />;
     case "ordenes": return <Ordenes data={data} />;
     case "cortes-activaciones": return <CortesActivaciones data={data} />;

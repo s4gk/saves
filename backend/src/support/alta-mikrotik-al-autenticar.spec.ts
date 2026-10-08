@@ -49,7 +49,8 @@ describe('OnuProvisionService · el alta en la Mikrotik al autenticar', () => {
         }),
         update: jest.fn().mockResolvedValue({}),
       },
-      olt: { findFirst: jest.fn().mockResolvedValue({ id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1', defaultVlan: 100 }) },
+      olt: { findFirst: jest.fn().mockResolvedValue({ id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1', defaultVlan: 100 }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1', defaultVlan: 100 }]), },
       subscriberService: {
         findMany: jest.fn().mockResolvedValue([
           { planId: 'plan-100', planName: '100 Megas F-26', megas: 100, status: 'ACTIVO', plan: { megas: 100 } },

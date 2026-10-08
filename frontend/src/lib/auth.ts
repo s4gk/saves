@@ -70,6 +70,15 @@ export const PERM = {
   // interruptor manual del legacy). Permiso NOMINAL como el anterior: se pregunta
   // con `puedeMoverMorosos()`, nunca con `can()`.
   NETWORK_MOROSOS_TOGGLE: "network.morosos.toggle",
+  // Administrar bodegas de material y su material (crear, editar, eliminar,
+  // importar). NOMINAL: se pregunta con `puedeGestionarBodegas()`, nunca con `can()`.
+  INVENTORY_WAREHOUSES_MANAGE: "inventory.warehouses.manage",
+  // Digitar precio, IVA y subtotal al crear una factura. NOMINAL: se pregunta con
+  // `puedeDigitarPrecioFactura()`, nunca con `can()`.
+  BILLING_INVOICE_PRICE_EDIT: "billing.invoices.price.edit",
+  // Ver los planes antiguos al crear o editar una factura. NOMINAL: se pregunta con
+  // `puedeVerPlanesAntiguos()`, nunca con `can()`.
+  BILLING_INVOICE_OLD_PLANS: "billing.invoices.old-plans",
   // áreas de acceso Vestel (visibilidad de secciones del sidebar)
   AREA_GERENCIA: "area.gerencia",
   AREA_ADMINISTRACION: "area.administracion",
@@ -167,6 +176,19 @@ export function puedeMoverMorosos(
   user: Pick<AuthUser, "permissions"> | null | undefined,
 ): boolean {
   return !!user?.permissions?.includes(PERM.NETWORK_MOROSOS_TOGGLE);
+}
+
+/**
+ * ¿Puede administrar las bodegas de material y su material? (2026-09-29)
+ *
+ * Nominal como los dos anteriores: Luis Fernando Hurtado y Santiago García. Se mira
+ * el permiso tal cual —sin el atajo de `system.admin` de `can()`—, igual que hace el
+ * backend en `InventoryService.exigirGestorDeBodegas`. El resto sólo consulta.
+ */
+export function puedeGestionarBodegas(
+  user: Pick<AuthUser, "permissions"> | null | undefined,
+): boolean {
+  return !!user?.permissions?.includes(PERM.INVENTORY_WAREHOUSES_MANAGE);
 }
 
 /** Global superadmin only (system.admin). Inventory admin is NOT global. */
@@ -279,4 +301,29 @@ export function initials(name: string): string {
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+/**
+ * ¿Puede digitar precio, IVA y subtotal al crear una factura? (2026-10-08)
+ *
+ * Nominal como los anteriores: Paula Andrea Unas. Al resto el precio y el IVA de
+ * una factura nueva los pone el catálogo. Se mira el permiso tal cual —sin el atajo
+ * de `system.admin` de `can()`—, porque con veinte superusuarios `can()` lo abriría
+ * a todos.
+ */
+export function puedeDigitarPrecioFactura(
+  user: Pick<AuthUser, "permissions"> | null | undefined,
+): boolean {
+  return !!user?.permissions?.includes(PERM.BILLING_INVOICE_PRICE_EDIT);
+}
+
+/**
+ * ¿Ve los planes ANTIGUOS (ocultos y productos del legacy con nombre de plan) al
+ * crear o editar una factura? Permiso NOMINAL (2026-10-08: Paula Andrea Unas); sin
+ * el atajo de `system.admin` por lo mismo que `puedeDigitarPrecioFactura`.
+ */
+export function puedeVerPlanesAntiguos(
+  user: Pick<AuthUser, "permissions"> | null | undefined,
+): boolean {
+  return !!user?.permissions?.includes(PERM.BILLING_INVOICE_OLD_PLANS);
 }

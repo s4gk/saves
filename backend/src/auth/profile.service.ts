@@ -49,7 +49,7 @@ export class ProfileService {
    * importarlos; sin esto, un valor como `../../.env` convertiría el endpoint de
    * la foto en una lectura arbitraria de ficheros.
    */
-  private static fotoSegura(nombre: string | null | undefined): string | null {
+  static fotoSegura(nombre: string | null | undefined): string | null {
     if (!nombre) return null;
     const limpio = basename(nombre.trim());
     if (!limpio || limpio === 'example.png') return null; // marcador del legacy = sin foto
@@ -80,6 +80,8 @@ export class ProfileService {
       where: { userId: user.id },
       include: { role: { select: { key: true, name: true, description: true } } },
     });
+    // Superusuario primero: el encabezado del perfil muestra `roles[0]`.
+    roles.sort((a, b) => Number(b.role.key === 'super-admin') - Number(a.role.key === 'super-admin'));
 
     // Permisos efectivos ya resueltos por el guard (rol ∪ ALLOW − DENY): aquí
     // sólo se agrupan con su etiqueta para poder pintarlos.

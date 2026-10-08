@@ -6,6 +6,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CobranzasService } from '../treasury/cobranzas.service';
 import { AuthUser } from '../auth/current-user.decorator';
 import { num, round2 } from '../common/money';
+import { Prisma } from '@prisma/client';
+import { avisoAprobado, AvisoWompi, diaBogota, marcaTardio, motivoParaNoAplicar, TransaccionWompi } from './aprobados-tardios';
 
 /**
  * EL WEB SERVICE DEL PORTAL DE PAGOS EN LÍNEA (`vestel.com.co/crm`).
@@ -132,6 +134,46 @@ export class PortalPagosService {
   }
 
   // ------------------------------------------------------------------
+  // 0. resolver_usuario — lo que el cliente tecleó en "Código de Usuario"
+  // ------------------------------------------------------------------
+
+  /**
+   * El portal entra SOLO por `cid` (= `Subscriber.legacyId`), un número que el cliente
+   * no conoce: teclea su abonado, su cédula o su correo, le sale "Invalid details" y
+   * se le cambia la clave una y otra vez sin que sirva de nada (abonado 63887,
+   * 2026-10-03). El login del portal pregunta aquí cuando no encuentra el `cid` y
+   * prueba la clave contra cada candidato: la clave sigue siendo la que decide.
+   *
+   * Devuelve sólo `cid`s, nada del cliente: quien tenga la llave del web service ya
+   * podía pedir la ficha entera con `get_due_customer`.
+   */
+  async resolverUsuario(texto: unknown): Promise<{ cids: number[] }> {
+    const t = String(texto ?? '').trim();
+    if (!t || t.length > 120) return { cids: [] };
+
+    const filas = t.includes('@')
+      ? await this.prisma.$queryRaw<{ legacyId: number }[]>`
+          SELECT "legacyId" FROM "Subscriber"
+          WHERE "legacyId" IS NOT NULL AND lower(trim(email)) = lower(${t})
+          LIMIT 10`
+      : await (async () => {
+          // Puntos, espacios y guiones fuera: "1.983.451" y "1983451" son la misma cédula.
+          const d = t.replace(/[\s.\-]/g, '');
+          if (!/^\d{1,15}$/.test(d)) return [];
+          const n = Number(d);
+          return this.prisma.$queryRaw<{ legacyId: number }[]>`
+            SELECT "legacyId" FROM "Subscriber"
+            WHERE "legacyId" IS NOT NULL
+              AND ("legacyId" = ${n <= 2147483647 ? n : -1}
+                OR abonado = ${n <= 2147483647 ? n : -1}
+                OR regexp_replace(coalesce("docNumber", ''), '[^0-9]', '', 'g') = ${d})
+            LIMIT 10`;
+        })();
+
+    return { cids: [...new Set(filas.map((f) => Number(f.legacyId)))] };
+  }
+
+  // ------------------------------------------------------------------
   // 1. get_due_customer — la deuda y con qué se cobra
   // ------------------------------------------------------------------
 
@@ -152,7 +194,12 @@ export class PortalPagosService {
     // (`subscriberDebt`): que el portal y la cajera digan números distintos por el
     // mismo cliente el mismo día es exactamente lo que se vino a arreglar.
     const deuda = await this.cobranzas.subscriberDebt(sub.id);
-    const aPagar = Math.max(0, round2(deuda.totalConDescuento));
+    // En PESOS ENTEROS: el portal arma `amount-in-cents` pegándole "00" al texto de
+    // `total - pamnt` (crm/application/views/invoices/invoices.php), así que 76601.11
+    // sale "76601.1100" y Wompi lo rechaza ("Formato inválido para el valor de
+    // amount-in-cents"). Hacia ARRIBA: hacia abajo dejaría la factura PARTIAL por
+    // centavos; así sobran como mucho 99 centavos, que quedan de saldo a favor.
+    const aPagar = Math.max(0, Math.ceil(round2(deuda.totalConDescuento)));
 
     const ultima = await this.prisma.subInvoice.findFirst({
       where: { subscriberId: sub.id },
@@ -422,6 +469,18 @@ export class PortalPagosService {
       );
     }
 
+    return this.sellarYAplicar(sub, cid, importe, referencia, orden);
+  }
+
+  /**
+   * Sella la orden y aplica el pago. Quien llama ya comprobó que el pago existe, es de
+   * este abonado y es por este valor: `payDueCustomer` contra la orden del portal,
+   * `recogerAprobadosTardios` contra la API de Wompi.
+   */
+  private async sellarYAplicar(
+    sub: Awaited<ReturnType<PortalPagosService['abonadoDe']>>,
+    cid: number, importe: number, referencia: string, orden: OrdenPortal,
+  ) {
     // ── 2. El sello ──────────────────────────────────────────────────────────
     // Se PIDE, no se comprueba. Dos caminos pueden llamar a la vez —el aviso de Wompi y
     // la red de seguridad del cron— y leer-y-luego-escribir deja un hueco entre las dos
@@ -591,10 +650,15 @@ export class PortalPagosService {
 
     const candidatas = await this.prisma.paymentOrder.findMany({
       where: { gateway: 'wompi', status: 'APPROVED', appliedAt: null, createdAt: { gte: desde } },
-      select: { reference: true, amount: true, subscriber: { select: { legacyId: true, abonado: true } } },
+      select: {
+        reference: true, amount: true, rawWebhook: true,
+        subscriber: { select: { legacyId: true, abonado: true } },
+      },
       orderBy: { createdAt: 'asc' },
       take: 200,
-    });
+    }).then((filas) => filas.filter((f) => !marcaTardio(f.rawWebhook)));
+    // ↑ Fuera los aprobados en un reintento: el portal los tiene como rechazados, así
+    // que `payDueCustomer` los rechazaría en cada pasada. Son de `recogerAprobadosTardios`.
     if (!candidatas.length) return { revisadas: 0, aplicadas: 0, fallidas: 0, detalle: [] as string[] };
 
     // Las que YA tienen su plata contabilizada no son pagos caídos: son pagos que el
@@ -638,6 +702,221 @@ export class PortalPagosService {
       }
     }
     return { revisadas, aplicadas, fallidas, detalle };
+  }
+
+  /**
+   * Recoge los pagos que Wompi aprobó en un REINTENTO y el portal dejó por rechazados.
+   * El porqué está en `aprobados-tardios.ts`.
+   *
+   * La pista sale de los avisos crudos que el portal guarda (`data_reception`), pero la
+   * decisión NO: cada candidato se le pregunta a la API de Wompi con la llave privada,
+   * y sólo se aplica si Wompi dice APROBADA, de esa referencia y por el valor de la
+   * orden. El endpoint del portal es público y no valida firmas, así que un aviso ahí
+   * no prueba nada.
+   *
+   * Si el abonado tiene otro ingreso desde el día del pago, no se aplica: se deja la
+   * orden APROBADA y sin sellar, que es exactamente lo que la pantalla de pagos en línea
+   * pinta como «aprobado sin aplicar», con el motivo en el detalle. Una persona decide.
+   *
+   * Lo que se mira ya no vuelve a mirarse (la marca queda en `rawWebhook.aprobadoTardio`),
+   * salvo cuando Wompi no contestó: ése se reintenta en la pasada siguiente.
+   */
+  async recogerAprobadosTardios(opts: { dias?: number; dryRun?: boolean } = {}) {
+    const dias = opts.dias ?? Number(process.env.PORTAL_WS_RESCATE_DIAS || 3);
+    const desde = new Date(Date.now() - dias * 24 * 60 * 60 * 1000);
+    const vacio = { revisadas: 0, aplicadas: 0, porRevisar: 0, fallidas: 0, detalle: [] as string[] };
+
+    // ── 1. Avisos aprobados de órdenes que el portal no dio por aprobadas ────────
+    const cn = await mysql.createConnection(this.conexion(process.env.PORTAL_DB_NAME || 'crm_vestel'));
+    let ordenes: OrdenPortal[] = [];
+    const avisos = new Map<string, AvisoWompi>();
+    try {
+      const [filas] = await cn.query<any[]>(
+        // `fecha` es hora de Colombia (el PHP fija America/Bogota antes de escribirla).
+        "SELECT data FROM data_reception WHERE fecha >= ? AND data LIKE '%\"APPROVED\"%'",
+        [fechaBogota(desde)],
+      );
+      for (const f of filas as any[]) {
+        const a = avisoAprobado(String(f.data ?? ''));
+        if (a) avisos.set(a.reference, a);
+      }
+      if (!avisos.size) return vacio;
+      const [os] = await cn.query<any[]>(
+        'SELECT id, reference, debe, estado, cid_user, metodo_pago, id_wompi '
+        + 'FROM wompi_data_orden WHERE reference IN (?) AND estado <> ?',
+        [[...avisos.keys()], APROBADA],
+      );
+      ordenes = os as OrdenPortal[];
+    } finally {
+      await cn.end();
+    }
+    if (!ordenes.length) return vacio;
+
+    // ── 2. Fuera lo ya resuelto: sellado, con plata en algún lado o ya mirado ────
+    const referencias = ordenes.map((o) => o.reference);
+    const aqui = new Map(
+      (await this.prisma.paymentOrder.findMany({
+        where: { reference: { in: referencias } },
+        select: { reference: true, appliedAt: true, rawWebhook: true },
+      })).map((p) => [p.reference, p]),
+    );
+    const conPlata = new Set(
+      (await this.prisma.transaction.findMany({
+        where: { payuOrderId: { in: referencias }, status: 'VIGENTE' },
+        select: { payuOrderId: true },
+      })).map((t) => t.payuOrderId!),
+    );
+    for (const r of await this.referenciasYaPagadasEnLegacy(referencias)) conPlata.add(r);
+
+    const r = { ...vacio, detalle: [] as string[] };
+    for (const orden of ordenes) {
+      const p = aqui.get(orden.reference);
+      const ya = marcaTardio(p?.rawWebhook);
+      if (p?.appliedAt || (ya && !ya.reintentar) || conPlata.has(orden.reference)) continue;
+      const aviso = avisos.get(orden.reference)!;
+
+      let sub: Awaited<ReturnType<PortalPagosService['abonadoDe']>>;
+      try {
+        sub = await this.abonadoDe(Number(orden.cid_user));
+      } catch {
+        continue; // ficha depurada del legacy: tampoco la ingesta la trae
+      }
+      r.revisadas++;
+      const etiqueta = `abonado ${sub.abonado} · $${orden.debe} · ${orden.reference}`;
+
+      // ── 3. Lo que diga Wompi ───────────────────────────────────────────────
+      let tx: TransaccionWompi | null;
+      try {
+        tx = await this.transaccionWompi(aviso.transactionId);
+      } catch (e: any) {
+        r.fallidas++;
+        r.detalle.push(`⚠️ ${etiqueta}: Wompi no contestó (${e?.message ?? e})`);
+        continue; // sin marca: se reintenta en la pasada siguiente
+      }
+      const dia = diaBogota(tx?.finalized_at || tx?.created_at || new Date());
+      const posteriores = await this.prisma.transaction.findMany({
+        where: {
+          subscriberId: sub.id, type: 'INCOME', status: 'VIGENTE',
+          date: { gte: new Date(`${dia}T00:00:00Z`) },
+        },
+        select: { id: true, credit: true },
+        orderBy: { date: 'asc' },
+      });
+      const motivo = motivoParaNoAplicar({
+        reference: orden.reference, debe: Number(orden.debe), tx, pagosPosteriores: posteriores.length,
+      });
+      // El cargue a mano por el mismo valor, al peso: así se resolvieron casi todos antes
+      // de esto. Se enlaza a ese movimiento para que la pantalla no lo pinte en rojo.
+      // Sin tomar el que ya es de OTRA orden: 55714 volvió a pagar en línea el 27-09 por
+      // el mismo valor y ese movimiento, el primero por fecha, no es el cargue a mano.
+      const deOtraOrden = new Set((await this.prisma.paymentOrder.findMany({
+        where: { transactionId: { in: posteriores.map((t) => t.id) } },
+        select: { transactionId: true },
+      })).map((o) => o.transactionId));
+      const aMano = motivo && tx?.status === 'APPROVED' && tx.reference === orden.reference
+        ? posteriores.find((t) => !deOtraOrden.has(t.id) && round2(num(t.credit)) === round2(Number(orden.debe)))
+        : undefined;
+      const marca = { transaccion: aviso.transactionId, dia, vistoEl: new Date().toISOString() };
+
+      if (opts.dryRun) {
+        r.detalle.push(`(seco) ${etiqueta}: ${aMano ? 'ya cargado a mano por el mismo valor' : motivo ?? 'se aplicaría'}`);
+        continue;
+      }
+
+      // Wompi no la tiene por aprobada: el aviso no era bueno. Se anota y no se toca nada.
+      if (!tx || tx.status !== 'APPROVED' || tx.reference !== orden.reference) {
+        this.logger.warn(`[portal-pagos] aviso APPROVED que Wompi no confirma: ${etiqueta} · ${motivo}`);
+        await this.anotarTardio(orden, sub.id, { ...marca, descartado: motivo }, null);
+        r.detalle.push(`descartado ${etiqueta}: ${motivo}`);
+        continue;
+      }
+
+      // Aprobado de verdad. A partir de aquí la orden es APROBADA pase lo que pase.
+      const conDatosDeWompi: OrdenPortal = {
+        ...orden,
+        metodo_pago: tx.payment_method_type || orden.metodo_pago,
+        id_wompi: aviso.transactionId.replace(/[\s-]/g, ''), // como lo guarda el portal
+      };
+      if (aMano) {
+        await this.anotarTardio(conDatosDeWompi, sub.id, { ...marca, cargadoAMano: aMano.id }, 'APPROVED');
+        await this.prisma.paymentOrder.updateMany({
+          where: { reference: orden.reference, appliedAt: null },
+          data: { appliedAt: new Date(), appliedBy: 'MANUAL', transactionId: aMano.id },
+        });
+        r.detalle.push(`ya cargado a mano ${etiqueta}`);
+        continue;
+      }
+      if (motivo) {
+        await this.anotarTardio(conDatosDeWompi, sub.id, { ...marca, revisar: motivo }, 'APPROVED');
+        r.porRevisar++;
+        r.detalle.push(`por revisar ${etiqueta}: ${motivo}`);
+        this.logger.warn(`[portal-pagos] aprobado en un reintento, POR REVISAR: ${etiqueta} · ${motivo}`);
+        continue;
+      }
+      try {
+        await this.anotarTardio(conDatosDeWompi, sub.id, marca, 'APPROVED');
+        await this.sellarYAplicar(sub, Number(orden.cid_user), round2(Number(orden.debe)), orden.reference, conDatosDeWompi);
+        r.aplicadas++;
+        r.detalle.push(etiqueta);
+        this.logger.warn(`[portal-pagos] RESCATADO un pago aprobado en un reintento: ${etiqueta}`);
+      } catch (e: any) {
+        r.fallidas++;
+        r.detalle.push(`⚠️ ${etiqueta}: ${e?.message ?? e}`);
+        this.logger.error(`[portal-pagos] no se pudo aplicar el aprobado tardío ${orden.reference}: ${e?.message ?? e}`);
+        // La marca se queda (el rescate de `recogerPagosCaidos` no debe tocarla), pero
+        // con `reintentar` para que la pasada siguiente lo vuelva a intentar.
+        await this.anotarTardio(conDatosDeWompi, sub.id, { ...marca, reintentar: true, error: String(e?.message ?? e) }, null)
+          .catch(() => undefined);
+      }
+    }
+    return r;
+  }
+
+  /**
+   * Deja en `PaymentOrder` lo que se averiguó de un aprobado tardío. La fila puede no
+   * existir aún (la ingesta pasa después en el mismo cron). `status` null = no se toca.
+   */
+  private async anotarTardio(orden: OrdenPortal, subscriberId: string, marca: Record<string, unknown>, status: 'APPROVED' | null) {
+    const rawWebhook = { aprobadoTardio: marca } as Prisma.InputJsonValue;
+    const datos = {
+      rawWebhook,
+      ...(status ? { status, method: orden.metodo_pago || null, gatewayTxId: orden.id_wompi || null } : {}),
+    };
+    const hecho = await this.prisma.paymentOrder.updateMany({ where: { reference: orden.reference }, data: datos });
+    if (hecho.count) return;
+    await this.prisma.paymentOrder.create({
+      data: {
+        reference: orden.reference,
+        subscriberId,
+        gateway: 'wompi',
+        amount: Number(orden.debe),
+        currency: 'COP',
+        status: status ?? 'DECLINED',
+        method: orden.metodo_pago || null,
+        gatewayTxId: orden.id_wompi || null,
+        rawInit: { portalId: Number(orden.id), estadoPortal: orden.estado, cidUser: Number(orden.cid_user) },
+        rawWebhook,
+        updatedAt: new Date(),
+      },
+    }).catch(() => undefined); // la creó la ingesta entre medias: la pasada siguiente la ve
+  }
+
+  /** `GET /v1/transactions/:id` con la llave privada. `null` si Wompi no la conoce. */
+  private async transaccionWompi(id: string): Promise<TransaccionWompi | null> {
+    let llave: string | undefined;
+    try {
+      llave = JSON.parse((await this.llavesWompi()).valor)?.private_key;
+    } catch { /* abajo */ }
+    if (!llave) throw new Error('no hay llave privada de Wompi en variables_de_entorno');
+    const base = (process.env.WOMPI_API_URL || 'https://production.wompi.co/v1').replace(/\/+$/, '');
+    const res = await fetch(`${base}/transactions/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${llave}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const cuerpo: any = await res.json();
+    return (cuerpo?.data ?? null) as TransaccionWompi | null;
   }
 
   // ------------------------------------------------------------------
@@ -869,6 +1148,11 @@ function normalizarIp(ip: string | null): string {
   if (s.startsWith('::ffff:')) return s.slice(7);
   if (s === '::1') return '127.0.0.1';
   return s;
+}
+
+/** 'YYYY-MM-DD HH:mm:ss' en hora de Colombia, que es como escribe fechas el portal. */
+function fechaBogota(d: Date): string {
+  return new Date(d.getTime() - 5 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
 }
 
 /** md5 de una frase, que es como el portal firma. Se usa desde el script de rotación. */

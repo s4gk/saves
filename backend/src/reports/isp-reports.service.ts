@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Reportes propios de un ISP.
@@ -31,7 +32,7 @@ export class IspReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
   private async sedes() {
-    const rows = await this.prisma.branch.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } });
+    const rows = await this.prisma.branch.findMany({ where: SEDE_ACTIVA, select: { id: true, name: true }, orderBy: { name: 'asc' } });
     return rows.map((b) => ({ id: b.id, nombre: b.name }));
   }
 

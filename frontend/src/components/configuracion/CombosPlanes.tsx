@@ -1,16 +1,18 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/Modal";
 import { Input, Select, Field } from "@/components/ui/Field";
-import { Interruptor, InterruptorCompacto } from "@/components/ui/Segmented";
+import { Interruptor, InterruptorCompacto, Segmented } from "@/components/ui/Segmented";
 import { Icon } from "@/components/Icon";
 import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
 import { fullCurrency } from "@/lib/format";
+import { SUB_STATUS_LABEL } from "@/lib/subscribers";
 import { type Bundle, type BundleApp, type Plan, type ServiceKind, SERVICE_KIND_LABEL } from "@/lib/plans";
 
 /**
@@ -54,6 +56,9 @@ export function CombosPlanes() {
   const [confirmar, setConfirmar] = useState<Bundle | null>(null);
   const [borrando, setBorrando] = useState(false);
   const [cambiando, setCambiando] = useState<Set<string>>(new Set());
+  const [filtro, setFiltro] = useState<"todos" | "activos" | "desactivados">("todos");
+  /** Combo cuyos abonados se están mirando. */
+  const [viendo, setViendo] = useState<Bundle | null>(null);
 
   const load = useCallback(() => {
     void authFetch(`/plan-bundles`)
@@ -64,9 +69,10 @@ export function CombosPlanes() {
  
   useEffect(() => {
     load();
-    // Solo planes visibles: meter en un combo un plan que ya no se vende deja el
-    // combo invendible (el backend lo rechaza al aplicarlo).
-    void authFetch(`/plans?activeOnly=true`)
+    // Todos los planes: un combo puede llevar un plan oculto (se vende solo por
+    // combo y los sueltos se ocultan). El selector ofrece los visibles y, además,
+    // el oculto que el combo ya lleva, para no perderlo al editar.
+    void authFetch(`/plans`)
       .then((r) => (r.ok ? r.json() : []))
       .then((d) => setPlans(Array.isArray(d) ? d : []))
       .catch(() => setPlans([]));
@@ -234,6 +240,11 @@ export function CombosPlanes() {
     }
   }
 
+  const activos = combos?.filter((b) => b.active).length ?? 0;
+  const mostrados = (combos ?? []).filter(
+    (b) => filtro === "todos" || (filtro === "activos" ? b.active : !b.active),
+  );
+
   return (
     <div className="space-y-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -258,7 +269,26 @@ export function CombosPlanes() {
             menor que la suma de los dos. Crea el primero con “Nuevo combo”.
           </p>
         </div>
-      ) : combos.map((b) => (
+      ) : (
+        <>
+          <div className="flex justify-end">
+            <Segmented
+              ariaLabel="Filtrar combos por estado"
+              value={filtro}
+              onChange={setFiltro}
+              options={[
+                { value: "todos", label: `Todos (${combos.length})` },
+                { value: "activos", label: `Activos (${activos})` },
+                { value: "desactivados", label: `Desactivados (${combos.length - activos})` },
+              ]}
+            />
+          </div>
+          {mostrados.length === 0 && (
+            <p className="text-[13px] text-text-tertiary">
+              {filtro === "desactivados" ? "No hay combos desactivados." : "No hay combos activos."}
+            </p>
+          )}
+          {mostrados.map((b) => (
         <div
           key={b.id}
           className={`rounded-xl border p-3 ${b.active ? "border-border-subtle bg-surface" : "border-dashed border-border-subtle bg-surface-2"}`}
@@ -276,8 +306,6 @@ export function CombosPlanes() {
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className={`truncate text-[14px] font-semibold ${b.active ? "text-text-primary" : "text-text-tertiary"}`}>{b.name}</span>
-                  {!b.active && <Badge tone="warning" label="Oculto" />}
-                  {b.blocked && <Badge tone="error" label="Lleva un plan oculto" />}
                   {b.savings > 0 && <Badge tone="success" label={`Ahorro ${fullCurrency(b.savings)}`} />}
                 </div>
                 {b.description && <p className="mt-0.5 text-[12px] text-text-tertiary">{b.description}</p>}
@@ -307,7 +335,17 @@ export function CombosPlanes() {
                     ))}
                   </div>
                 )}
-                <p className="mt-1 text-[11.5px] text-text-tertiary">{b.subscribers} abonado(s) con este combo</p>
+                {b.subscribers > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setViendo(b)}
+                    className="mt-1 text-[11.5px] font-semibold text-brand hover:underline"
+                  >
+                    {b.subscribers} abonado(s) con este combo · Ver quiénes
+                  </button>
+                ) : (
+                  <p className="mt-1 text-[11.5px] text-text-tertiary">Ningún abonado con este combo</p>
+                )}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-3">
@@ -329,6 +367,10 @@ export function CombosPlanes() {
           </div>
         </div>
       ))}
+        </>
+      )}
+
+      {viendo && <AbonadosDelCombo combo={viendo} onClose={() => setViendo(null)} />}
 
       {/* El armador va en un modal más ancho que el de por defecto: lleva tres
           columnas (servicio · plan · precio) y a 512 px el desplegable del plan
@@ -351,9 +393,9 @@ export function CombosPlanes() {
               </p>
               <div className="flex flex-col gap-2">
                 {KIND_ORDER.map((kind) => {
-                  const disponibles = planesPorKind.get(kind) ?? [];
-                  if (!disponibles.length) return null;
                   const linea = draft.lineas[kind];
+                  const disponibles = (planesPorKind.get(kind) ?? []).filter((p) => p.active || p.id === linea?.planId);
+                  if (!disponibles.length) return null;
                   const plan = disponibles.find((p) => p.id === linea?.planId);
                   return (
                     <div key={kind} className="grid grid-cols-1 gap-2 sm:grid-cols-[100px_1fr_130px] sm:items-center">
@@ -361,7 +403,7 @@ export function CombosPlanes() {
                       <Select value={linea?.planId ?? ""} onChange={(e) => elegirPlan(kind, e.target.value)}>
                         <option value="">— sin {SERVICE_KIND_LABEL[kind].toLowerCase()} —</option>
                         {disponibles.map((p) => (
-                          <option key={p.id} value={p.id}>{p.name} · {fullCurrency(p.price)}</option>
+                          <option key={p.id} value={p.id}>{p.name} · {fullCurrency(p.price)}{p.active ? "" : " (oculto)"}</option>
                         ))}
                       </Select>
                       <Input
@@ -515,5 +557,68 @@ export function CombosPlanes() {
         />
       )}
     </div>
+  );
+}
+
+type AbonadoCombo = {
+  id: string;
+  abonado: number;
+  nombre: string | null;
+  documento: string | null;
+  estado: string | null;
+  sede: string | null;
+};
+
+/** Lista de quienes tienen el combo, con enlace a su ficha. */
+function AbonadosDelCombo({ combo, onClose }: { combo: Bundle; onClose: () => void }) {
+  const { authFetch } = useAuth();
+  const [filas, setFilas] = useState<AbonadoCombo[] | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    void authFetch(`/plan-bundles/${combo.id}/abonados`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => setFilas(Array.isArray(d) ? d : []))
+      .catch(() => setError(true));
+  }, [authFetch, combo.id]);
+
+  return (
+    <Modal open onClose={onClose} maxWidth="max-w-2xl" title={`Abonados con «${combo.name}»`}>
+      {error ? (
+        <p className="text-[13px] text-error-text">No se pudo cargar la lista.</p>
+      ) : !filas ? (
+        <p className="text-[13px] text-text-tertiary">Cargando…</p>
+      ) : filas.length === 0 ? (
+        <p className="text-[13px] text-text-tertiary">Ninguno de tus sedes tiene este combo.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border-subtle text-left text-[11.5px] text-text-tertiary">
+                <th className="py-1.5 pr-3 font-semibold">Abonado</th>
+                <th className="py-1.5 pr-3 font-semibold">Nombre</th>
+                <th className="py-1.5 pr-3 font-semibold">Documento</th>
+                <th className="py-1.5 pr-3 font-semibold">Sede</th>
+                <th className="py-1.5 font-semibold">Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filas.map((f) => (
+                <tr key={f.id} className="border-b border-border-subtle last:border-0">
+                  <td className="py-1.5 pr-3">
+                    <Link href={`/clientes/${f.id}`} className="font-mono font-semibold text-brand hover:underline">#{f.abonado}</Link>
+                  </td>
+                  <td className="py-1.5 pr-3 text-text-primary">{f.nombre ?? "—"}</td>
+                  <td className="py-1.5 pr-3 font-mono text-text-secondary">{f.documento ?? "—"}</td>
+                  <td className="py-1.5 pr-3 text-text-secondary">{f.sede ?? "—"}</td>
+                  <td className="py-1.5 text-text-secondary">{f.estado ? (SUB_STATUS_LABEL[f.estado] ?? f.estado) : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 text-[11.5px] text-text-tertiary">{filas.length} abonado(s)</p>
+        </div>
+      )}
+    </Modal>
   );
 }

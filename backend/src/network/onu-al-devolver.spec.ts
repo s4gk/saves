@@ -37,6 +37,19 @@ describe('al devolver un equipo sale también de la OLT', () => {
     expect(prisma.ticketThread.create).toHaveBeenCalled();
   });
 
+  it('cliente RETIRADO: desautentica sus ONUs (equipo a su nombre y ONU vinculada), sin repetir la misma', async () => {
+    const { svc, prisma, olt } = armar();
+    prisma.equipment = { findMany: jest.fn().mockResolvedValue([{ code: 311071, serial: 'XPON1D8D6564' }, { code: 9, serial: 'solicitar' }]) };
+    // La primera llamada a oltOnu.findMany es la del retiro (ONUs del cliente); las
+    // siguientes, las de `desautenticar` (dónde está vinculada cada SN).
+    prisma.oltOnu.findMany
+      .mockResolvedValueOnce([{ sn: '58504F4E1D8D6564' }, { sn: '5A544547C6405372' }])
+      .mockResolvedValue([]);
+    const r = await svc.desautenticarDelCliente({ subscriberId: 'barbara', motivo: 'Retiro (orden #1)', ticketCode: 1 });
+    expect(r.map((x) => x.accion)).toEqual(['BORRADA', 'BORRADA']);
+    expect(olt.estadoPorSn.mock.calls.map((c: any[]) => c[1])).toEqual(['58504F4E1D8D6564', '5A544547C6405372']);
+  });
+
   it('si la OLT la vincula a OTRO cliente, no la toca y lo anota', async () => {
     const { svc, olt, prisma } = armar({
       vinculadas: [{ oltId: 'olt-mty', subscriberId: 'vecino', clientName: 'JUAN VECINO', olt: { name: 'MONTERREY' } }],

@@ -10,7 +10,6 @@ import { Modal } from "@/components/Modal";
 import { DataTable } from "@/components/ui/DataTable";
 import { Pagination } from "@/components/ui/Pagination";
 import { ListToolbar } from "@/components/ui/ListToolbar";
-import { TabStrip } from "@/components/ui/TabStrip";
 import { StatCard } from "@/components/ui/StatCard";
 import { PageSkeleton } from "@/components/skeletons/PageSkeleton";
 import { LoadError } from "@/components/ui/LoadError";
@@ -60,7 +59,7 @@ type Fila = {
   /** Recibo de caja del recaudo. */
   recibo: string | null;
   /** Quién aplicó la plata: este sistema o el legacy (histórico). */
-  origen: "nexus" | "legacy" | null;
+  origen: "nexus" | "legacy" | "manual" | null;
 };
 
 type Resumen = {
@@ -75,16 +74,12 @@ type Detalle = Fila & {
   movimiento: { id: string; credit: number; date: string; note: string | null; method: string | null } | null;
   ordenes: { id: string; code: number; type: string; status: string }[];
   descuento: { monto: number; promocion: string | null; porcentaje: number } | null;
+  /** Aprobado por Wompi en un reintento que el portal dio por rechazado. */
+  reintento: { dia: string | null; revisar: string | null; descartado: string | null } | null;
 };
 
-const TABS = [
-  { key: "TODOS", label: "Todos" },
-  { key: "APPROVED", label: "Aprobados" },
-  { key: "PENDING", label: "Sin terminar" },
-  { key: "DECLINED", label: "Rechazados" },
-  { key: "SIN_APLICAR", label: "Sin aplicar" },
-] as const;
-type Tab = (typeof TABS)[number]["key"];
+/** Filtro de la tabla; lo ponen las tarjetas de arriba. */
+type Tab = "TODOS" | "APPROVED" | "PENDING" | "DECLINED" | "SIN_APLICAR";
 
 const ESTADO: Record<string, { label: string; tone: "success" | "error" | "warning" | "default" }> = {
   APPROVED: { label: "Aprobado", tone: "success" },
@@ -179,6 +174,11 @@ export default function PagosEnLineaPage() {
     }
   }
 
+  /** Las tarjetas filtran la tabla; tocar la que ya está puesta vuelve a «Todos». */
+  function filtrarPor(t: Tab) {
+    setTab((actual) => (actual === t ? "TODOS" : t));
+  }
+
   if (authLoading) return <PageSkeleton />;
 
   const r = resumen.data;
@@ -200,19 +200,22 @@ export default function PagosEnLineaPage() {
       </div>
 
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard icon="check" label="Aprobados" value={r ? `${r.aprobados.cantidad} · ${cop(r.aprobados.monto)}` : "—"} tone="text-success-text" />
-        <StatCard icon="clock" label="Empezados sin terminar" value={r ? `${r.abandonados.cantidad} · ${cop(r.abandonados.monto)}` : "—"} />
-        <StatCard icon="ban" label="Rechazados" value={r ? `${r.rechazados.cantidad} · ${cop(r.rechazados.monto)}` : "—"} />
+        <StatCard icon="check" label="Aprobados" value={r ? `${r.aprobados.cantidad} · ${cop(r.aprobados.monto)}` : "—"} tone="text-success-text"
+          onClick={() => filtrarPor("APPROVED")} active={tab === "APPROVED"} />
+        <StatCard icon="clock" label="Empezados sin terminar" value={r ? `${r.abandonados.cantidad} · ${cop(r.abandonados.monto)}` : "—"}
+          onClick={() => filtrarPor("PENDING")} active={tab === "PENDING"} />
+        <StatCard icon="ban" label="Rechazados" value={r ? `${r.rechazados.cantidad} · ${cop(r.rechazados.monto)}` : "—"}
+          onClick={() => filtrarPor("DECLINED")} active={tab === "DECLINED"} />
         {/* El número que justifica la pantalla: cobrado al cliente y sin bajarle la deuda. */}
         <StatCard
           icon="alert-triangle"
           label="Aprobados sin aplicar"
           value={r ? `${r.sinAplicar.cantidad} · ${cop(r.sinAplicar.monto)}` : "—"}
           tone={r && r.sinAplicar.cantidad > 0 ? "text-error-text" : "text-text-primary"}
+          onClick={() => filtrarPor("SIN_APLICAR")}
+          active={tab === "SIN_APLICAR"}
         />
       </div>
-
-      <TabStrip tabs={TABS.map((t) => ({ key: t.key, label: t.label }))} active={tab} onChange={setTab} />
 
       <ListToolbar search={search} onSearch={setSearch} searchPlaceholder="Cliente, abonado, referencia o ID de Wompi…">
         <RangoFechas value={rangoValor} onChange={setRangoValor} presets={["hoy", "semana", "mes", "mesPasado", "anio", "personalizado"]} />
@@ -283,6 +286,7 @@ export default function PagosEnLineaPage() {
                 render: (f: Fila) =>
                   f.origen === "nexus" ? <Badge label="Este sistema" tone="success" />
                     : f.origen === "legacy" ? <Badge label="Legacy" tone="default" />
+                    : f.origen === "manual" ? <Badge label="A mano" tone="warning" />
                     : <span className="text-text-tertiary">—</span>,
               },
               {
@@ -325,13 +329,33 @@ export default function PagosEnLineaPage() {
               <Dato label="ID de Wompi" valor={<code className="break-all text-[11px]">{detalle.gatewayTxId ?? "—"}</code>} />
             </div>
 
+            {detalle.reintento && (
+              <div className={`rounded-lg border p-3 ${detalle.reintento.revisar ? "border-warning-border bg-warning-soft" : "border-border-subtle"}`}>
+                <div className="mb-1 font-semibold text-text-primary">Aprobado en un reintento</div>
+                <p className="text-text-secondary">
+                  El banco rechazó el primer intento y el cliente volvió a pagar con la misma referencia.
+                  El portal lo dejó como rechazado; Wompi lo tiene como{" "}
+                  {detalle.reintento.descartado ? "no aprobado" : "aprobado"}.
+                </p>
+                {detalle.reintento.revisar && (
+                  <p className="mt-1 text-warning-text">
+                    No se aplicó solo porque {detalle.reintento.revisar}. Revise la cuenta del cliente antes
+                    de cargarlo a mano para no cobrarle dos veces.
+                  </p>
+                )}
+                {detalle.reintento.descartado && (
+                  <p className="mt-1 text-text-tertiary">Descartado: {detalle.reintento.descartado}.</p>
+                )}
+              </div>
+            )}
+
             <div className="rounded-lg border border-border-subtle p-3">
               <div className="mb-1 font-semibold text-text-primary">La plata</div>
               {detalle.movimiento ? (
                 <div className="flex flex-col gap-1.5 text-text-secondary">
                   <p>
                     {cop(detalle.movimiento.credit)} el {fmtDate(detalle.movimiento.date)}
-                    {detalle.origen === "nexus" ? " · aplicado por este sistema" : detalle.origen === "legacy" ? " · aplicado por el legacy" : ""}
+                    {detalle.origen === "nexus" ? " · aplicado por este sistema" : detalle.origen === "legacy" ? " · aplicado por el legacy" : detalle.origen === "manual" ? " · cargado a mano" : ""}
                   </p>
                   {!!detalle.facturas.length && (
                     <p>

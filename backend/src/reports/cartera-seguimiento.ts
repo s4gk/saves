@@ -1,7 +1,9 @@
-import { SubscriberStatus } from '@prisma/client';
+import { Prisma, SubscriberStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { num, round2 } from '../common/money';
 import { hoyEnColombia } from '../common/fecha-colombia';
+import { BadRequestException, NotFoundException } from '../core/http/errores';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Seguimiento mensual de la cartera: qué pasó con cada abonado que el día 1 estaba
@@ -23,6 +25,10 @@ import { hoyEnColombia } from '../common/fecha-colombia';
  * clasificación mira sólo la vieja: quien saldó lo del día 1 y debe la factura del
  * mes en curso no es un "abono parcial" de cartera. Así inicial − recuperado + nueva
  * = final cuadra fila por fila.
+ *
+ * Cartera puede corregir la clasificación a mano y dejar observaciones por usuario
+ * (`gestionar`): la corrección manda sobre la automática en todo el reporte, también
+ * en el resumen, y la automática se sigue mostrando al lado para que se note.
  */
 
 export type Categoria = 'RETIRADO' | 'ACTIVADO' | 'PARCIAL' | 'PAGO_SIN_ACTIVAR' | 'SIN_PAGO';
@@ -137,19 +143,22 @@ export async function reconstruirMes(prisma: PrismaService, mes: string, subscri
   return { mes, creados: r.count };
 }
 
-type Vivo = { subscriberId: string; pagado: number; pagos: number; deudaFinal: number; estadoFinal: SubscriberStatus | null };
+type Vivo = {
+  subscriberId: string; pagado: number; pagos: number; ultimoPago: string | null;
+  deudaFinal: number; estadoFinal: SubscriberStatus | null;
+};
 
 /** Pagos del mes, deuda de hoy y estado de hoy de cada abonado de la cohorte. */
 async function calcularVivo(prisma: PrismaService, mes: string): Promise<Map<string, Vivo>> {
   const fin = ultimoDia(mes);
-  const rows = await prisma.$queryRaw<{ id: string; status: SubscriberStatus | null; pagado: number; pagos: number; deuda: number }[]>`
+  const rows = await prisma.$queryRaw<{ id: string; status: SubscriberStatus | null; pagado: number; pagos: number; ultimo: string | null; deuda: number }[]>`
     SELECT c."subscriberId" id, s.status,
-           COALESCE(p.pagado, 0)::float pagado, COALESCE(p.pagos, 0)::int pagos,
+           COALESCE(p.pagado, 0)::float pagado, COALESCE(p.pagos, 0)::int pagos, p.ultimo::text ultimo,
            COALESCE(d.deuda, 0)::float deuda
     FROM "CarteraSeguimiento" c
     LEFT JOIN "Subscriber" s ON s.id = c."subscriberId"
     LEFT JOIN (
-      SELECT t."subscriberId", SUM(t.credit) pagado, COUNT(*) pagos FROM "Transaction" t
+      SELECT t."subscriberId", SUM(t.credit) pagado, COUNT(*) pagos, MAX(t.date) ultimo FROM "Transaction" t
       WHERE t.type = 'INCOME' AND t.status = 'VIGENTE' AND t.date BETWEEN ${mes}::date AND ${fin}::date
       GROUP BY t."subscriberId"
     ) p ON p."subscriberId" = c."subscriberId"
@@ -159,7 +168,7 @@ async function calcularVivo(prisma: PrismaService, mes: string): Promise<Map<str
     ) d ON d."subscriberId" = c."subscriberId"
     WHERE c.mes = ${mes}::date`;
   return new Map(rows.map((r) => [r.id, {
-    subscriberId: r.id, estadoFinal: r.status, pagado: round2(Number(r.pagado)), pagos: Number(r.pagos),
+    subscriberId: r.id, estadoFinal: r.status, pagado: round2(Number(r.pagado)), pagos: Number(r.pagos), ultimoPago: r.ultimo,
     deudaFinal: round2(Math.max(0, Number(r.deuda))),
   }]));
 }
@@ -176,7 +185,8 @@ export async function cerrarMes(prisma: PrismaService, mes: string) {
   const ops = [...vivo.values()].map((v) => prisma.carteraSeguimiento.update({
     where: { mes_subscriberId: { mes: aFecha(mes), subscriberId: v.subscriberId } },
     data: {
-      pagado: v.pagado, pagos: v.pagos, deudaFinal: v.deudaFinal, estadoFinal: v.estadoFinal,
+      pagado: v.pagado, pagos: v.pagos, ultimoPago: v.ultimoPago ? aFecha(v.ultimoPago) : null,
+      deudaFinal: v.deudaFinal, estadoFinal: v.estadoFinal,
       categoria: clasificar(v.pagado, deudaViejaDe(inicial.get(v.subscriberId) ?? 0, v.pagado), v.estadoFinal), cerradoEn: ahora,
     },
   }));
@@ -202,7 +212,14 @@ export async function pasoMensual(prisma: PrismaService) {
 type Fila = {
   subscriberId: string; branchId: string | null; estadoInicial: SubscriberStatus; deudaInicial: number;
   facturasInicial: number; pagado: number; pagos: number; deudaFinal: number; estadoFinal: SubscriberStatus | null;
+  /** La que vale: la manual si la hay, si no la automática. */
   categoria: Categoria;
+  categoriaAuto: Categoria;
+  categoriaManual: Categoria | null;
+  ultimoPago: string | null;
+  observaciones: string | null;
+  gestionadoPorId: string | null;
+  gestionadoEn: Date | null;
   /** Lo pagado que abonó a la deuda del día 1 (tope: esa deuda). El resto es reconexión o mes corriente. */
   recuperado: number;
   /** Lo que sigue sin pagar de la deuda del día 1. */
@@ -226,11 +243,15 @@ async function filasDelMes(prisma: PrismaService, mes: string, sede?: string): P
     const estadoFinal = v ? v.estadoFinal : g.estadoFinal;
     const deudaInicial = num(g.deudaInicial);
     const deudaVieja = deudaViejaDe(deudaInicial, pagado);
+    const categoriaAuto = v ? clasificar(pagado, deudaVieja, estadoFinal) : (g.categoria as Categoria);
+    const categoriaManual = (g.categoriaManual as Categoria | null) ?? null;
     return {
       subscriberId: g.subscriberId, branchId: g.branchId, estadoInicial: g.estadoInicial,
       deudaInicial: num(g.deudaInicial), facturasInicial: g.facturasInicial,
       pagado, pagos: v ? v.pagos : g.pagos ?? 0, deudaFinal, estadoFinal,
-      categoria: v ? clasificar(pagado, deudaVieja, estadoFinal) : (g.categoria as Categoria),
+      categoria: categoriaManual ?? categoriaAuto, categoriaAuto, categoriaManual,
+      ultimoPago: v ? v.ultimoPago : g.ultimoPago?.toISOString().slice(0, 10) ?? null,
+      observaciones: g.observaciones, gestionadoPorId: g.gestionadoPorId, gestionadoEn: g.gestionadoEn,
       recuperado: round2(Math.min(pagado, deudaInicial)),
       deudaVieja, deudaNueva: round2(deudaFinal - deudaVieja),
     };
@@ -273,7 +294,7 @@ export async function seguimientoCartera(prisma: PrismaService, opts: { mes?: st
   const meses = disponibles.map((d) => d.mes.toISOString().slice(0, 10));
   const mes = opts.mes && meses.includes(primerDia(opts.mes)) ? primerDia(opts.mes) : meses[0];
 
-  const sedes = (await prisma.branch.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }))
+  const sedes = (await prisma.branch.findMany({ where: SEDE_ACTIVA, select: { id: true, name: true }, orderBy: { name: 'asc' } }))
     .map((b) => ({ id: b.id, nombre: b.name }));
   const opciones = {
     meses: meses.map((m) => ({ value: m.slice(0, 7), label: nombreMes(m) })),
@@ -303,6 +324,10 @@ export async function seguimientoCartera(prisma: PrismaService, opts: { mes?: st
     select: { id: true, abonado: true, firstName: true, lastName1: true, lastName2: true, fullName: true, companyName: true, branch: { select: { name: true } } },
   });
   const ficha = new Map(fichas.map((s) => [s.id, s]));
+  const gestores = new Map((await prisma.user.findMany({
+    where: { id: { in: [...new Set(visibles.map((f) => f.gestionadoPorId).filter((x): x is string => !!x))] } },
+    select: { id: true, name: true },
+  })).map((u) => [u.id, u.name]));
   const nombre = (s?: (typeof fichas)[number]) =>
     !s ? '—' : (s.companyName?.trim() || s.fullName?.trim() || [s.firstName, s.lastName1, s.lastName2].filter(Boolean).join(' ').trim() || '—');
   const items = visibles
@@ -313,7 +338,9 @@ export async function seguimientoCartera(prisma: PrismaService, opts: { mes?: st
         estadoInicial: f.estadoInicial, estadoFinal: f.estadoFinal,
         deudaInicial: f.deudaInicial, pagado: f.pagado, recuperado: f.recuperado, pagos: f.pagos, deudaFinal: f.deudaFinal,
         deudaVieja: f.deudaVieja, deudaNueva: f.deudaNueva,
-        categoria: f.categoria,
+        categoria: f.categoria, categoriaAuto: f.categoriaAuto, manual: f.categoriaManual != null,
+        ultimoPago: f.ultimoPago, observaciones: f.observaciones,
+        gestionadoPor: f.gestionadoPorId ? gestores.get(f.gestionadoPorId) ?? null : null, gestionadoEn: f.gestionadoEn,
       };
     })
     .sort((a, b) => b.pagado - a.pagado || b.deudaInicial - a.deudaInicial);
@@ -332,4 +359,30 @@ export async function seguimientoCartera(prisma: PrismaService, opts: { mes?: st
     categoria: opts.categoria ?? null,
     resumen: resumir(filas), categorias, items, comparativo, opciones,
   };
+}
+
+/**
+ * La gestión de Cartera sobre una fila: corregir la clasificación (null = volver a la
+ * automática) y/o dejar observaciones. Vale también en meses cerrados: no toca lo
+ * congelado, sólo se pone encima.
+ */
+export async function gestionar(
+  prisma: PrismaService, mes: string, subscriberId: string,
+  cambios: { categoria?: string | null; observaciones?: string | null }, userId: string,
+) {
+  const where = { mes_subscriberId: { mes: aFecha(primerDia(mes)), subscriberId } };
+  const fila = await prisma.carteraSeguimiento.findUnique({ where, select: { id: true } });
+  if (!fila) throw new NotFoundException('Ese abonado no está en la cartera de ese mes.');
+  const data: Prisma.CarteraSeguimientoUpdateInput = { gestionadoPorId: userId, gestionadoEn: new Date() };
+  if (cambios.categoria !== undefined) {
+    if (cambios.categoria !== null && !CATEGORIAS.some((c) => c.key === cambios.categoria)) {
+      throw new BadRequestException('Clasificación desconocida.');
+    }
+    data.categoriaManual = cambios.categoria;
+  }
+  if (cambios.observaciones !== undefined) data.observaciones = cambios.observaciones?.trim() || null;
+  const g = await prisma.carteraSeguimiento.update({
+    where, data, select: { categoriaManual: true, observaciones: true, gestionadoEn: true },
+  });
+  return { ok: true, ...g };
 }

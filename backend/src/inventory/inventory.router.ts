@@ -153,7 +153,7 @@ inventoryRouter.post(
     limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => cb(null, /spreadsheet|excel|\.xlsx$/.test(file.mimetype) || file.originalname.toLowerCase().endsWith('.xlsx')),
   }),
-  manejar((req) => inventory.importMaterials(ficheroDe(req))),
+  manejar((req) => inventory.importMaterials(ficheroDe(req), usuarioDe(req))),
 );
 
 inventoryRouter.delete(

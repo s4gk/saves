@@ -96,7 +96,7 @@ export class OnuAlDevolverService {
         if (!del.dryRun) await this.prisma.oltOnu.deleteMany({ where: { sn, oltId } });
         await this.anotar(x, del.dryRun
           ? `Equipo ${x.code} (S/N ${sn}) devuelto: la OLT está en modo simulación, NO se desautenticó de ${nombre} (${fsp}).`
-          : `Equipo ${x.code} (S/N ${sn}) desautenticado de la OLT ${nombre} (${fsp}) al devolverse · ${x.motivo}`);
+          : `${x.code ? `Equipo ${x.code}` : 'ONU'} (S/N ${sn}) desautenticada de la OLT ${nombre} (${fsp}) · ${x.motivo}`);
         this.logger.log(`ONU ${sn} (equipo ${x.code}) ${del.dryRun ? 'dry-run' : 'eliminada'} de ${nombre} ${fsp} · ${x.motivo}`);
         return { accion: 'BORRADA', olt: nombre, fsp, dryRun: !!del.dryRun };
       }
@@ -105,6 +105,35 @@ export class OnuAlDevolverService {
       const error = (err as Error).message;
       this.logger.warn(`Desautenticar equipo ${x.code} al devolverlo: ${error}`);
       return { accion: 'ERROR', error };
+    }
+  }
+
+  /**
+   * Todas las ONUs de un cliente que se RETIRA (cierre de la orden de retiro,
+   * pedido del usuario 2026-10-06): el equipo no vuelve a bodega por sí solo y,
+   * mientras siga dado de alta, no sale en el autofind para el siguiente cliente.
+   * Se buscan en los equipos a su nombre y en las ONUs que el inventario de la OLT
+   * le vincula. Igual que `desautenticar`: nunca lanza y deja nota en la ficha.
+   */
+  async desautenticarDelCliente(x: {
+    subscriberId: string; motivo: string; ticketCode?: number | null; user?: AuthUser | null;
+  }): Promise<ResultadoDesautenticar[]> {
+    try {
+      const [equipos, onus] = await Promise.all([
+        this.prisma.equipment.findMany({ where: { subscriberId: x.subscriberId }, select: { code: true, serial: true } }),
+        this.prisma.oltOnu.findMany({ where: { subscriberId: x.subscriberId }, select: { sn: true } }),
+      ]);
+      const porSn = new Map<string, number>();
+      for (const e of equipos) { const sn = formaHex(e.serial); if (sn) porSn.set(sn, e.code); }
+      for (const o of onus) { const sn = formaHex(o.sn); if (sn && !porSn.has(sn)) porSn.set(sn, 0); }
+      const out: ResultadoDesautenticar[] = [];
+      for (const [sn, code] of porSn) {
+        out.push(await this.desautenticar({ serial: sn, code, subscriberId: x.subscriberId, motivo: x.motivo, ticketCode: x.ticketCode, user: x.user }));
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(`Desautenticar las ONUs del cliente ${x.subscriberId}: ${(err as Error).message}`);
+      return [{ accion: 'ERROR', error: (err as Error).message }];
     }
   }
 

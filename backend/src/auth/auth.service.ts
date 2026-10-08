@@ -9,6 +9,7 @@ import { ROLE_AREA_BY_KEY, SUPERADMIN_PERMISSION, SCREENS, screenKey, ALL_PERMIS
 import { PasswordOtpService } from '../common/signature/password-otp.service';
 import { resolverSedes } from '../common/sede-scope';
 import { csvSedesLegacy, sedesDeCsvLegacy } from './sedes-staff';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 export class AuthService {
   constructor(
@@ -53,7 +54,12 @@ export class AuthService {
     // Permisos efectivos = (unión de los roles) ∪ overrides ALLOW − overrides DENY.
     const permissions = new Set<string>();
     const roles: string[] = [];
-    for (const ur of user.roles) {
+    // El rol que concede superusuario va primero: la pantalla rotula al usuario con
+    // `roles[0]`, y si no, a un superusuario lo bautizaba su área ("Administración").
+    const daSuper = (ur: (typeof user.roles)[number]) =>
+      ur.role.permissions.some((rp) => rp.permission.key === SUPERADMIN_PERMISSION);
+    const ordenados = [...user.roles].sort((a, b) => Number(daSuper(b)) - Number(daSuper(a)));
+    for (const ur of ordenados) {
       roles.push(ur.role.name);
       for (const rp of ur.role.permissions) permissions.add(rp.permission.key);
     }
@@ -226,9 +232,17 @@ export class AuthService {
     });
   }
 
-  /** Sedes disponibles, para el selector de acceso por sede. */
+  /**
+   * Sedes disponibles, para el selector de acceso por sede.
+   *
+   * Sólo las ACTIVAS: a una sede desactivada ya no se asigna a nadie. Las que alguien
+   * tenga guardadas de antes siguen en su cuenta (`validarSedes` no las rechaza), pero
+   * si se le edita el acceso con el selector delante, lo que no se vea no se vuelve a
+   * marcar — es justo lo que se pidió al apagar la sede.
+   */
   listBranches() {
     return this.prisma.branch.findMany({
+      where: SEDE_ACTIVA,
       select: { legacyId: true, name: true },
       orderBy: { name: 'asc' },
     });

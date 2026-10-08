@@ -200,7 +200,7 @@ export function RendimientoEmpleado({
           icon="award"
           hint={
             resumen.puntajePromedio != null
-              ? `${resumen.puntajePromedio} puntos por orden · cada orden vale de 1 a 5 según su tipo`
+              ? `${resumen.puntajePromedio} puntos por orden · cada orden vale de 1 a 5 según su tipo, +1 si la termina temprano`
               : "Sus órdenes cerradas aún no traen puntaje"
           }
         />

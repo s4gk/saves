@@ -9,6 +9,7 @@ import { num, round2 } from '../common/money';
 import { subName } from '../common/subscriber-name';
 import { Logger } from '../core/logger';
 import { pagosAnterioresAlCorte } from '../online-payments/pago-anterior-al-corte';
+import { DIAS_GRACIA_CONVENIO } from '../promotions/descuento-al-cobrar';
 
 const dateOnly = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
@@ -243,7 +244,12 @@ export class PaymentImportsService {
           date: row.date ? row.date.toISOString().slice(0, 10) : undefined,
           reference: row.reference ?? undefined,
           note: nota,
-        } as any, (user ?? { name: 'Cargue', email: null }) as any, { reconectar: false });
+        } as any, (user ?? { name: 'Cargue', email: null }) as any, {
+          reconectar: false,
+          // El banco reporta tarde: el pronto pago sigue valiendo unos días hábiles
+          // después de terminar la promoción (ver `DIAS_GRACIA_CONVENIO`).
+          graciaPromoDiasHabiles: DIAS_GRACIA_CONVENIO,
+        });
         await this.mark(row.id, 'Cargado', res.receiptId, `Aplicado ${res.totalApplied}${row.cashAccountId == null ? ` · OJO: la cuenta «${row.method}» no existe en tesorería` : ''}`, true);
         pagaron.add(row.subscriberId);
         aplicadas.push(row.id);

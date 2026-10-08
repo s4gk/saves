@@ -19,6 +19,12 @@ export type CatalogoItem = {
   taxRate: number;
   /** Veces que se ha facturado este concepto (ordena el catálogo por uso real). */
   usos: number;
+  /**
+   * Plan ANTIGUO: un plan oculto, o un producto del legacy con nombre de plan
+   * («100 Megas F-26») que no es uno de los planes visibles. Solo lo ve en el
+   * selector quien tiene `billing.invoices.old-plans` (nominal); el filtro es de pantalla.
+   */
+  antiguo: boolean;
 };
 
 /** Vida de la foto en memoria. El catálogo cambia de mes a mes, no de minuto a minuto. */
@@ -39,11 +45,15 @@ const EXCLUIDOS = new Set(['nota credito', 'nota debito', 'saldo anterior']);
 const plano = (s: string) =>
   s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
+/** Nombre de mensualidad («100 Megas…», «Television…»); deja pasar «Afiliación Television». */
+const PARECE_PLAN = /^\s*(\d+\s*megas?|(solo\s*)?televis)/i;
+
 /**
  * Catálogo facturable: qué se le puede cobrar a un cliente.
  *
  * Funde dos fuentes que en el legacy eran una sola tabla `productos`:
- *  - `Plan` activo → la mensualidad, con el precio VIGENTE del catálogo de planes.
+ *  - `Plan` → la mensualidad, con el precio VIGENTE del catálogo de planes (los
+ *    ocultos van marcados `antiguo`).
  *  - `Material` → el resto de la tabla `productos` del legacy (afiliaciones,
  *    reconexiones, traslados, punto adicional, repetidores, equipos…), que es de
  *    donde el legacy sacaba las líneas al facturar a mano.
@@ -76,7 +86,8 @@ export class CatalogoService {
    * concepto a mano.
    */
   async motivos() {
-    const items = await this.items();
+    // Los planes ocultos no proponen precio: el motivo sale de lo que se vende hoy.
+    const items = (await this.items()).filter((i) => !(i.kind === 'PLAN' && i.antiguo));
     return MOTIVOS_FACTURA.map((m) => {
       // El nombre exacto primero y el que empieza igual después: las afiliaciones son
       // 12 productos distintos ('Afiliación Combo', 'Afiliación Villavo'…) y ninguno
@@ -149,9 +160,10 @@ export class CatalogoService {
 
   private async construir(): Promise<CatalogoItem[]> {
     const [planes, materiales, usos] = await Promise.all([
+      // Visibles y ocultos: los ocultos salen marcados `antiguo` (ver CatalogoItem).
       this.prisma.plan.findMany({
-        where: { active: true },
-        select: { name: true, price: true, taxRate: true },
+        select: { name: true, price: true, taxRate: true, active: true },
+        orderBy: { active: 'desc' },
       }),
       this.prisma.material.findMany({
         select: { legacyId: true, name: true, code: true, price: true, taxRate: true },
@@ -176,9 +188,16 @@ export class CatalogoService {
     const vistos = new Set<string>();
     // El plan va primero a propósito: si un producto del legacy repite su nombre con
     // un precio viejo, el que sobrevive es el del catálogo de planes.
+    const visibles = new Set(planes.filter((p) => p.active).map((p) => plano(p.name)));
+    const todosLosPlanes = new Set(planes.map((p) => plano(p.name)));
+    const antiguo = (kind: CatalogoKind, name: string, activo: boolean) => {
+      if (kind === 'PLAN') return !activo;
+      const n = plano(name);
+      return !visibles.has(n) && (PARECE_PLAN.test(name) || todosLosPlanes.has(n));
+    };
     const crudos = [
-      ...planes.map((p) => ({ kind: 'PLAN' as const, name: p.name, code: null, productId: 0, price: num(p.price), taxRate: num(p.taxRate) })),
-      ...materiales.map((m) => ({ kind: 'PRODUCTO' as const, name: m.name, code: m.code, productId: m.legacyId ?? 0, price: num(m.price), taxRate: num(m.taxRate) })),
+      ...planes.map((p) => ({ kind: 'PLAN' as const, name: p.name, code: null, productId: 0, price: num(p.price), taxRate: num(p.taxRate), activo: p.active })),
+      ...materiales.map((m) => ({ kind: 'PRODUCTO' as const, name: m.name, code: m.code, productId: m.legacyId ?? 0, price: num(m.price), taxRate: num(m.taxRate), activo: true })),
     ];
 
     for (const r of crudos) {
@@ -191,7 +210,7 @@ export class CatalogoService {
       const clave = `${norm}|${r.price}`;
       if (vistos.has(clave)) continue;
       vistos.add(clave);
-      items.push({ key: `${r.kind}:${clave}`, kind: r.kind, name, productId: r.productId, code: r.code, price: r.price, taxRate: r.taxRate, usos: porUso.get(norm) ?? 0 });
+      items.push({ key: `${r.kind}:${clave}`, kind: r.kind, name, productId: r.productId, code: r.code, price: r.price, taxRate: r.taxRate, usos: porUso.get(norm) ?? 0, antiguo: antiguo(r.kind, name, r.activo) });
     }
 
     items.sort((a, b) => b.usos - a.usos || a.name.localeCompare(b.name, 'es'));

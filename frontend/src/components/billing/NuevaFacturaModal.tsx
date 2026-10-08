@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/Modal";
 import { Icon } from "@/components/Icon";
@@ -9,10 +9,12 @@ import { Input, Select, Field } from "@/components/ui/Field";
 import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
 import { SubscriberPicker, type PickedSub } from "@/components/cobranzas/SubscriberPicker";
-import { ConceptoPicker } from "@/components/billing/ConceptoPicker";
+import { ConceptoPicker, type CatalogoItem } from "@/components/billing/ConceptoPicker";
 import { DireccionFields, DIRECCION_VACIA, NOM_KEYS, ZONA_KEYS, direccionArmada, type DireccionValor } from "@/components/subscribers/DireccionFields";
 import { cop } from "@/lib/subscribers";
+import type { Bundle } from "@/lib/plans";
 import { mensajeDeError } from "@/lib/errores";
+import { puedeDigitarPrecioFactura, puedeVerPlanesAntiguos } from "@/lib/auth";
 
 type Item = { productName?: string; productId?: number; description: string; qty: number; price: number; taxRate: number };
 
@@ -47,6 +49,16 @@ const KINDS: { value: Kind; label: string; hint: string }[] = [
 ];
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+/** Nombre comparable: sin tildes, sin mayúsculas, sin espacios de sobra. */
+const plano = (t: string) => t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+/**
+ * Mensualidades viejas del legacy que viven como producto suelto y no como plan
+ * («100Megas(F)», «Television26», «SoloTelevision22»…). Se miró la tabla entera:
+ * esto las coge todas y deja pasar «Afiliación Television» y «Reconexión Television».
+ */
+const PARECE_PLAN = /^\s*(\d+\s*megas?|(solo\s*)?televis)/i;
 const emptyItem = (): Item => ({ description: "", qty: 1, price: 0, taxRate: 0 });
 
 /**
@@ -71,13 +83,25 @@ export function NuevaFacturaModal({
    */
   fixedSub?: PickedSub;
 }) {
-  const { authFetch } = useAuth();
+  const { authFetch, user } = useAuth();
   const router = useRouter();
+  /**
+   * Quien tiene el permiso nominal `billing.invoices.price.edit` digita precio, IVA y
+   * subtotal de cada renglón (2026-10-08, Paula Andrea Unas). Al resto se los pone el
+   * catálogo y la celda es de solo lectura.
+   */
+  const digitaPrecio = puedeDigitarPrecioFactura(user);
+  // Quien ve los planes antiguos (nominal) busca entre todos, sueltos incluidos.
+  const verAntiguos = puedeVerPlanesAntiguos(user);
   const [sub, setSub] = useState<PickedSub | null>(fixedSub ?? null);
   const [items, setItems] = useState<Item[]>([emptyItem()]);
   const [invoiceDate, setInvoiceDate] = useState(today());
   const [kind, setKind] = useState<Kind>("FIJA");
   const [notes, setNotes] = useState("");
+  /** Nombres de todos los planes (vivos y ocultos): no se venden sueltos aquí. */
+  const [nombresPlan, setNombresPlan] = useState<Set<string>>(new Set());
+  /** Combos a la venta: es lo único que se vende como servicio en una factura nueva. */
+  const [combos, setCombos] = useState<Bundle[]>([]);
   /**
    * El MOTIVO: por qué se emite esta factura. Arranca vacío a propósito —«Fija» no
    * dice nada, y elegirlo es lo que permite ver después de qué era la factura— y hay
@@ -140,6 +164,38 @@ export function NuevaFacturaModal({
       .then((d) => setMotivos(Array.isArray(d) ? (d as Motivo[]) : []))
       .catch(() => {});
   }, [open, authFetch]);
+
+  // Planes y combos, una vez al abrir. En la VENTA solo van combos: el plan suelto
+  // se sigue viendo al editar una factura, pero aquí no se ofrece.
+  useEffect(() => {
+    if (!open) return;
+    void authFetch("/plans")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => setNombresPlan(new Set((Array.isArray(d) ? d : []).map((p: { name: string }) => plano(p.name)))))
+      .catch(() => {});
+    void authFetch("/plan-bundles?activeOnly=true")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => setCombos(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, [open, authFetch]);
+
+  const esPlan = useCallback(
+    (x: CatalogoItem) => x.kind === "PLAN" || PARECE_PLAN.test(x.name) || nombresPlan.has(plano(x.name)),
+    [nombresPlan],
+  );
+
+  /**
+   * Un combo entra como sus renglones de siempre —uno por servicio, con su IVA—
+   * pero al precio del combo, igual que lo factura la corrida a quien lo tiene.
+   */
+  function agregarCombo(id: string) {
+    const b = combos.find((x) => x.id === id);
+    if (!b) return;
+    const lineas: Item[] = b.items.map((it) => ({
+      description: it.planName, productName: it.planName, qty: 1, price: it.price, taxRate: it.taxRate,
+    }));
+    setItems((prev) => [...prev.filter((it) => it.description.trim()), ...lineas]);
+  }
 
   // La zona y la dirección de hoy, solo cuando hace falta: es una consulta más y la
   // mayoría de las facturas no son traslados.
@@ -251,7 +307,9 @@ export function NuevaFacturaModal({
     // mano se quedaría en $ 0, así que se bloquea aquí en vez de dejar salir una
     // factura en cero que después hay que anular.
     if (clean.some((it) => !it.productId && !(Number(it.price) > 0))) {
-      setErr("Elige cada concepto del catálogo: el precio y el IVA los pone el producto.");
+      setErr(digitaPrecio
+        ? "Cada renglón escrito a mano necesita su precio."
+        : "Elige cada concepto del catálogo: el precio y el IVA los pone el producto.");
       return;
     }
     // El traslado necesita saber a dónde va el cliente: de esta dirección sale la
@@ -314,7 +372,9 @@ export function NuevaFacturaModal({
           <div className="rounded-xl border border-border-subtle bg-surface p-4 shadow-sm">
             <div className="mb-2 text-[13px] font-bold text-text-primary">Ítems</div>
             <p className="mb-2 text-[11px] text-text-tertiary">
-              El precio y el IVA los pone el producto: elige el concepto del catálogo.
+              {digitaPrecio
+                ? "El catálogo propone precio e IVA; puedes cambiar precio, IVA (%) o subtotal de cada renglón."
+                : "El precio y el IVA los pone el producto: elige el concepto del catálogo."}
             </p>
             <div className="flex flex-col gap-2">
               <div className="hidden grid-cols-[1fr_70px_110px_60px_110px_32px] gap-2 px-1 text-[11px] font-semibold text-text-tertiary sm:grid">
@@ -334,25 +394,65 @@ export function NuevaFacturaModal({
                       // mano solo sirve para buscar: la línea queda sin producto y sin
                       // precio, porque ese par ya no se digita.
                       onPick={(p) => elegirConcepto(i, p)}
-                      onText={(t) => setItem(i, { description: t, productName: undefined, productId: undefined, price: 0, taxRate: 0 })}
+                      excluir={verAntiguos ? undefined : esPlan}
+                      onText={(t) => setItem(i, digitaPrecio
+                        // Quien digita precios conserva lo que ya escribió en la fila.
+                        ? { description: t, productName: undefined, productId: undefined }
+                        : { description: t, productName: undefined, productId: undefined, price: 0, taxRate: 0 })}
                     />
                     <Input type="number" min={0} className="text-right" value={it.qty} onChange={(e) => setItem(i, { qty: Number(e.target.value) })} />
-                    <div className={`flex items-center justify-end text-[12px] ${sinPrecio ? "text-error-text" : "font-medium text-text-secondary"}`}>
-                      {sinPrecio ? "Elige del catálogo" : cop(it.price)}
-                    </div>
-                    <div className="flex items-center justify-end text-[12px] text-text-tertiary">
-                      {it.taxRate > 0 ? `${it.taxRate}%` : "—"}
-                    </div>
-                    <div className="flex items-center justify-end text-[12px] font-medium text-text-secondary">{cop(sub2)}</div>
+                    {digitaPrecio ? (
+                      <>
+                        <Input type="number" min={0} step="any" className="text-right" aria-label="Precio" value={it.price}
+                          onChange={(e) => setItem(i, { price: Number(e.target.value) })} />
+                        <Input type="number" min={0} max={100} step="any" className="text-right" aria-label="IVA %" value={it.taxRate}
+                          onChange={(e) => setItem(i, { taxRate: Number(e.target.value) })} />
+                        {/* El subtotal se guarda como precio × cantidad: escribirlo
+                            recalcula el precio unitario. */}
+                        <Input type="number" min={0} step="any" className="text-right" aria-label="Subtotal" value={Math.round(sub2 * 100) / 100}
+                          onChange={(e) => {
+                            const q = Number(it.qty) || 1;
+                            setItem(i, { price: Math.round((Number(e.target.value) / q) * 100) / 100, ...(Number(it.qty) ? {} : { qty: 1 }) });
+                          }} />
+                      </>
+                    ) : (
+                      <>
+                        <div className={`flex items-center justify-end text-[12px] ${sinPrecio ? "text-error-text" : "font-medium text-text-secondary"}`}>
+                          {sinPrecio ? "Elige del catálogo" : cop(it.price)}
+                        </div>
+                        <div className="flex items-center justify-end text-[12px] text-text-tertiary">
+                          {it.taxRate > 0 ? `${it.taxRate}%` : "—"}
+                        </div>
+                        <div className="flex items-center justify-end text-[12px] font-medium text-text-secondary">{cop(sub2)}</div>
+                      </>
+                    )}
                     <button type="button" onClick={() => setItems((p) => p.filter((_, idx) => idx !== i))} disabled={items.length === 1}
                       className="flex items-center justify-center rounded-md text-text-tertiary hover:text-error-text disabled:opacity-30"><Icon name="x" size={16} /></button>
                   </div>
                 );
               })}
             </div>
-            <button type="button" onClick={() => setItems((p) => [...p, emptyItem()])} className="mt-3 inline-flex items-center gap-1 text-[12px] font-semibold text-brand hover:underline">
-              <Icon name="plus" size={14} /> Agregar ítem
-            </button>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <button type="button" onClick={() => setItems((p) => [...p, emptyItem()])} className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand hover:underline">
+                <Icon name="plus" size={14} /> Agregar ítem
+              </button>
+              {combos.length > 0 && (
+                <Select
+                  aria-label="Agregar un combo"
+                  className="sm:max-w-xs"
+                  value=""
+                  onChange={(e) => agregarCombo(e.target.value)}
+                >
+                  <option value="">+ Agregar combo…</option>
+                  {combos.map((b) => (
+                    <option key={b.id} value={b.id}>{b.name} — {cop(b.total)}/mes</option>
+                  ))}
+                </Select>
+              )}
+            </div>
+            <p className="mt-1 text-[11px] text-text-tertiary">
+              Los planes sueltos no se venden: el servicio se factura con un combo.
+            </p>
           </div>
 
           {/* TRASLADO: a dónde se muda. La ficha del cliente NO se toca ahora — se

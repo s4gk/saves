@@ -12,7 +12,7 @@ import type { EmisorDeEventos } from '../core/eventos';
 import { enteroBuscable, rangoPrioridad } from './support.service';
 import { ABIERTA, celdaDelDia, ORDEN_AGENDA, origenDelDia, whereDelDia, whereDelRango } from './agenda-dia';
 import { esDeMisSedes } from './agenda-sede';
-import { ordenEnCurso, tieneAgendaLibre, type OrdenEnCurso } from './turno';
+import { esOrdenPosterior, ordenEnCurso, ordenQueLeToca, tieneAgendaLibre, type OrdenEnCurso } from './turno';
 import { direccionDe, referenciaDe } from '../common/subscriber-address';
 import { parsePoint } from '../geo/geo.util';
 import type { RoutingService } from '../geo/routing.service';
@@ -21,9 +21,10 @@ import { esTrabajoDeCampo } from './field-work.policy';
 import { textoPlano } from '../common/texto-legacy';
 import { traductorDeTecnicos } from '../staff/nombre-tecnico';
 import { equiposDeOrdenes, type EquipoDeOrden } from './equipo-reserva.service';
-import { esOrdenDeServicio } from './order-types';
+import { esOrdenDeServicio, TRASLADO, TRASLADO_INTERNO } from './order-types';
 import { mixPorAbonado, type MixDeServicios } from '../common/servicios-del-abonado';
 import { whereDeServicios } from './servicio-orden.filtro';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Filtros del tablero. Filtran ÓRDENES, no técnicos: la pregunta de la cajera es
@@ -226,9 +227,10 @@ export class AgendaService {
   private async alcance(user: AuthUser, sedeId?: string): Promise<AlcanceAgenda> {
     const suyas = await this.sedesDelUsuario(user);
     const sedes = await this.prisma.branch.findMany({
-      // Sin sedes propias (superusuario) van TODAS: `legacyId` es obligatorio en
-      // `Branch`, así que no hay un `{ not: null }` que escribir — se quita el filtro.
-      where: suyas.length ? { legacyId: { in: suyas } } : {},
+      // Sin sedes propias (superusuario) van TODAS las ACTIVAS: `legacyId` es
+      // obligatorio en `Branch`, así que no hay un `{ not: null }` que escribir — se
+      // quita el filtro de alcance, no el del interruptor de sede.
+      where: { ...SEDE_ACTIVA, ...(suyas.length ? { legacyId: { in: suyas } } : {}) },
       select: { id: true, name: true, legacyId: true },
       orderBy: { name: 'asc' },
     });
@@ -613,9 +615,10 @@ export class AgendaService {
    * fecha — y la pantalla decía que no hay nada. Quien busca un abonado quiere saber
    * QUÉ PASA CON ESE CLIENTE, no auditar una bandeja.
    *
-   * Sólo se calcula cuando hay TEXTO tecleado. Con los filtros de la barra (tipo,
-   * prioridad…) la pregunta es otra —"qué me queda por repartir de esto"— y sacar
-   * ahí las 25 ya agendadas sería ruido en la pantalla de trabajo.
+   * Se calcula con texto tecleado Y con los filtros de la barra (tipo, prioridad…).
+   * Al principio sólo iba con texto, pensando que con un filtro la pregunta era "qué
+   * me queda por repartir"; el 2026-09-29 el usuario filtró «Bajar megas», vio 2
+   * donde el legacy dice 5 (las otras 3 ya tenían día) y pidió verlas también ahí.
    *
    * No se acota al día que se mira: precisamente lo que hay que decir es que está en
    * OTRO día, y cuál.
@@ -748,19 +751,62 @@ export class AgendaService {
    *    sale alfabético (Alta, Baja, Media, Urgente): con el tope de 200, ordenar así
    *    llegaba a dejar las URGENTES fuera de la bandeja.
    */
-  private bandejaBase(mias: number[]): Prisma.TicketWhereInput {
+  private async bandejaBase(mias: number[]): Promise<Prisma.TicketWhereInput> {
+    const sinPagar = await this.trasladosSinPagar();
     return {
       status: { in: ['PENDIENTE', 'REALIZANDO'] },
       scheduledFor: null,
+      ...(sinPagar.length ? { id: { notIn: sinPagar } } : {}),
       ...(mias.length
         ? { OR: [{ subscriber: { branch: { legacyId: { in: mias } } } }, { subscriber: { is: null } }] }
         : {}),
     };
   }
 
+  /**
+   * Órdenes de TRASLADO (de domicilio o interno) abiertas cuya factura del cargo
+   * sigue sin pagar (2026-10-05, regla del usuario: «no muestre las órdenes de
+   * traslado; solo si el cliente ya pagó el traslado le va a dejar agendar»).
+   *
+   * No salen en la bandeja y `mover`/`moverLote` se niegan a ponerles día: al pagar
+   * la factura aparecen solas. Pagada = `paidAmount >= total` y no el `status`, que
+   * con las sobrepagadas del legacy miente (ver corte-lote-estado-factura-miente).
+   * La orden SIN factura atada (nacida en el legacy o por el chatbot, sin cargo) no
+   * se esconde: aquí no hay con qué saber si pagó, y esconderla sería perderla.
+   */
+  async trasladosSinPagar(ids?: string[]): Promise<string[]> {
+    const filas = await this.prisma.$queryRaw<{ id: string }[]>`
+      SELECT t.id
+        FROM "Ticket" t
+        JOIN "SubInvoice" i ON i.tid = COALESCE(t."chargeInvoiceTid", t."moveInvoiceTid")
+       WHERE t.status IN ('PENDIENTE', 'REALIZANDO')
+         AND t.type IN (${TRASLADO}, ${TRASLADO_INTERNO})
+         AND i."paidAmount" < i.total
+         ${ids ? Prisma.sql`AND t.id IN (${Prisma.join(ids)})` : Prisma.empty}`;
+    return filas.map((f) => f.id);
+  }
+
+  /**
+   * Candado del servidor: ni arrastrando ni por API se agenda un traslado sin pagar.
+   * Público porque `SupportWriteService.assign` (asignar desde la ficha de la orden)
+   * lo pide ANTES de guardar: el traslado que debe tampoco se asigna (2026-10-07).
+   */
+  async exigirTrasladoPagado(ids: string[]) {
+    if (!ids.length) return;
+    const debe = await this.trasladosSinPagar(ids);
+    if (!debe.length) return;
+    const codigos = await this.prisma.ticket.findMany({ where: { id: { in: debe } }, select: { code: true } });
+    const nums = codigos.map((c) => (c.code != null ? `#${c.code}` : 'sin número')).join(', ');
+    throw new BadRequestException(
+      debe.length === 1
+        ? `El traslado ${nums} todavía no está pagado: se podrá asignar y agendar cuando el cliente pague la factura del traslado.`
+        : `Los traslados ${nums} todavía no están pagados: se podrán asignar y agendar cuando los clientes paguen la factura del traslado.`,
+    );
+  }
+
   /** La bandeja entera: el `where` de arriba, ya consultado y recortado al tope. */
   private async bandeja(mias: number[], conFiltro: Prisma.TicketWhereInput) {
-    const base = this.bandejaBase(mias);
+    const base = await this.bandejaBase(mias);
     const candidatas = await this.prisma.ticket.findMany({
       where: { ...base, ...conFiltro },
       select: { id: true, priority: true, created: true },
@@ -799,8 +845,9 @@ export class AgendaService {
     const filtrando = filtro.length > 0 || sede != null;
 
     const { base: bandejaBase, ids: idsBandeja, total: totalBandeja } = await this.bandeja(mias, conFiltro);
-    // Sólo con texto tecleado: ver `yaAgendadas` para por qué no con el resto de filtros.
-    const conDia = filtros?.q?.trim() ? await this.yaAgendadas(mias, conFiltro) : null;
+    // Con texto o con cualquier filtro de la barra (tipo, prioridad…): ver `yaAgendadas`.
+    // La sede sola no cuenta: listaría lo repartido de toda la sede, que ya está en las columnas.
+    const conDia = filtro.length ? await this.yaAgendadas(mias, conFiltro) : null;
 
     const [filasBandeja, agendadas, delDia, sinFiltro, tiposCrudos] = await Promise.all([
       idsBandeja.length
@@ -1377,7 +1424,7 @@ export class AgendaService {
     const filtrando = filtro.length > 0;
     const conFiltro = filtrando ? { AND: filtro } : {};
 
-    const bandejaBase = this.bandejaBase(mias);
+    const bandejaBase = await this.bandejaBase(mias);
     const deSede = AgendaService.enSedeDe(mias);
     const enSede = (w: Prisma.TicketWhereInput) => (deSede ? { AND: [w, deSede] } : w);
     const [tecnicos, filas, sinAgendar, tiposCrudos] = await Promise.all([
@@ -1528,6 +1575,7 @@ export class AgendaService {
       throw new BadRequestException('Ese técnico no existe o ya no trabaja aquí.');
     }
     if (staff) await this.puedeAgendarA(user, staff);
+    if (!desagendar) await this.exigirTrasladoPagado([t.id]);
 
     // Columnas que hay que renumerar: la de origen (si estaba agendada) y la de
     // destino. Se guardan ANTES de tocar nada, porque el update las cambia.
@@ -1705,6 +1753,7 @@ export class AgendaService {
     const porId = new Map(filas.map((f) => [f.id, f]));
     const enOrden = ids.flatMap((id) => porId.get(id) ?? []);
     if (!enOrden.length) throw new NotFoundException('Ninguna de esas órdenes existe ya.');
+    await this.exigirTrasladoPagado(enOrden.map((t) => t.id));
 
     // Columnas de las que salen: si alguna venía agendada con otro técnico (o en otro
     // día), esa columna queda con un hueco en la numeración y hay que rehacerla.
@@ -2236,6 +2285,11 @@ export class AgendaService {
     ]);
     const ctx = await this.contextoDe(filas);
     const hoyMs = hoyEnColombia().getTime();
+    // Una a una (2026-10-01): al técnico de campo sólo le sale la orden que le toca
+    // y lo que ya cerró; lo que viene después no se lista ni se cuenta. El puesto se
+    // calcula sobre la jornada entera ANTES de esconder, para que no se renumere.
+    const unaAUna = await ordenQueLeToca(this.prisma, staff.id, user);
+    const tarjetas = await Promise.all(filas.map((f, i) => this.tarjeta(f, ctx, hoyMs, i + 1)));
     return {
       resolved: true,
       fecha: dia.toISOString().slice(0, 10),
@@ -2243,8 +2297,9 @@ export class AgendaService {
       tecnico: staff.name,
       // Aquí `filas` ya es la jornada entera del técnico en su orden: el puesto es la
       // posición en la lista, no `scheduledSeq` (ver `puestosDelDia`).
-      ordenes: await Promise.all(filas.map((f, i) => this.tarjeta(f, ctx, hoyMs, i + 1))),
-      proximas,
+      ordenes: tarjetas.filter((_, i) => !esOrdenPosterior(unaAUna, filas[i])),
+      proximas: unaAUna.aplica ? 0 : proximas,
+      unaAUna: unaAUna.aplica,
       // Sólo para HOY. Consultar un día pasado es mirar el historial, y ahí no hay
       // turno que valga: si se devolviera el de hoy, la pantalla de otro día pintaría
       // como "tu visita ahora" una que no está en ella.
@@ -2300,7 +2355,10 @@ export class AgendaService {
     if (!staff) return { resolved: false, ...cabecera, tecnico: null, visitas: [] as any[] };
 
     const hoy = hoyEnColombia();
-    const filas = await this.prisma.ticket.findMany({
+    // Una a una (2026-10-01): del calendario del técnico de campo salen lo ya hecho y
+    // la orden que le toca; lo agendado para después no.
+    const unaAUna = await ordenQueLeToca(this.prisma, staff.id, user);
+    const todas = await this.prisma.ticket.findMany({
       where: { AND: [whereDelRango(inicio, fin, hoy), { assignedStaffId: staff.id }] },
       select: {
         id: true, code: true, type: true, subject: true, status: true, priority: true,
@@ -2309,6 +2367,7 @@ export class AgendaService {
       },
       orderBy: ORDEN_AGENDA,
     });
+    const filas = todas.filter((t) => !esOrdenPosterior(unaAUna, t));
 
     return {
       resolved: true,
@@ -2347,6 +2406,8 @@ export class AgendaService {
     const staff = await this.staffDelUsuario(user);
     const vacia = { resolved: false, desde: desde.toISOString().slice(0, 10), hasta: hasta.toISOString().slice(0, 10), total: 0, dias: [] as any[] };
     if (!staff) return vacia;
+    // Una a una (2026-10-01): al técnico de campo no se le adelanta lo de mañana.
+    if ((await ordenQueLeToca(this.prisma, staff.id, user)).aplica) return { ...vacia, resolved: true, tecnico: staff.name };
 
     const filas = await this.prisma.ticket.findMany({
       where: {

@@ -2,11 +2,28 @@ import {
   IsOptional, IsString, MaxLength, MinLength, IsDateString, ValidateIf, IsEmail, IsIn, IsObject, IsInt,
   IsArray, IsBoolean, IsNumber, Min, Max, ArrayMaxSize,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
+
+/** Un espacio al final de la clave PPP la hace distinta para el router (abonado 64653, 30-sep). */
+const recortar = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 
 /** Agregar una nota/observación al cliente. */
 export class AddNoteDto {
   @IsString() @MinLength(1) @MaxLength(2000)
   body!: string;
+}
+
+/**
+ * El porqué de un borrado desde la ficha (factura, nota, documento). Es obligatorio:
+ * borrar no deja la fila para preguntarle después, así que lo único que queda es la
+ * bitácora, que guarda el cuerpo de la petición tal cual (ver `core/auditoria.ts`).
+ */
+export class MotivoBorradoDto {
+  @Transform(recortar)
+  @IsString({ message: 'Escribe el motivo del borrado' })
+  @MinLength(3, { message: 'Escribe el motivo (mínimo 3 caracteres)' })
+  @MaxLength(500, { message: 'El motivo no puede pasar de 500 caracteres' })
+  reason!: string;
 }
 
 /** Tecnologías de instalación (enum Prisma `InstallTech`). */
@@ -174,10 +191,10 @@ export class UpdateSubscriberDto {
 
   // --- Conectividad (legacy `create.php`: name_s, contra, perfil, Ipremota, tegnologia).
   // El secret PPP se valida contra duplicados en el servidor (ver SubscribersService).
-  @IsOptional() @IsString() @MaxLength(80)
+  @IsOptional() @IsString() @MaxLength(80) @Transform(recortar)
   pppUsername?: string;
 
-  @IsOptional() @IsString() @MaxLength(80)
+  @IsOptional() @IsString() @MaxLength(80) @Transform(recortar)
   pppPassword?: string;
 
   @IsOptional() @IsString() @MaxLength(60)
@@ -318,6 +335,8 @@ export class CheckDuplicatesDto {
   @IsOptional() @IsString() localityRef?: string;
   @IsOptional() @IsString() neighborhood?: string;
   @IsOptional() @IsString() addressLine?: string;
+  /** Al EDITAR: el cliente que se edita, para que no choque consigo mismo (en la base ni en el router). */
+  @IsOptional() @IsString() excludeId?: string;
 }
 
 /**
@@ -356,9 +375,8 @@ export class ReturnEquipmentDto {
 
   /**
    * Devolución POR RETIRO: el equipo no vuelve por un cambio ni por un daño,
-   * vuelve porque el cliente se va. Además de soltar el equipo, deja al cliente
-   * en RETIRADO e intenta el corte en el router (misma cascada que el cierre de
-   * una orden de "Retiro voluntario", ver SupportWriteService.applyCloseCascade).
+   * vuelve porque el cliente se va. Sólo marca la nota de la ficha: el estado del
+   * cliente NO cambia (la baja va por la orden de retiro o a mano en la ficha).
    */
   @IsOptional() @IsBoolean()
   withdrawal?: boolean;

@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from '../core/http/errores';
 import { PrismaService } from '../prisma/prisma.service';
 import { invalidarCacheCentros } from '../common/centro-costo';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 export class CostCentersService {
   constructor(private readonly prisma: PrismaService) {}
@@ -19,10 +20,14 @@ export class CostCentersService {
 
   /**
    * Las sedes con su centro (o sin él), para enlazarlas desde la pantalla de centros de
-   * costo. Todas, sin acotar por sede: es un catálogo de contabilidad, no datos de clientes.
+   * costo. Sin acotar por el alcance de quien mira (es un catálogo de contabilidad, no
+   * datos de clientes), pero sin las sedes desactivadas: a una sede apagada no se le
+   * enlaza un centro nuevo. El centro que ya tuviera sigue existiendo y su estado de
+   * resultados se sigue viendo — eso se apaga, si se quiere, desactivando el CENTRO.
    */
   sedes() {
     return this.prisma.branch.findMany({
+      where: SEDE_ACTIVA,
       orderBy: { legacyId: 'asc' },
       select: { legacyId: true, name: true, costCenter: { select: { id: true, code: true, name: true } } },
     });

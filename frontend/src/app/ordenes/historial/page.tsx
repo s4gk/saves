@@ -90,7 +90,7 @@ export default function HistorialOrdenesPage() {
         </div>
       </div>
 
-      <ListToolbar search={search} onSearch={setSearch} searchPlaceholder="Buscar por N°, proveedor…">
+      <ListToolbar search={search} onSearch={setSearch} searchPlaceholder="Buscar por N°, proveedor o producto…">
         <Select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className="w-44">
           <option value="">Todos los estados</option>
           {ESTADOS.map((s) => <option key={s} value={s}>{s}</option>)}

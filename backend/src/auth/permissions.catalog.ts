@@ -191,6 +191,22 @@ export const APP_PERMISSIONS = {
   // administración (2026-09-17: Edgar Esteban Rodriguez, cajero). La barrida masiva
   // (`/playhub/sync-all`) NO entra: sigue siendo de las áreas.
   PLAYHUB_OPERATE: 'playhub.operate',
+  // Administrar las BODEGAS de material: crear, editar y eliminar bodegas, y crear,
+  // editar, borrar o importar el material que guardan. Hasta 2026-09-29 lo hacía
+  // cualquiera de administración/técnicos/caja; por decisión del usuario pasa a ser
+  // NOMINAL (ver PERMISOS_NOMINALES): Luis Fernando Hurtado y Santiago García. NO
+  // cubre traspasos, actas ni compras: mover material entre bodegas sigue igual.
+  INVENTORY_WAREHOUSES_MANAGE: 'inventory.warehouses.manage',
+  // Digitar precio, IVA y subtotal de los renglones al CREAR una factura (Nueva
+  // factura). Al resto el precio y el IVA se los pone el catálogo. NOMINAL (ver
+  // PERMISOS_NOMINALES): 2026-10-08, Paula Andrea Unas. Editar una factura ya
+  // emitida sigue siendo del área de contabilidad, como siempre.
+  BILLING_INVOICE_PRICE_EDIT: 'billing.invoices.price.edit',
+  // Ver los planes ANTIGUOS (planes ocultos y los productos del legacy con nombre de
+  // plan: «100 Megas F-26»…) en el buscador de conceptos al crear o editar una
+  // factura. NOMINAL (ver PERMISOS_NOMINALES): 2026-10-08, Paula Andrea Unas. Al
+  // resto, la nueva factura no ofrece planes y la edición solo los visibles.
+  BILLING_INVOICE_OLD_PLANS: 'billing.invoices.old-plans',
 } as const;
 
 export type AppPermission = (typeof APP_PERMISSIONS)[keyof typeof APP_PERMISSIONS];
@@ -226,6 +242,9 @@ export const ALL_APP_PERMISSIONS: { key: string; label: string; group: string }[
   { key: A.CONTRACTS_MANAGE, label: 'Editar cláusulas de permanencia del contrato', group: 'Operaciones críticas' },
   { key: A.SUPPORT_WRITE, label: 'Crear y modificar órdenes de servicio (sin él, solo consulta)', group: 'Soporte' },
   { key: A.BILLING_NOTES_EMIT, label: 'Emitir notas crédito/débito (incluida la nota crédito DIAN)', group: 'Operaciones críticas' },
+  { key: A.INVENTORY_WAREHOUSES_MANAGE, label: 'Administrar bodegas de material y su material (crear, editar, eliminar, importar)', group: 'Operaciones críticas' },
+  { key: A.BILLING_INVOICE_PRICE_EDIT, label: 'Digitar precio, IVA y subtotal al crear una factura', group: 'Operaciones críticas' },
+  { key: A.BILLING_INVOICE_OLD_PLANS, label: 'Ver planes antiguos al crear o editar una factura', group: 'Operaciones críticas' },
   { key: A.PLAYHUB_OPERATE, label: 'Operar PlayHub en la ficha del cliente (crear cuenta, activar y cancelar)', group: 'Clientes' },
 ];
 
@@ -244,6 +263,9 @@ export const ALL_APP_PERMISSIONS: { key: string; label: string; group: string }[
 export const PERMISOS_NOMINALES: string[] = [
   APP_PERMISSIONS.BILLING_NOTES_EMIT,
   APP_PERMISSIONS.NETWORK_MOROSOS_TOGGLE,
+  APP_PERMISSIONS.INVENTORY_WAREHOUSES_MANAGE,
+  APP_PERMISSIONS.BILLING_INVOICE_PRICE_EDIT,
+  APP_PERMISSIONS.BILLING_INVOICE_OLD_PLANS,
 ];
 
 /**
@@ -410,16 +432,28 @@ export const ALL_PAYROLL_PERMISSIONS: { key: string; label: string }[] = [
 /** Deriva la llave de permiso de una pantalla a partir de su href. */
 export const screenKey = (href: string) => 'screen' + href.replace(/\//g, '.');
 
-/** Sedes del módulo "Equipos disponibles". ESPEJO de `SEDES_DISPONIBLES` en `frontend/src/lib/nav.ts`. */
+/**
+ * Sedes del módulo "Equipos disponibles". ESPEJO de `SEDES_DISPONIBLES` en
+ * `frontend/src/lib/nav.ts` — mantener las dos listas iguales, `oculta` incluido.
+ *
+ * `oculta` = sede DESACTIVADA (`Branch.isActive = false`, ver `src/common/sedes-activas.ts`).
+ * Su pantalla no entra en el catálogo de permisos: así no sale ni en el menú ni en el
+ * constructor de roles ni en el acceso por empleado. Los overrides que alguien tuviera
+ * sobre ella se quedan en la base sin efecto (`setUserScreens` ignora lo que no está en
+ * el catálogo), así que volver a encenderla es quitarle este flag aquí y en el nav.
+ */
 export const SEDES_DISPONIBLES = [
   { slug: 'yopal', label: 'Yopal' },
   { slug: 'villanueva', label: 'Villanueva' },
   { slug: 'monterrey', label: 'Monterrey' },
   { slug: 'aguazul', label: 'Aguazul' },
   { slug: 'tauramena', label: 'Tauramena' },
-  { slug: 'villavicencio', label: 'Villavicencio' },
-  { slug: 'mocoa', label: 'Mocoa' },
+  { slug: 'villavicencio', label: 'Villavicencio', oculta: true },
+  { slug: 'mocoa', label: 'Mocoa', oculta: true },
 ] as const;
+
+/** Las que tienen pantalla hoy: sin las sedes desactivadas. */
+export const SEDES_DISPONIBLES_VISIBLES = SEDES_DISPONIBLES.filter((s) => !('oculta' in s && s.oculta));
 
 export interface ScreenDef {
   href: string;
@@ -452,7 +486,7 @@ export const SCREENS: ScreenDef[] = [
   { href: '/reportes/ventas-sede', label: 'Ventas por sede', module: 'Reportes', areas: ['gerencia'] },
   { href: '/reportes/ingresos-egresos', label: 'Ingresos y egresos', module: 'Reportes', areas: ['gerencia'] },
   { href: '/reportes/cartera', label: 'Cartera / deudores', module: 'Reportes', areas: ['gerencia'] },
-  { href: '/reportes/cartera-seguimiento', label: 'Seguimiento de cartera', module: 'Reportes', areas: ['gerencia'] },
+  { href: '/reportes/cartera-seguimiento', label: 'Seguimiento de cartera', module: 'Reportes', areas: ['gerencia', 'administracion', 'contabilidad'] },
   { href: '/reportes/iva', label: 'Reporte de IVA', module: 'Reportes', areas: ['gerencia'] },
   { href: '/reportes/ordenes', label: 'Órdenes de servicio', module: 'Reportes', areas: ['gerencia'] },
   { href: '/reportes/cortes-activaciones', label: 'Cortes y activaciones', module: 'Reportes', areas: ['gerencia'] },
@@ -526,6 +560,10 @@ export const SCREENS: ScreenDef[] = [
   // ven los tres pero sólo contabilidad y administración los crean o editan (lo decide la API).
   { href: '/contabilidad/resultados-por-sede', label: 'Resultados por sede', module: 'Contabilidad', areas: ['contabilidad', 'administracion', 'gerencia'] },
   { href: '/contabilidad/centros-de-costo', label: 'Centros de costo', module: 'Contabilidad', areas: ['contabilidad', 'administracion', 'gerencia'] },
+  // Activos fijos (2026-09-29): el registro de lo que la empresa tiene (OLT, Mikrotik,
+  // computadores, vehículos) con foto y depreciación. Gerencia sólo mira; cargar,
+  // editar y correr la depreciación es de contabilidad y administración (la API).
+  { href: '/contabilidad/activos-fijos', label: 'Activos fijos', module: 'Contabilidad', areas: ['contabilidad', 'administracion', 'gerencia'] },
 
   { href: '/clientes', label: 'Clientes', module: 'Clientes', areas: ['administracion', 'caja'] },
   // PlayHub (2026-09-04): la cajera lo vende y lo cancela en ventanilla, así que la
@@ -598,7 +636,7 @@ export const SCREENS: ScreenDef[] = [
   // Equipos disponibles (2026-09-14): una pantalla por sede, vacías por ahora. De
   // administración y de la cajera; el jefe de bodega las recibe en su rol. El técnico
   // no: él ve sólo lo suyo. Una llave por sede para poder repartirlas por empleado.
-  ...SEDES_DISPONIBLES.map((s): ScreenDef => ({
+  ...SEDES_DISPONIBLES_VISIBLES.map((s): ScreenDef => ({
     href: `/red/disponibles/${s.slug}`, label: `Equipos disponibles · ${s.label}`, module: 'Red / ISP', areas: ['administracion', 'caja'],
   })),
   { href: '/red', label: 'Red / ISP (resumen)', module: 'Red / ISP', areas: ['administracion'] },
@@ -851,7 +889,7 @@ export const ALL_ROLES: RoleDef[] = [
       // El Jefe de bodega es, desde 2026-07-30, el ÚNICO que puede mandar equipo de
       // una sede a otra: sin esta pantalla no podría armar esa transferencia. (Su
       // 403 histórico en las rutas gateadas por área lo resuelve `@OrPermission`.)
-      ...(r.key === 'warehouse-manager' ? [screenKey('/red/transferencias'), ...SEDES_DISPONIBLES.map((s) => screenKey(`/red/disponibles/${s.slug}`))] : []),
+      ...(r.key === 'warehouse-manager' ? [screenKey('/red/transferencias'), ...SEDES_DISPONIBLES_VISIBLES.map((s) => screenKey(`/red/disponibles/${s.slug}`))] : []),
     ],
   })),
   // ---- Recursos Humanos / Nómina ----

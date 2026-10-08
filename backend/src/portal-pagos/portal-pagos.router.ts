@@ -5,7 +5,7 @@
  * controlador. Cablea HTTP -> método: extrae los argumentos de `req` y llama.
  * La lógica sigue viviendo en PortalPagosController, que ya no lleva decoradores.
  *
- * Endpoints: 5
+ * Endpoints: 6
  */
 import { crearRouter, manejar } from '../core/http/ruta';
 import { PortalPagosController } from './portal-pagos.controller';
@@ -36,6 +36,11 @@ portalPagosRouter.post(
 portalPagosRouter.post(
   '/pay_due_customer',
   manejar((req, res) => portalPagos.payDueCustomer(req, req.body, res)),
+);
+
+portalPagosRouter.post(
+  '/resolver_usuario',
+  manejar((req, res) => portalPagos.resolverUsuario(req, req.body, res)),
 );
 
 portalPagosRouter.post(

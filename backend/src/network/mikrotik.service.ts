@@ -274,7 +274,8 @@ export function conciliarSecret(
   if (editados.includes('pppPassword')) {
     // Una clave vacía en el secret deja al cliente sin poder autenticarse.
     if (!clave) avisos.push('la clave PPP quedó vacía: NO se borra en el router (dejaría al abonado sin autenticar)');
-    else if (clave !== norm(enElRouter.password)) set.password = clave;
+    // Contra la del router SIN recortar: si allá quedó con un espacio, editar la corrige.
+    else if (clave !== (enElRouter.password ?? '')) set.password = clave;
   } else if (clave && norm(enElRouter.password) && clave !== norm(enElRouter.password)) {
     avisos.push('la clave PPP de la ficha no es la del router: no se pisa sin que alguien la edite');
   }
@@ -315,6 +316,8 @@ export interface MikrotikActionResult {
     ip?: string;
     inActivos?: boolean;
     inMorosos?: boolean;
+    /** Routers donde la IP (o su comment) sigue en MOROSOS; puede ser otro router de la sede. */
+    morososEn?: string[];
   };
   message: string;
   error?: string;
@@ -1361,7 +1364,9 @@ export class MikrotikService {
       profile: (sub.pppProfile || 'default').trim(),
       service: sub.pppService || 'pppoe',
     };
-    if (sub.pppPassword) datos.password = sub.pppPassword;
+    // Recortada: un espacio al final (tecleado en la ficha) hace que el router
+    // rechace la clave que tiene la ONU (abonado 64653, 28-sep).
+    if (sub.pppPassword?.trim()) datos.password = sub.pppPassword.trim();
     if (sub.ipLocal?.trim()) datos['local-address'] = sub.ipLocal.trim();
     const c = (comentario ?? sub.netComment ?? '').trim();
     if (c) datos.comment = c;
@@ -2167,15 +2172,23 @@ export class MikrotikService {
       const secrets = await api.comm('/ppp/secret/getall', { '?name': name });
       const active = await api.comm('/ppp/active/getall', { '?name': name });
       const inAct = await api.comm('/ip/firewall/address-list/print', { '?list': ADDRESS_LIST_ACTIVE, '?comment': comment });
-      const inMor = await api.comm('/ip/firewall/address-list/print', { '?list': ADDRESS_LIST_DEBTOR, '?comment': comment });
+      const ip = secrets[0]?.['remote-address'] || active[0]?.['address'] || sub.ipRemote || '';
+      const morososEn: string[] = [];
+      if (await this.enMorosos(api, comment, ip)) morososEn.push(router.name);
       api.close();
+      // El corte también marca la IP en los OTROS routers de la sede, y la reconexión la
+      // saca de todos (`replicateMorosoOnSede`). Mirar sólo el principal daba "al aire" a
+      // quien seguía en MOROSOS en otro (1450 y 50429 en Yopal_Eoc, sep-2026): el pago
+      // en línea respondía "no estaba cortado" y no reconectaba ni dejaba orden.
+      morososEn.push(...(await this.morososEnOtros(sub, router.id, comment, ip)));
       res.live = {
         secretExists: secrets.length > 0,
         secretDisabled: secrets[0]?.['disabled'] === 'true',
         sessionActive: active.length > 0,
-        ip: secrets[0]?.['remote-address'] || active[0]?.['address'] || sub.ipRemote || '',
+        ip,
         inActivos: inAct.length > 0,
-        inMorosos: inMor.length > 0,
+        inMorosos: morososEn.length > 0,
+        morososEn,
       };
       res.ok = true;
       res.message = 'Estado leído del router.';
@@ -2188,6 +2201,43 @@ export class MikrotikService {
     // cada ficha abierta se quede otros 6 s esperando el mismo timeout.
     this.statusCache.set(subscriberId, { at: Date.now(), res });
     return res;
+  }
+
+  /** ¿Está en MOROSOS en este router? Por comment o por IP, como la busca `sacarDeLista`. */
+  private async enMorosos(api: RouterosClient, comment: string, ip: string): Promise<boolean> {
+    const porComment = await api.comm('/ip/firewall/address-list/print', { '?list': ADDRESS_LIST_DEBTOR, '?comment': comment });
+    if (porComment.length) return true;
+    if (!ip) return false;
+    const porIp = await api.comm('/ip/firewall/address-list/print', { '?list': ADDRESS_LIST_DEBTOR, '?address': ip });
+    return porIp.some((e) => e['dynamic'] !== 'true');
+  }
+
+  /**
+   * Los otros routers de la sede donde sigue en MOROSOS. En paralelo y best-effort: un
+   * router que no contesta no dice nada (y no hace esperar más de 4 s a la ficha).
+   * Se consulta una vez por IP:puerto: EPON y EOC de Villanueva son el mismo equipo.
+   */
+  private async morososEnOtros(sub: SubForNet, primaryId: string, comment: string, ip: string): Promise<string[]> {
+    const primary = await this.prisma.mikrotik.findUnique({ where: { id: primaryId }, select: { ip: true, port: true } });
+    const vistos = new Set<string>(primary ? [`${primary.ip}:${primary.port}`] : []);
+    const otros = (await this.sedeOtherRouters(sub, primaryId)).filter((o) => {
+      const k = `${o.ip}:${o.port}`;
+      if (vistos.has(k)) return false;
+      vistos.add(k);
+      return true;
+    });
+    const r = await Promise.all(otros.map(async (o) => {
+      const api = new RouterosClient();
+      try {
+        await api.connect(o.ip, Number(o.port), o.username, decryptSecret(o.password), { timeoutMs: 4000 });
+        return (await this.enMorosos(api, comment, ip)) ? o.name : null;
+      } catch {
+        return null;
+      } finally {
+        api.close();
+      }
+    }));
+    return r.filter((n): n is string => !!n);
   }
 
   // ------------------------------------------------------------------

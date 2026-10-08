@@ -88,7 +88,7 @@ export default function OrdenesPage() {
         </div>
       </div>
 
-      <ListToolbar search={search} onSearch={setSearch} searchPlaceholder="Buscar por N°, proveedor…">
+      <ListToolbar search={search} onSearch={setSearch} searchPlaceholder="Buscar por N°, proveedor o producto…">
         <div className="inline-flex rounded-lg border border-border-default bg-surface p-0.5">
           {(["compra", "servicio"] as const).map((k) => (
             <button
@@ -126,6 +126,17 @@ export default function OrdenesPage() {
             columns={[
               { key: "tid", header: "N°", sortable: true, render: (r: any) => <Link href={`/ordenes/${r.id}`} className="font-mono font-medium text-brand hover:underline">{r.tid}</Link> },
               { key: "supplier", header: "Proveedor", sortable: true, render: (r: any) => <span className="font-medium text-text-primary">{r.supplier}</span> },
+              // Qué se compró, sin abrir orden por orden: la nota de la orden y los productos.
+              { key: "descripcion", header: "Descripción", render: (r: any) => {
+                const productos = (r.products ?? []).map((p: any) => `${p.qty > 1 ? `${p.qty.toLocaleString("es-CO")} × ` : ""}${p.name}`).join(" · ");
+                if (!r.notes && !productos) return <span className="text-text-tertiary">—</span>;
+                return (
+                  <div className="max-w-[420px] min-w-[220px]" title={[r.notes, productos].filter(Boolean).join("\n")}>
+                    {r.notes ? <div className="truncate font-medium text-text-primary">{r.notes}</div> : null}
+                    {productos ? <div className="line-clamp-2 text-[12px] text-text-secondary">{productos}</div> : null}
+                  </div>
+                );
+              } },
               { key: "branchRef", header: "Sede", sortable: true, render: (r: any) => (r.branchRef ? <Badge label={r.branchRef} tone="info" /> : <span className="text-text-tertiary">—</span>) },
               { key: "date", header: "Fecha", sortable: true, render: (r: any) => (r.date ? new Date(r.date).toLocaleDateString("es-CO") : "—") },
               { key: "total", header: "Total", sortable: true, align: "right", render: (r: any) => cop(r.total) },

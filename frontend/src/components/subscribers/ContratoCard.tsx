@@ -11,6 +11,7 @@ import { fmtDate } from "@/lib/format";
 import { mensajeDeError } from "@/lib/errores";
 import { ACCEPT_IMAGEN } from "@/lib/adjuntos";
 import { FirmaModal } from "./FirmaModal";
+import { HuellaModal } from "./HuellaModal";
 import { CardEditable, type FichaDetalle } from "./FichaCards";
 import { Field, Select } from "@/components/ui/Field";
 
@@ -73,6 +74,7 @@ export function ContratoCard({
   const [huellaUrl, setHuellaUrl] = useState<string | null>(null);
   const [firmando, setFirmando] = useState(false);
   const [subiendo, setSubiendo] = useState(false);
+  const [capturando, setCapturando] = useState(false);
   /** Catálogo de permanencias vigentes (sólo se pide al abrir el lápiz). */
   const [clausulas, setClausulas] = useState<{ legacyId: number | null; nombre: string; meses: number }[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -123,7 +125,8 @@ export function ContratoCard({
     };
   }, [authFetch, subscriberId, estado?.firma, estado?.huella]);
 
-  async function subirHuella(file: File) {
+  /** Devuelve si quedó guardada: el modal del huellero sólo se cierra si sí. */
+  async function subirHuella(file: File): Promise<boolean> {
     setSubiendo(true);
     try {
       const fd = new FormData();
@@ -135,8 +138,10 @@ export function ContratoCard({
       }
       toast("Huella guardada");
       cargar();
+      return true;
     } catch (e) {
       toast(mensajeDeError(e) ?? "No se pudo subir la huella", "alert-circle");
+      return false;
     } finally {
       setSubiendo(false);
       if (fileInput.current) fileInput.current.value = "";
@@ -291,10 +296,19 @@ export function ContratoCard({
             variant="secondary"
             className="mt-1.5 w-full !py-1 !text-[11px]"
             disabled={subiendo}
+            onClick={() => setCapturando(true)}
+          >
+            <Icon name="fingerprint" size={13} /> {estado?.huella ? "Volver a capturar" : "Capturar con huellero"}
+          </Button>
+          {/* El archivo sigue disponible: equipos sin huellero y huellas ya escaneadas. */}
+          <button
+            type="button"
+            className="tap mt-1 w-full text-center text-[11px] text-text-tertiary hover:text-text-primary disabled:opacity-50"
+            disabled={subiendo}
             onClick={() => fileInput.current?.click()}
           >
-            <Icon name="upload" size={13} /> {subiendo ? "Subiendo…" : estado?.huella ? "Reemplazar" : "Subir huella"}
-          </Button>
+            {subiendo ? "Subiendo…" : "o subir una imagen"}
+          </button>
         </div>
       </div>
 
@@ -311,6 +325,12 @@ export function ContratoCard({
         subscriberId={subscriberId}
         nombre={nombre}
         onSaved={cargar}
+      />
+      <HuellaModal
+        open={capturando}
+        onClose={() => setCapturando(false)}
+        nombre={nombre}
+        onCapturada={subirHuella}
       />
     </CardEditable>
   );

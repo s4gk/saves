@@ -21,6 +21,7 @@ import { cargarPasswordPolicy, pedirPasswordCode, PIE_CODIGO_AJENO, type Passwor
 import { DocumentosEmpleado } from "@/components/empleados/DocumentosEmpleado";
 import { RendimientoEmpleado } from "@/components/empleados/RendimientoEmpleado";
 import { CARGOS_LEGACY } from "@/lib/hr";
+import { StaffAvatar, notifyPhotoChanged, olvidarFotoStaff } from "@/components/UserAvatar";
 
 type TabKey = "datos" | "documentos" | "permisos";
 
@@ -917,6 +918,11 @@ export default function EmpleadoDetallePage() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<TabKey>("datos");
   const [openEdit, setOpenEdit] = useState(false);
+  /** undefined = cerrado; null = abierto sin foto (solo superadmin llega así). */
+  const [fotoGrande, setFotoGrande] = useState<string | null | undefined>(undefined);
+  const [fotoVersion, setFotoVersion] = useState(0);
+  const [guardandoFoto, setGuardandoFoto] = useState(false);
+  const inputFoto = useRef<HTMLInputElement>(null);
   /** null = el bloque de rendimiento todavía no ha respondido. */
   const [tieneRendimiento, setTieneRendimiento] = useState<boolean | null>(null);
   const [cambiandoEstado, setCambiandoEstado] = useState(false);
@@ -935,6 +941,38 @@ export default function EmpleadoDetallePage() {
     if (authLoading) return;
     void load();
   }, [authLoading, load]);
+
+  /**
+   * Superadmin: sube o quita la foto de perfil de este empleado. Tras guardar se
+   * olvida la copia en memoria y se recarga la ficha; también se avisa a los
+   * avatares propios por si el superadmin se está editando a sí mismo.
+   */
+  const cambiarFoto = useCallback(async (file: File | null) => {
+    setGuardandoFoto(true);
+    try {
+      let res: Response;
+      if (file) {
+        const fd = new FormData();
+        fd.append("file", file);
+        res = await authFetch(`/staff/${id}/photo`, { method: "POST", body: fd });
+      } else {
+        if (!confirm("¿Quitar la foto de perfil? Volverá a mostrar sus iniciales.")) return;
+        res = await authFetch(`/staff/${id}/photo`, { method: "DELETE" });
+      }
+      if (!res.ok) throw new Error((await res.json().catch(() => null))?.message || "Error");
+      olvidarFotoStaff(id);
+      notifyPhotoChanged();
+      setFotoVersion((v) => v + 1);
+      setFotoGrande(undefined);
+      toast(file ? "Foto de perfil cambiada" : "Foto de perfil quitada", "camera");
+      await load();
+    } catch (e) {
+      toast(mensajeDeError(e, "No se pudo guardar la foto"), "error");
+    } finally {
+      setGuardandoFoto(false);
+      if (inputFoto.current) inputFoto.current.value = "";
+    }
+  }, [authFetch, id, load]);
 
   /**
    * Inhabilitar saca al funcionario de TODO el sistema (listas, selectores de
@@ -977,6 +1015,7 @@ export default function EmpleadoDetallePage() {
         backHref="/configuracion/empleados"
         backLabel="Empleados"
         icon="user"
+        avatar={<StaffAvatar staffId={emp.id} name={emp.name ?? ""} hasPhoto={!!emp.picture && emp.picture !== "example.png"} size={48} onOpen={setFotoGrande} abrirSinFoto={isSuperadmin} version={fotoVersion} />}
         title={emp.name ?? "Empleado"}
         badges={
           <>
@@ -1079,6 +1118,36 @@ export default function EmpleadoDetallePage() {
       )}
 
       <EditarEmpleadoModal emp={emp} open={openEdit} onClose={() => setOpenEdit(false)} onSaved={load} />
+
+      <Modal open={fotoGrande !== undefined} onClose={() => setFotoGrande(undefined)} title={emp.name ?? "Foto de perfil"}>
+        {fotoGrande ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={fotoGrande} alt={`Foto de ${emp.name ?? "el empleado"}`} className="mx-auto max-h-[70vh] w-auto rounded-xl object-contain" />
+        ) : (
+          <p className="py-6 text-center text-[13px] text-text-secondary">Este empleado no tiene foto de perfil.</p>
+        )}
+        {isSuperadmin && (
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <input
+              ref={inputFoto}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) void cambiarFoto(f); }}
+            />
+            {fotoGrande && (
+              <Button variant="secondary" onClick={() => void cambiarFoto(null)} disabled={guardandoFoto} className="w-full sm:w-auto">
+                <Icon name="trash" size={15} />
+                Quitar foto
+              </Button>
+            )}
+            <Button onClick={() => inputFoto.current?.click()} disabled={guardandoFoto} className="w-full sm:w-auto">
+              <Icon name="camera" size={15} />
+              {guardandoFoto ? "Guardando…" : fotoGrande ? "Cambiar foto" : "Subir foto"}
+            </Button>
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

@@ -58,8 +58,6 @@ export type Bundle = {
   listTotal: number;
   savings: number;
   subscribers: number;
-  /** Arrastra un plan oculto: no se puede vender hasta arreglarlo. */
-  blocked: boolean;
 };
 
 /** Resultado de cambiar el plan de un abonado (incluye el empuje al router). */
@@ -76,3 +74,26 @@ export type ChangePlanResult = {
     mikrotik?: { name: string; host: string };
   } | null;
 };
+
+/** «100 Megas + Television»: qué trae un combo, internet primero. */
+export function partesDelCombo(b: Bundle): string {
+  const orden: Record<string, number> = { INTERNET: 0, TV: 1, PUNTOS: 2, STREAMING: 3 };
+  return [...b.items]
+    .sort((x, y) => (orden[x.kind] ?? 9) - (orden[y.kind] ?? 9))
+    .map((i) => (i.kind === "INTERNET" && i.megas != null ? `${i.megas} Megas` : i.planName.trim()))
+    .join(" + ");
+}
+
+/**
+ * El combo que forman un plan de internet y uno de TV: el que trae EXACTAMENTE esos
+ * dos (los de streaming son otro producto). `null` si no hay ninguno armado.
+ * Espejo de `comboPorPlanes` en el backend.
+ */
+export function comboDePlanes(combos: Bundle[], internetId: string, tvId: string): Bundle | null {
+  if (!internetId || !tvId) return null;
+  return combos
+    .filter((b) => b.items.length === 2
+      && b.items.some((i) => i.kind === "INTERNET" && i.planId === internetId)
+      && b.items.some((i) => i.kind === "TV" && i.planId === tvId))
+    .sort((a, b) => a.name.localeCompare(b.name))[0] ?? null;
+}

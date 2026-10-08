@@ -12,6 +12,7 @@ import { anotarBorradoLegacy } from '../common/legacy-deletion';
 import { comprobanteDe } from '../treasury/comprobante-legacy';
 import { exigirCajaDeEscritura } from '../treasury/caja-scope';
 import { SUPERADMIN_PERMISSION } from '../auth/permissions.catalog';
+import { nombresDeSedesApagadas, SEDE_ACTIVA } from '../common/sedes-activas';
 
 const dateOnly = (s?: string) => { const d = s ? new Date(s) : new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); };
 
@@ -421,10 +422,24 @@ export class OrdersService {
         ...(Number.isFinite(asNum) ? [{ tid: asNum }] : []),
         { supplier: { is: { name: { contains: search, mode: 'insensitive' as const } } } },
         { notes: { contains: search, mode: 'insensitive' } },
+        // También lo que se compró: escribir "onu" trae toda orden con ONUs, sea del
+        // proveedor que sea (antes solo miraba N°, proveedor y notas).
+        { items: { some: { OR: [
+          { product: { contains: search, mode: 'insensitive' as const } },
+          { description: { contains: search, mode: 'insensitive' as const } },
+        ] } } },
       ];
     }
     const [rows, total] = await Promise.all([
-      this.prisma.supplyOrder.findMany({ where, orderBy: orden(params, OrdersService.ORDEN_ORDENES, { orderDate: 'desc' }), skip: (page - 1) * pageSize, take: pageSize, include: { supplier: true } }),
+      this.prisma.supplyOrder.findMany({ where, orderBy: orden(params, OrdersService.ORDEN_ORDENES, { orderDate: 'desc' }), skip: (page - 1) * pageSize, take: pageSize, include: {
+        supplier: true,
+        // Lo que se compró, para leerlo en la tabla sin abrir orden por orden.
+        // pid=0 son las notas/retenciones, no productos.
+        items: {
+          where: { OR: [{ materialLegacy: null }, { materialLegacy: { not: 0 } }] },
+          orderBy: { id: 'asc' }, select: { product: true, description: true, qty: true },
+        },
+      } }),
       this.prisma.supplyOrder.count({ where }),
     ]);
     return {
@@ -432,6 +447,10 @@ export class OrdersService {
         id: o.id, tid: o.tid, supplier: o.supplier?.name ?? '—', supplierId: o.supplier?.id ?? null,
         kind: o.kind, date: o.orderDate, total: num(o.total), paid: num(o.paidAmount), status: o.status,
         branchRef: o.branchRef, itemsCount: o.itemsCount,
+        notes: o.notes,
+        products: o.items
+          .map((i) => ({ name: (i.product || i.description || '').trim(), qty: num(i.qty) }))
+          .filter((i) => i.name),
       })),
       total, page, pageSize, pages: Math.ceil(total / pageSize),
     };
@@ -677,7 +696,7 @@ export class OrdersService {
    */
   async destinations(warehouseId?: string) {
     const [branches, warehouses, materials] = await Promise.all([
-      this.prisma.branch.findMany({ select: { legacyId: true, name: true }, orderBy: { name: 'asc' } }),
+      this.prisma.branch.findMany({ where: SEDE_ACTIVA, select: { legacyId: true, name: true }, orderBy: { name: 'asc' } }),
       this.prisma.materialWarehouse.findMany({
         where: { technicianRef: null, legacyId: { not: null } },
         select: { id: true, title: true, branchLegacy: true, isMain: true },
@@ -774,9 +793,16 @@ export class OrdersService {
 
   // --- Sedes (el nombre vive libre en SupplyOrder.branchRef; se listan las que existen) ---
   async branches() {
-    const rows = await this.prisma.supplyOrder.groupBy({ by: ['branchRef'], _count: { _all: true }, orderBy: { branchRef: 'asc' } });
+    const [rows, apagadas] = await Promise.all([
+      this.prisma.supplyOrder.groupBy({ by: ['branchRef'], _count: { _all: true }, orderBy: { branchRef: 'asc' } }),
+      // Este desplegable se arma con lo que haya en las órdenes, no con el catálogo de
+      // sedes, así que el interruptor hay que aplicarlo por NOMBRE: si no, una sede
+      // desactivada seguiría ofreciéndose por sus órdenes de compra viejas.
+      nombresDeSedesApagadas(this.prisma),
+    ]);
     return rows
       .filter((r) => r.branchRef != null && r.branchRef.trim() !== '')
+      .filter((r) => !apagadas.has((r.branchRef as string).trim().toLowerCase()))
       .map((r) => ({ name: r.branchRef as string, orders: r._count._all }));
   }
 

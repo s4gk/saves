@@ -17,15 +17,63 @@ import { mensajeDeError } from "@/lib/errores";
 import type { CashAccount } from "@/lib/cobranzas";
 import { ACCEPT_IMAGEN_PDF } from "@/lib/adjuntos";
 
-type Ejecucion = { id: string; amount: number; transactionId: string | null; executedByName: string | null; executedAt: string };
+type Ejecucion = {
+  id: string; amount: number; transactionId: string | null; executedByName: string | null; executedAt: string;
+  order: { id: string; tid: number } | null;
+};
+/** Orden de compra con saldo («factura disponible») a la que se le puede abonar. */
+type OrdenCompra = { id: string; tid: number; supplier: string; total: number; paid: number; saldo: number; status: string; notes?: string | null };
 type PagoFijo = {
   id: string; name: string; category: string; amount: number;
   cashAccountId: number; caja: string; dayOfMonth: number;
   beneficiary: string | null; note: string | null; active: boolean;
+  supplyOrder: OrdenCompra | null;
   createdByName: string | null; ejecucion: Ejecucion | null;
 };
 
-const FORM_VACIO = { name: "", category: "", amount: "", cashAccountId: "", dayOfMonth: "1", beneficiary: "", note: "" };
+const FORM_VACIO = { name: "", category: "", amount: "", cashAccountId: "", dayOfMonth: "1", beneficiary: "", note: "", supplyOrderId: "" };
+
+/**
+ * Selector de orden de compra con saldo: buscador + lista. Se usa como
+ * «beneficiario» del pago fijo y, al pagar, para cambiar la orden que salda.
+ */
+function SelectorOrden({ ordenes, value, onChange }: {
+  ordenes: OrdenCompra[]; value: OrdenCompra | null; onChange: (o: OrdenCompra | null) => void;
+}) {
+  const [q, setQ] = useState("");
+  if (value) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-[12.5px]">
+        <div className="min-w-0">
+          <div className="font-semibold text-text-primary">{value.supplier} · Orden #{value.tid}</div>
+          <div className="text-[11px] text-text-tertiary">Saldo {cop(value.saldo)} de {cop(value.total)} · {value.status}</div>
+        </div>
+        <button type="button" title="Quitar" onClick={() => onChange(null)} className="tap text-text-tertiary hover:text-error-text"><Icon name="x" size={14} /></button>
+      </div>
+    );
+  }
+  const t = q.trim().toLowerCase();
+  const filas = t
+    ? ordenes.filter((o) => String(o.tid).includes(t) || o.supplier.toLowerCase().includes(t) || (o.notes ?? "").toLowerCase().includes(t))
+    : ordenes;
+  return (
+    <div>
+      <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filtrar por proveedor o número de orden" />
+      <div className="mt-1 max-h-52 overflow-y-auto rounded-lg border border-border-subtle">
+        {filas.length === 0 ? (
+          <div className="px-3 py-2 text-[12px] text-text-tertiary">Ninguna orden de compra con saldo pendiente.</div>
+        ) : filas.map((o) => (
+          <button key={o.id} type="button" onClick={() => onChange(o)}
+            className="block w-full border-b border-border-subtle px-3 py-1.5 text-left text-[12px] last:border-b-0 hover:bg-surface-2">
+            <span className="font-semibold text-text-primary">{o.supplier}</span> · #{o.tid}
+            <span className="float-right text-text-secondary">saldo {cop(o.saldo)}</span>
+            {o.notes && <div className="truncate text-[11px] text-text-tertiary">{o.notes}</div>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Pagos fijos programados.
@@ -40,7 +88,7 @@ export default function PagosFijosPage() {
   const { loading: authLoading, authFetch, can, isSuperadmin } = useAuth();
   const gestiona = isSuperadmin || can(PERM.AREA_CONTABILIDAD);
 
-  const [d, setD] = useState<{ periodo: string; items: PagoFijo[] } | null>(null);
+  const [d, setD] = useState<{ periodo: string; items: PagoFijo[]; ordenes: OrdenCompra[] } | null>(null);
   const [err, setErr] = useState(false);
 
   const cargar = useCallback(async () => {
@@ -73,7 +121,7 @@ export default function PagosFijosPage() {
     setForm({
       name: p.name, category: p.category, amount: String(p.amount),
       cashAccountId: String(p.cashAccountId), dayOfMonth: String(p.dayOfMonth),
-      beneficiary: p.beneficiary ?? "", note: p.note ?? "",
+      beneficiary: p.beneficiary ?? "", note: p.note ?? "", supplyOrderId: p.supplyOrder?.id ?? "",
     });
     setModal(p);
   }
@@ -86,6 +134,8 @@ export default function PagosFijosPage() {
       dayOfMonth: Number(form.dayOfMonth),
       beneficiary: form.beneficiary.trim() || undefined,
       note: form.note.trim() || undefined,
+      // Al editar, '' quita la orden; al crear, sin orden no se manda.
+      supplyOrderId: form.supplyOrderId || (editando ? "" : undefined),
     };
     if (!body.name || !body.category || !(body.amount > 0) || !body.cashAccountId) {
       toast("Nombre, categoría, monto y caja son obligatorios", "alert-triangle");
@@ -129,18 +179,30 @@ export default function PagosFijosPage() {
   const [montoPagado, setMontoPagado] = useState("");
   const [comprobante, setComprobante] = useState<File | null>(null);
   const [pagando, setPagando] = useState(false);
+  // Orden de compra: la que contabilidad le ató al pago, cambiable al pagar.
+  const [orden, setOrden] = useState<OrdenCompra | null>(null);
 
-  function abrirPagar(p: PagoFijo) { setPagar(p); setMontoPagado(String(p.amount)); setComprobante(null); }
+  function abrirPagar(p: PagoFijo) {
+    setPagar(p); setComprobante(null);
+    // Si la orden ya tiene menos saldo que el programado, se propone el saldo.
+    const o = p.supplyOrder && p.supplyOrder.saldo > 0.01 ? p.supplyOrder : null;
+    setOrden(o);
+    setMontoPagado(String(o ? Math.min(p.amount, o.saldo) : p.amount));
+  }
 
   async function registrarPago() {
     if (!pagar) return;
     const amount = Number(montoPagado);
     if (!(amount > 0)) { toast("El monto debe ser mayor a cero", "alert-triangle"); return; }
+    if (orden && amount > orden.saldo + 0.01) {
+      toast(`El monto supera el saldo de la orden #${orden.tid} (${cop(orden.saldo)})`, "alert-triangle");
+      return;
+    }
     setPagando(true);
     try {
       const res = await authFetch(`/treasury/scheduled-payments/${pagar.id}/execute`, {
         method: "POST",
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, supplyOrderId: orden?.id }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.message || "No se pudo registrar el pago");
@@ -151,7 +213,7 @@ export default function PagosFijosPage() {
         const up = await authFetch(`/treasury/transactions/${data.transactionId}/attach`, { method: "POST", body: fd });
         if (!up.ok) toast("Pago registrado, pero el comprobante no se pudo subir", "alert-triangle");
       }
-      toast(`Pago registrado: ${cop(amount)} — queda en el cierre de hoy`);
+      toast(`Pago registrado: ${cop(amount)}${orden ? ` a la orden #${orden.tid}` : ""} — queda en el cierre de hoy`);
       setPagar(null);
       void cargar();
     } catch (e) { toast(mensajeDeError(e), "alert-triangle"); } finally { setPagando(false); }
@@ -169,7 +231,10 @@ export default function PagosFijosPage() {
       render: (p: PagoFijo) => (
         <div className="min-w-0">
           <div className={`font-semibold ${p.active ? "text-text-primary" : "text-text-tertiary line-through"}`}>{p.name}</div>
-          <div className="text-[11px] text-text-tertiary">{p.category}{p.beneficiary ? ` · ${p.beneficiary}` : ""}</div>
+          <div className="text-[11px] text-text-tertiary">
+            {p.category}{p.beneficiary ? ` · ${p.beneficiary}` : ""}
+            {p.supplyOrder && <> · <a href={`/ordenes/${p.supplyOrder.id}`} className="font-semibold text-brand hover:underline">Orden #{p.supplyOrder.tid}</a> (saldo {cop(p.supplyOrder.saldo)})</>}
+          </div>
         </div>
       ),
     },
@@ -188,6 +253,9 @@ export default function PagosFijosPage() {
                 {cop(p.ejecucion.amount)} · {new Date(p.ejecucion.executedAt).toLocaleDateString("es-CO", { day: "2-digit", month: "short" })}
                 {p.ejecucion.executedByName ? ` · ${p.ejecucion.executedByName}` : ""}
               </div>
+              {p.ejecucion.order && (
+                <a href={`/ordenes/${p.ejecucion.order.id}`} className="text-[11px] font-semibold text-brand hover:underline">Orden #{p.ejecucion.order.tid}</a>
+              )}
             </div>
           );
         }
@@ -262,7 +330,27 @@ export default function PagosFijosPage() {
             <Input type="number" min={1} max={31} value={form.dayOfMonth} onChange={(e) => setForm({ ...form, dayOfMonth: e.target.value })} />
           </Field>
           <div className="sm:col-span-2">
-            <Field label="Beneficiario"><Input value={form.beneficiary} onChange={(e) => setForm({ ...form, beneficiary: e.target.value })} placeholder="A quién se le paga (opcional)" /></Field>
+            <Field label="Beneficiario" hint={form.supplyOrderId ? "Cada pago se registra como abono a esta orden de compra" : "Escoge la orden de compra que se paga, o escribe el beneficiario abajo"}>
+              <SelectorOrden
+                ordenes={modal && modal !== "new" && modal.supplyOrder && !d.ordenes.some((o) => o.id === modal.supplyOrder!.id) ? [modal.supplyOrder, ...d.ordenes] : d.ordenes}
+                value={(() => {
+                  if (!form.supplyOrderId) return null;
+                  const enLista = d.ordenes.find((o) => o.id === form.supplyOrderId);
+                  if (enLista) return enLista;
+                  return modal && modal !== "new" && modal.supplyOrder?.id === form.supplyOrderId ? modal.supplyOrder : null;
+                })()}
+                onChange={(o) => setForm({
+                  ...form,
+                  supplyOrderId: o?.id ?? "",
+                  beneficiary: o ? o.supplier : "",
+                  // Sin monto escrito, se propone el saldo de la orden.
+                  amount: o && !form.amount ? String(o.saldo) : form.amount,
+                })}
+              />
+              {!form.supplyOrderId && (
+                <Input className="mt-2" value={form.beneficiary} onChange={(e) => setForm({ ...form, beneficiary: e.target.value })} placeholder="Otro beneficiario, sin orden (opcional)" />
+              )}
+            </Field>
           </div>
           <div className="sm:col-span-2">
             <Field label="Nota"><Textarea rows={2} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
@@ -281,6 +369,18 @@ export default function PagosFijosPage() {
             Se registra un egreso en <b>efectivo</b> de la caja <b>{pagar?.caja}</b> por el periodo <b>{d.periodo}</b>.
             El movimiento queda en el cierre de caja de hoy.
           </p>
+          {gestiona ? (
+            <Field label="Orden de compra" hint={orden ? "El pago queda como abono a esta orden y el comprobante se ve en su ficha" : "Opcional — sin orden queda como gasto suelto"}>
+              <SelectorOrden ordenes={d.ordenes} value={orden} onChange={setOrden} />
+            </Field>
+          ) : (
+            // La cajera no escoge factura: paga la que contabilidad asignó a este pago.
+            <Field label="Orden de compra" hint={orden ? "Asignada por contabilidad. El pago queda como abono a esta orden" : "Contabilidad no le asignó orden: queda como gasto suelto"}>
+              <p className="text-[12.5px] text-text-primary">
+                {orden ? <>Orden <b>#{orden.tid}</b> · {orden.supplier} · saldo {cop(orden.saldo)}</> : "—"}
+              </p>
+            </Field>
+          )}
           <Field label="Monto pagado" required hint={pagar && Number(montoPagado) !== pagar.amount ? `Programado: ${cop(pagar.amount)}` : undefined}>
             <Input type="number" min={0} value={montoPagado} onChange={(e) => setMontoPagado(e.target.value)} />
           </Field>

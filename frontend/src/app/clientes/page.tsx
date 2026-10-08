@@ -23,13 +23,18 @@ import {
 } from "@/lib/subscribers";
 import { useRequest } from "@/lib/useRequest";
 import { useOrden } from "@/lib/useOrden";
+import { cop } from "@/lib/format";
 import { LoadError } from "@/components/ui/LoadError";
+import { ActivosPorMes } from "@/components/subscribers/ActivosPorMes";
 
 export default function ClientesPage() {
   const router = useRouter();
   const [createOpen, setCreateOpen] = useState(false);
   const [exportando, setExportando] = useState(false);
-  const { loading: authLoading, authFetch, sedeScoped } = useAuth();
+  const { loading: authLoading, authFetch, sedeScoped, can } = useAuth();
+  // Alta de clientes: sólo cajeras y superadministrador (2026-09-24). `can` deja
+  // pasar a `system.admin` solo; el backend lo vuelve a exigir.
+  const puedeDarDeAlta = can("area.caja");
   const [branches, setBranches] = useState<Branch[]>([]);
 
   const [search, setSearch] = useState("");
@@ -43,6 +48,7 @@ export default function ClientesPage() {
   // y aquí sólo se usa para responder "¿quiénes son esos abonados?".
   const [planId, setPlanId] = useState("");
   const [planNombre, setPlanNombre] = useState("");
+  const [verLista, setVerLista] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   // El listado se pagina en el servidor, así que el orden también: ordenar aquí
@@ -58,8 +64,13 @@ export default function ClientesPage() {
   // Filtro por plan venido de fuera. El nombre se busca en el catálogo en vez de
   // viajar en la URL para que un enlace guardado siga diciendo de qué plan habla.
   useEffect(() => {
-    const id = new URLSearchParams(window.location.search).get("planId");
+    const q = new URLSearchParams(window.location.search);
+    const id = q.get("planId");
     if (id) setPlanId(id);
+    // Estado venido del panel ejecutivo (pulsar "Cartera" en la dona de la base).
+    const st = q.get("status");
+    // Quien llega de ahí viene a ver ESOS clientes, no su gráfica.
+    if (st && SUB_STATUS_LABEL[st]) { setStatus(st); setVerLista(true); }
   }, []);
   useEffect(() => {
     if (authLoading || !planId) { setPlanNombre(""); return; }
@@ -152,6 +163,12 @@ export default function ClientesPage() {
   // ordenar está al principio, no en la página en la que estaba.
   useEffect(() => { setPage(1); }, [search, status, branchId, servicio, planId, tecnologia, cuenta, pageSize, orden.clave]);
 
+  // La pantalla abre con la gráfica de clientes mes a mes (2026-10-02). El estado y la
+  // sede no traen la lista: cambian lo que pinta la gráfica. La lista sale al buscar,
+  // con los demás filtros, o pidiéndola con «Ver la lista». La consulta sigue
+  // corriendo siempre porque de ella salen el total del encabezado y el Excel.
+  const filtrando = Boolean(verLista || search.trim() || servicio || planId || tecnologia || cuenta);
+
   if (authLoading) return <PageSkeleton />;
 
   return (
@@ -174,9 +191,11 @@ export default function ClientesPage() {
             <Button variant="secondary" onClick={exportar} disabled={exportando || !data?.total}>
               <Icon name="download" size={15} /> {exportando ? "Exportando…" : "Excel"}
             </Button>
-            <Button onClick={() => setCreateOpen(true)}>
-              <Icon name="user-plus" size={15} /> Nuevo cliente
-            </Button>
+            {puedeDarDeAlta && (
+              <Button onClick={() => setCreateOpen(true)}>
+                <Icon name="user-plus" size={15} /> Nuevo cliente
+              </Button>
+            )}
           </>
         }
       >
@@ -209,15 +228,23 @@ export default function ClientesPage() {
         )}
       </ListToolbar>
 
-      <ClienteWizardModal
+      {puedeDarDeAlta && <ClienteWizardModal
         mode="create"
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onDone={(id) => { if (id) router.push(`/clientes/${id}`); else void load(); }}
-      />
+      />}
 
       {/* Tabla */}
-      {error && !data ? (
+      {!filtrando ? (
+        <div className="flex flex-col gap-3">
+          <ActivosPorMes status={status} branchId={branchId} onVerLista={() => setVerLista(true)} />
+          <p className="flex items-center justify-center gap-1.5 text-[12px] text-text-tertiary">
+            <Icon name="search" size={13} className="shrink-0" />
+            El estado y la sede cambian la gráfica. Para ver la lista de clientes, escribe en el buscador o pulsa «Ver la lista».
+          </p>
+        </div>
+      ) : error && !data ? (
         // Distingue "falló la carga" de "no hay clientes": antes un 500 dejaba la
         // tabla vacía y parecía que el filtro no devolvía nada.
         <LoadError message={error} onRetry={load} />
@@ -225,6 +252,13 @@ export default function ClientesPage() {
         <PageSkeleton />
       ) : (
         <>
+          {verLista && (
+            <div className="mb-3">
+              <Button variant="secondary" onClick={() => setVerLista(false)}>
+                <Icon name="arrow-left" size={15} /> Volver a la gráfica
+              </Button>
+            </div>
+          )}
           <DataTable
             rows={data?.items ?? []}
             empty="No se encontraron clientes con esos criterios."
@@ -294,6 +328,9 @@ export default function ClientesPage() {
                   );
                 },
               },
+              // Lo que debe hoy: saldo de sus facturas sin pagar, la misma cifra del
+              // «Debe» de Grupos y del Excel. No ordena: se calcula por página.
+              { key: "debt", header: "Debe", align: "right", render: (r) => <span className={`whitespace-nowrap ${r.debt > 0 ? "font-semibold text-error-text" : "text-text-tertiary"}`}>{cop(r.debt)}</span> },
               { key: "status", header: "Estado", sortable: true, render: (r) => <Badge label={SUB_STATUS_LABEL[r.status ?? ""] ?? r.status ?? "—"} tone={SUB_STATUS_TONE[r.status ?? ""] ?? "default"} /> },
               { key: "go", header: "", align: "right", render: (r) => <Link href={`/clientes/${r.id}`} className="inline-flex items-center gap-1 rounded-lg border border-border-default px-3 py-1.5 text-[12px] font-semibold text-text-secondary transition-colors hover:bg-surface-2">Ver ficha →</Link> },
             ]}

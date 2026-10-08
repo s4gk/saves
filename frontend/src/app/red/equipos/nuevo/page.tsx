@@ -8,6 +8,7 @@ import { Icon } from "@/components/Icon";
 import { Button } from "@/components/ui/Button";
 import { Input, Select, Textarea, Field } from "@/components/ui/Field";
 import { toast } from "@/components/ui/Toast";
+import { CategoriaTipoEquipo } from "@/components/red/CategoriaTipoEquipo";
 import { EquipmentLabelModal, type LabelEquip } from "@/components/red/EquipmentLabelModal";
 import { useAuth } from "@/context/AuthProvider";
 import { mensajeDeError } from "@/lib/errores";
@@ -20,6 +21,7 @@ export default function IngresoEquipoPage() {
   const router = useRouter();
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [warehouseId, setWarehouseId] = useState("");
+  const [tipo, setTipo] = useState({ category: "", equipmentType: "" });
   const [mac, setMac] = useState("");
   const [serial, setSerial] = useState("");
   const [brand, setBrand] = useState(BRANDS[0]);
@@ -36,9 +38,10 @@ export default function IngresoEquipoPage() {
   async function submit() {
     setErr(null);
     if (!warehouseId) { setErr("Selecciona una bodega."); return; }
+    if (!tipo.category || !tipo.equipmentType) { setErr("Elige la categoría y el tipo de equipo."); return; }
     setSaving(true);
     try {
-      const res = await authFetch("/network/equipment", { method: "POST", body: JSON.stringify({ warehouseId, mac: mac || undefined, serial: serial || undefined, brand, status, observation: observation || undefined }) });
+      const res = await authFetch("/network/equipment", { method: "POST", body: JSON.stringify({ warehouseId, ...tipo, mac: mac || undefined, serial: serial || undefined, brand, status, observation: observation || undefined }) });
       const d = await res.json();
       if (!res.ok) throw new Error(d?.message || "No se pudo ingresar el equipo");
       toast(`Equipo #${d.code} ingresado`);
@@ -61,6 +64,7 @@ export default function IngresoEquipoPage() {
 
       <div className="mt-4 max-w-xl rounded-xl border border-border-subtle bg-surface p-5 shadow-sm">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <CategoriaTipoEquipo category={tipo.category} equipmentType={tipo.equipmentType} onChange={setTipo} required />
           <Field label="Bodega" required><Select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>{warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
           <Field label="Estado"><Select value={status} onChange={(e) => setStatus(e.target.value)}>{STATES.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
           <Field label="Marca"><Select value={brand} onChange={(e) => setBrand(e.target.value)}>{BRANDS.map((b) => <option key={b} value={b}>{b}</option>)}</Select></Field>

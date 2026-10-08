@@ -3,6 +3,8 @@ import { PerformanceService } from './performance.service';
 import { StaffReportsService } from './staff-reports.service';
 import { MetricsService, METRICAS, ETIQUETA, NO_RECONSTRUIBLES, NO_SUMABLES } from './metrics.service';
 import { IspReportsService } from './isp-reports.service';
+import { GestionarCarteraDto } from './dto/cartera-seguimiento.dto';
+import { AuthUser } from '../auth/current-user.decorator';
 
 /** Reportes (recaudo, cartera, ventas, órdenes) — migrado de saves-vestel. */
 export class ReportsController {
@@ -26,6 +28,9 @@ export class ReportsController {
   }
   topDeudores(sede?: string) { return this.reports.topDeudores(sede); }
   carteraSeguimiento(mes?: string, sede?: string, categoria?: string) { return this.reports.carteraSeguimiento(mes, sede, categoria); }
+  gestionarCartera(mes: string, subscriberId: string, dto: GestionarCarteraDto, user: AuthUser) {
+    return this.reports.gestionarCartera(mes, subscriberId, dto, user.id);
+  }
   estadisticasServicios() { return this.reports.estadisticasServicios(); }
   cortesActivaciones(from?: string, to?: string, sede?: string) { return this.reports.cortesActivaciones(from, to, sede); }
   movimientos(from?: string, to?: string, sede?: string) { return this.reports.movimientos(from, to, sede); }
@@ -173,7 +178,7 @@ export class ReportsController {
       // de métrica nunca ofrece una que no tenga ni un dato.
       opciones: {
         metricas: cobertura.map((c) => ({ id: c.metrica, nombre: c.etiqueta })),
-        sedes: (await this.reports.ordenes(hasta, hasta)).opciones.sedes,
+        sedes: await this.reports.sedes(),
       },
       cobertura,
     };

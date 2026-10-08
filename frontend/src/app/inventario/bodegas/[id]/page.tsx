@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Button } from "@/components/ui/Button";
@@ -12,14 +11,20 @@ import { DataTable } from "@/components/ui/DataTable";
 import { Pagination } from "@/components/ui/Pagination";
 import { PageSkeleton } from "@/components/skeletons/PageSkeleton";
 import { LoadError } from "@/components/ui/LoadError";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { toast } from "@/components/ui/Toast";
+import { BodegaFormModal, type BodegaEditable } from "@/components/inventory/BodegaFormModal";
+import { MaterialFormModal } from "@/components/inventory/MaterialFormModal";
 import { useAuth } from "@/context/AuthProvider";
+import { puedeGestionarBodegas } from "@/lib/auth";
+import { mensajeDeError } from "@/lib/errores";
 import { esTecnico } from "@/lib/support";
 import { cop } from "@/lib/subscribers";
 import { StatCard } from "@/components/ui/StatCard";
 import { useRequest } from "@/lib/useRequest";
 import { useOrden } from "@/lib/useOrden";
 
-type Warehouse = { id: string; title: string; extra: string | null; technicianRef: string | null; materials: number; value: number };
+type Warehouse = BodegaEditable & { technicianRef: string | null; materials: number; value: number };
 
 const COLUMNS = [
   { key: "name", header: "Nombre", sortable: true, render: (r: any) => <span className="font-medium text-text-primary">{r.name}</span> },
@@ -32,10 +37,20 @@ const COLUMNS = [
 
 export default function BodegaMaterialesPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const { loading: authLoading, authFetch, user } = useAuth();
-  // "Administrar" abre /inventario, que es de administración: al técnico no se le
-  // ofrece una puerta que el middleware le va a cerrar.
   const soloLoSuyo = esTecnico(user);
+  // Editar/eliminar la bodega y administrar su material es nominal (2026-09-29):
+  // Luis Fernando Hurtado y Santiago García. Los demás la consultan.
+  const gestiona = !soloLoSuyo && puedeGestionarBodegas(user);
+  const [editOpen, setEditOpen] = useState(false);
+  const [delOpen, setDelOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  // Material: `matOpen` con `matId` null = material nuevo en esta bodega.
+  const [matOpen, setMatOpen] = useState(false);
+  const [matId, setMatId] = useState<string | null>(null);
+  const [delMat, setDelMat] = useState<any>(null);
+  const [deletingMat, setDeletingMat] = useState(false);
 
   const [wh, setWh] = useState<Warehouse | null>(null);
   const [search, setSearch] = useState("");
@@ -66,6 +81,51 @@ export default function BodegaMaterialesPage() {
 
   useEffect(() => { if (!authLoading) void loadWh(); }, [authLoading, loadWh]);
 
+  async function remove() {
+    setDeleting(true);
+    try {
+      const res = await authFetch(`/inventory/warehouses/${id}`, { method: "DELETE" });
+      const d = await res.json().catch(() => null);
+      // El backend rechaza el borrado si la bodega aún tiene material.
+      if (!res.ok) throw new Error(d?.message || "No se pudo eliminar la bodega");
+      toast("Bodega eliminada", "check");
+      router.push("/inventario/bodegas");
+    } catch (e) {
+      toast(mensajeDeError(e), "alert-triangle");
+      setDelOpen(false);
+    } finally { setDeleting(false); }
+  }
+
+  async function removeMaterial() {
+    if (!delMat) return;
+    setDeletingMat(true);
+    try {
+      const res = await authFetch(`/inventory/materials/${delMat.id}`, { method: "DELETE" });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(d?.message || "No se pudo eliminar");
+      toast("Material eliminado", "check");
+      setDelMat(null);
+      load(); void loadWh();
+    } catch (e) {
+      toast(mensajeDeError(e, "No se pudo eliminar"), "alert-triangle");
+    } finally { setDeletingMat(false); }
+  }
+
+  // Editar/eliminar cada material, sólo para quien administra bodegas.
+  const columns = gestiona ? [...COLUMNS, {
+    key: "acciones", header: "", align: "right" as const,
+    render: (r: any) => (
+      <div className="flex justify-end gap-1">
+        <button type="button" onClick={() => { setMatId(r.id); setMatOpen(true); }} className="tap rounded-md p-1.5 text-text-tertiary hover:bg-surface-2 hover:text-text-primary" title="Editar">
+          <Icon name="pencil" size={15} />
+        </button>
+        <button type="button" onClick={() => setDelMat(r)} className="tap rounded-md p-1.5 text-text-tertiary hover:bg-error-soft hover:text-error-text" title="Eliminar">
+          <Icon name="trash" size={15} />
+        </button>
+      </div>
+    ),
+  }] : COLUMNS;
+
   if (authLoading) return <PageSkeleton />;
 
   return (
@@ -79,13 +139,56 @@ export default function BodegaMaterialesPage() {
         title={wh ? wh.title : "Bodega"}
         subtitle={wh?.extra || (soloLoSuyo ? "El material que tienes a tu cargo" : "Inventario de esta bodega")}
         actions={
-          soloLoSuyo ? undefined : (
-            <Link href={`/inventario?warehouseId=${id}`} title="Abrir en el administrador de material" className="w-full sm:w-auto">
-              <Button variant="secondary" size="sm" className="w-full sm:w-auto"><Icon name="external-link" size={14} /> Administrar</Button>
-            </Link>
-          )
+          gestiona ? (
+            <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+              <Button size="sm" className="flex-1 sm:flex-none" onClick={() => { setMatId(null); setMatOpen(true); }}>
+                <Icon name="plus" size={14} /> Nuevo material
+              </Button>
+              <Button variant="secondary" size="sm" className="flex-1 sm:flex-none" onClick={() => setEditOpen(true)} disabled={!wh}>
+                <Icon name="pencil" size={14} /> Editar
+              </Button>
+              <Button variant="danger" size="sm" className="flex-1 sm:flex-none" onClick={() => setDelOpen(true)} disabled={!wh}>
+                <Icon name="trash" size={14} /> Eliminar
+              </Button>
+            </div>
+          ) : undefined
         }
       />
+
+      {gestiona && (
+        <>
+          <BodegaFormModal open={editOpen} bodega={wh} onClose={() => setEditOpen(false)} onSaved={() => void loadWh()} />
+          <MaterialFormModal
+            open={matOpen}
+            materialId={matId}
+            defaultWarehouseId={String(id)}
+            onClose={() => setMatOpen(false)}
+            onSaved={() => { load(); void loadWh(); }}
+          />
+          <ConfirmDialog
+            open={Boolean(delMat)}
+            title="Eliminar material"
+            message={<>¿Seguro que quieres eliminar <strong>{delMat?.name}</strong> de esta bodega? Esta acción no se puede deshacer.</>}
+            confirmLabel="Eliminar"
+            busy={deletingMat}
+            onConfirm={removeMaterial}
+            onClose={() => setDelMat(null)}
+          />
+          <ConfirmDialog
+            open={delOpen}
+            title="Eliminar bodega"
+            message={
+              (wh?.materials ?? 0) > 0
+                ? <>La bodega <strong>{wh?.title}</strong> tiene {wh?.materials} material(es). Para eliminarla primero hay que trasladarlos o borrarlos.</>
+                : <>¿Seguro que quieres eliminar la bodega <strong>{wh?.title}</strong>? Esta acción no se puede deshacer.</>
+            }
+            confirmLabel="Eliminar"
+            busy={deleting}
+            onConfirm={remove}
+            onClose={() => setDelOpen(false)}
+          />
+        </>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:max-w-md">
         <StatCard label="Total de materiales" value={(wh?.materials ?? data?.total ?? 0).toLocaleString("es-CO")} icon="package" />
@@ -108,7 +211,7 @@ export default function BodegaMaterialesPage() {
         <PageSkeleton />
       ) : (
         <>
-          <DataTable rows={data?.items ?? []} empty={search ? "Ningún material coincide con la búsqueda." : "Esta bodega no tiene materiales."} columns={COLUMNS} sort={orden.sort} onSort={orden.onSort} />
+          <DataTable rows={data?.items ?? []} empty={search ? "Ningún material coincide con la búsqueda." : "Esta bodega no tiene materiales."} columns={columns} sort={orden.sort} onSort={orden.onSort} />
           {data && data.pages > 1 && (
             <Pagination meta={{ page: data.page, pageSize: data.pageSize, total: data.total, pageCount: data.pages }} onPage={setPage} />
           )}

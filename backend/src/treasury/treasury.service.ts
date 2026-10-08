@@ -53,16 +53,11 @@ export class TreasuryService {
     } else if (user) {
       cajas = await cajasPermitidas(this.prisma, user);
     }
-    // Sede, igual que `list` y el panel ejecutivo: las cajas de esa sede, intersecadas
-    // con lo permitido. Antes la cifra de arriba era la de toda la empresa aunque la
-    // tabla estuviera filtrada a una sede.
-    if (params.sede && /^\d+$/.test(params.sede)) {
-      const deSede = (await this.prisma.cashAccount.findMany({
-        where: { branchLegacy: Number(params.sede) }, select: { legacyId: true },
-      })).map((c) => c.legacyId).filter((id): id is number => id != null);
-      cajas = cajas === null ? deSede : cajas.filter((id) => deSede.includes(id));
-    }
-    const cajaWhere: Prisma.TransactionWhereInput = cajas !== null ? { cashAccountId: { in: cajas } } : {};
+    // Sede, igual que `list` y el panel ejecutivo (ver `filtroSede`). Antes la cifra de
+    // arriba era la de toda la empresa aunque la tabla estuviera filtrada a una sede.
+    const cajaWhere: Prisma.TransactionWhereInput = params.sede && /^\d+$/.test(params.sede)
+      ? await this.filtroSede(Number(params.sede), cajas)
+      : cajas !== null ? { cashAccountId: { in: cajas } } : {};
     const dateWhere: Prisma.TransactionWhereInput = { status: 'VIGENTE', ...cajaWhere };
     const period = cajera && !params.from && !params.to && params.all !== '1'
       ? rangoDia(hoyEnColombia())
@@ -254,6 +249,36 @@ export class TreasuryService {
   }
 
   /**
+   * Los movimientos de UNA sede, misma regla que el recaudo por sede del panel ejecutivo
+   * (`filtroCaja` en dashboard.service.ts) y que «Bancos» del cierre: las cajas de la
+   * sede MÁS lo que entró por los bancos (`branchLegacy = 0`: Wompi, Bancolombia…) de
+   * clientes de esa sede. Sin lo segundo, el clic en «Recaudo» del tablero con Yopal
+   * elegida traía aquí 32 M de 91 M. Un gasto de banco (sin cliente) no tiene sede.
+   * `sede = 0` son los bancos a secas. Todo se INTERSECA con las cajas permitidas
+   * (`cajas`, null = sin límite): pedir una sede nunca amplía lo que se ve.
+   */
+  private async filtroSede(sede: number, cajas: number[] | null): Promise<Prisma.TransactionWhereInput> {
+    const cuentas = await this.prisma.cashAccount.findMany({
+      where: { branchLegacy: { in: sede === SEDE_BANCO ? [SEDE_BANCO] : [sede, SEDE_BANCO] } },
+      select: { legacyId: true, branchLegacy: true },
+    });
+    const de = (branch: number) => cuentas
+      .filter((c) => c.branchLegacy === branch && c.legacyId != null && (cajas === null || cajas.includes(c.legacyId)))
+      .map((c) => c.legacyId as number);
+    if (sede === SEDE_BANCO) return { cashAccountId: { in: de(SEDE_BANCO) } };
+    return {
+      OR: [
+        { cashAccountId: { in: de(sede) } },
+        { cashAccountId: { in: de(SEDE_BANCO) }, subscriber: { branch: { legacyId: sede } } },
+        // Lo que no pasó por ninguna caja (los saldos a favor aplicados a una factura,
+        // método `Balance`) es de la sede del cliente. Sólo para quien no está acotado a
+        // unas cajas: a ése la lista de cajas ya le deja fuera lo que no lleva caja.
+        ...(cajas === null ? [{ cashAccountId: null, subscriber: { branch: { legacyId: sede } } }] : []),
+      ],
+    };
+  }
+
+  /**
    * El `where` del listado de movimientos: los filtros de la pantalla cruzados con las
    * cajas que puede ver quien pregunta. Lo comparten la tabla y el Excel, para que el
    * archivo traiga exactamente lo que se ve en pantalla — y nunca más de lo que a cada
@@ -299,16 +324,9 @@ export class TreasuryService {
       // Sin caja explícita, acotar a las que puede ver (null = sin límite).
       cajas = await cajasPermitidas(this.prisma, user);
     }
-    // Sede: no es una columna del movimiento, vive en la caja (`CashAccount.branchLegacy`,
-    // 0 = banco). Se traduce a las cajas de esa sede y se INTERSECA con lo permitido —
-    // pedir una sede nunca puede ampliar lo que se ve.
-    if (params.sede != null) {
-      const deSede = (await this.prisma.cashAccount.findMany({
-        where: { branchLegacy: Number(params.sede) }, select: { legacyId: true },
-      })).map((c) => c.legacyId).filter((id): id is number => id != null);
-      cajas = cajas === null ? deSede : cajas.filter((id) => deSede.includes(id));
-    }
-    if (cajas !== null) where.cashAccountId = { in: cajas };
+    // Sede: no es una columna del movimiento, vive en la caja (ver `filtroSede`).
+    if (params.sede != null) ands.push(await this.filtroSede(Number(params.sede), cajas));
+    else if (cajas !== null) where.cashAccountId = { in: cajas };
     // Por defecto AÑO ACTUAL (aplica también al buscar; usar all=1 para histórico).
     // Para la cajera el defecto es HOY: su pregunta es "qué ha pasado en mi turno",
     // y puede pedir otro periodo con los filtros de fecha.
@@ -858,7 +876,7 @@ export class TreasuryService {
         : null,
       items: items.map(({ tid, concept, amount }) => ({ tid, concept, amount })),
       pending: pendientes
-        .filter((i) => !pagadas.has(i.id))
+        .filter((i) => !pagadas.has(i.id) && saldoDe(i) > 0)
         .map((i) => ({ tid: i.tid, concept: conceptoFactura(i), amount: saldoDe(i) })),
       total: round2(paid + balance),
       paid,

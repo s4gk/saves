@@ -11,7 +11,7 @@ import { OnuProvisionService } from './onu-provision.service';
 describe('subir megas · desautenticar y volver a autenticar con el plan de la orden', () => {
   const SN = '48575443A1B2C3D4';
 
-  const armar = (opts: { tipo?: string; servicePorts?: any[]; altaFalla?: boolean } = {}) => {
+  const armar = (opts: { tipo?: string; servicePorts?: any[]; altaFalla?: boolean; vinculadas?: any[] } = {}) => {
     const notas: string[] = [];
     const orden: string[] = [];
     const prisma: any = {
@@ -32,17 +32,22 @@ describe('subir megas · desautenticar y volver a autenticar con el plan de la o
           id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1',
           defaultLineProfile: null, defaultSrvProfile: null, defaultVlan: null, defaultGemport: null, defaultUserVlan: null,
         }),
+        findMany: jest.fn().mockResolvedValue([{
+          id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1',
+          defaultLineProfile: null, defaultSrvProfile: null, defaultVlan: null, defaultGemport: null, defaultUserVlan: null,
+        }]),
       },
       plan: { findUnique: jest.fn().mockResolvedValue({ id: 'plan-300', name: '300 Megas', megas: 300 }) },
       oltOnu: {
-        findFirst: jest.fn().mockResolvedValue({ sn: SN, oltId: 'olt-1' }),
+        findMany: jest.fn().mockResolvedValue(opts.vinculadas ?? [{ id: 'o1', sn: SN, oltId: 'olt-1', frame: 0, slot: 1, port: 4, ontId: 28 }]),
+        update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       ticketThread: { create: jest.fn(async ({ data }: any) => { notas.push(data.message); return data; }) },
     };
     let altas = 0;
     const olt: any = {
-      estadoPorSn: jest.fn().mockResolvedValue({
+      estadoPorSn: jest.fn(async (_o: string, sn: string) => sn !== SN ? { ok: false, error: 'La ONU no está autenticada en esta OLT.', estado: null } : {
         ok: true, error: '',
         estado: {
           fsp: '0/1/4', frame: 0, slot: 1, port: 4, ont_id: 28, description: '57439ANAGOMEZ',
@@ -108,5 +113,23 @@ describe('subir megas · desautenticar y volver a autenticar con el plan de la o
     await svc.aplicarVelocidad('t1');
     expect(olt.remove).not.toHaveBeenCalled();
     expect(olt.setSpeed).toHaveBeenCalled();
+  });
+
+  // Orden 509094 (2026-09-24): la vinculada más reciente ya no existía en la OLT.
+  it('con varias ONUs vinculadas usa la que sigue dada de alta en la OLT', async () => {
+    const { svc, orden, olt } = armar({ vinculadas: [
+      { id: 'vieja', sn: '444338306A1FEB20', oltId: 'olt-1', frame: 0, slot: 7, port: 8, ontId: 22 },
+      { id: 'buena', sn: SN, oltId: 'olt-1', frame: 0, slot: 7, port: 8, ontId: 54 },
+    ] });
+    const r: any = await svc.aplicarVelocidad('t1');
+    expect(r.ok).toBe(true);
+    expect(orden[0]).toBe('remove 0/1/4:28');
+    expect(olt.remove.mock.calls[0][1].sn).toBe(SN);
+  });
+
+  it('no deja desautenticar una ONU que no es del abonado', async () => {
+    const { svc, olt } = armar();
+    await expect(svc.aplicarVelocidad('t1', undefined, 'FFFF0000FFFF0000')).rejects.toThrow(/no está vinculada/);
+    expect(olt.remove).not.toHaveBeenCalled();
   });
 });

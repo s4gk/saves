@@ -19,6 +19,7 @@ import { useRequest } from "@/lib/useRequest";
 import { useOrden } from "@/lib/useOrden";
 import { listaJson, mensajeDeError, objetoJson } from "@/lib/errores";
 import { CARGOS_LEGACY } from "@/lib/hr";
+import { StaffAvatar } from "@/components/UserAvatar";
 
 const emptyForm = {
   name: "",
@@ -177,7 +178,12 @@ export default function EmpleadosPage() {
             empty={verInhabilitados ? "No hay empleados inhabilitados." : "No se encontraron empleados con esos criterios."}
             rowHref={(r: any) => `/configuracion/empleados/${r.id}`}
             columns={[
-              { key: "name", header: "Nombre", sortable: true, render: (r: any) => <span className="font-medium text-text-primary">{r.name}</span> },
+              { key: "name", header: "Nombre", sortable: true, render: (r: any) => (
+                <span className="flex items-center gap-2.5">
+                  <StaffAvatar staffId={r.id} name={r.name ?? ""} hasPhoto={r.hasPhoto} size={30} />
+                  <span className="font-medium text-text-primary">{r.name}</span>
+                </span>
+              ) },
               { key: "docNumber", header: "Documento", sortable: true, render: (r: any) => <span className="text-text-secondary">{r.docNumber ?? "—"}</span> },
               { key: "role", header: "Rol", sortable: true, render: (r: any) => <Badge label={r.roleLabel ?? "—"} tone="info" /> },
               { key: "area", header: "Área", sortable: true, render: (r: any) => r.area ?? "—" },

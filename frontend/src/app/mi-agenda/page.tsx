@@ -513,10 +513,16 @@ export default function MiAgendaPage() {
               <VisitaDeHoy
                 o={turno}
                 posicion={turno.puesto ?? hechas.length + 1}
-                total={total}
+                // Una a una: el resto del día no viaja, así que "3 de N" no se puede decir.
+                total={d.unaAUna ? undefined : total}
                 libre={d.turnoLibre === true}
               />
-              {restantes > 1 && !d.turnoLibre && (
+              {d.unaAUna && (
+                <p className="text-center text-[12px] text-text-tertiary">
+                  Las órdenes salen una a una: cuando cierres esta te aparece la siguiente.
+                </p>
+              )}
+              {restantes > 1 && !d.turnoLibre && !d.unaAUna && (
                 <p className="text-center text-[12px] text-text-tertiary">
                   Cuando cierres esta te aparece la siguiente. Te quedan {restantes} de {total}.
                 </p>

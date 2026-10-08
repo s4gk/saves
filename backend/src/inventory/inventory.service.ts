@@ -7,7 +7,7 @@ import { orden } from '../common/pagination-params';
 import { AuthUser } from '../auth/current-user.decorator';
 import { CreateMaterialDto, SimpleCatalogDto, TransferDto, UpdateMaterialDto, WarehouseDto } from './dto/inventory.dto';
 import { num } from '../common/money';
-import { SUPERADMIN_PERMISSION } from '../auth/permissions.catalog';
+import { APP_PERMISSIONS, SUPERADMIN_PERMISSION, tienePermisoNominal } from '../auth/permissions.catalog';
 import { bodegaMaterialDelTecnico, esTecnicoDeCampo, fichaDelUsuario } from '../common/tecnico-scope';
 import { cajerasDeSede } from '../common/sede-scope';
 import { SignatureOtpService } from '../common/signature/signature-otp.service';
@@ -16,6 +16,7 @@ import { NotificationsService } from '../common/notifications/notifications.serv
 import { pdfToBuffer } from '../common/pdf/pdf-buffer';
 import { actaPdf, ActaPdfData } from '../common/pdf/pdf-docs';
 import { anotarBorradoLegacy } from '../common/legacy-deletion';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Categoría que la cajera puede entregarle a un técnico. Decisión de negocio
@@ -112,7 +113,7 @@ export class InventoryService {
 
   /** Sedes para el selector de la bodega (`Branch.legacyId`, que es lo que se guarda). */
   async branches() {
-    const rows = await this.prisma.branch.findMany({ orderBy: { legacyId: 'asc' }, select: { legacyId: true, name: true } });
+    const rows = await this.prisma.branch.findMany({ where: SEDE_ACTIVA, orderBy: { legacyId: 'asc' }, select: { legacyId: true, name: true } });
     return rows.filter((b) => b.legacyId != null).map((b) => ({ legacyId: b.legacyId!, name: b.name }));
   }
 
@@ -176,6 +177,21 @@ export class InventoryService {
   private exigirNoSerTecnico(user: AuthUser | undefined, accion: string): void {
     if (esTecnicoDeCampo(user)) {
       throw new ForbiddenException(`No tienes permiso para ${accion}. Tu acceso al inventario es de consulta sobre tu propia bodega.`);
+    }
+  }
+
+  /**
+   * Puerta de la ADMINISTRACIÓN de bodegas y su material (2026-09-29): crear, editar
+   * y eliminar bodegas, y crear, editar, borrar o importar material. Es NOMINAL
+   * —Luis Fernando Hurtado y Santiago García— y se mira SIN el atajo del
+   * superusuario (`tienePermisoNominal`): los dos son `system.admin`, como otros
+   * veinte, así que el atajo no restringiría a nadie. Traspasos, actas y compras no
+   * pasan por aquí: mueven material, no administran el catálogo.
+   */
+  private exigirGestorDeBodegas(user: AuthUser | undefined, accion: string): void {
+    this.exigirNoSerTecnico(user, accion);
+    if (!tienePermisoNominal(user, APP_PERMISSIONS.INVENTORY_WAREHOUSES_MANAGE)) {
+      throw new ForbiddenException(`No tienes permiso para ${accion}. La administración de bodegas y su material está reservada a las personas autorizadas.`);
     }
   }
 
@@ -285,7 +301,10 @@ export class InventoryService {
         orderBy: { title: 'asc' },
         include: { _count: { select: { materials: true } }, manager: { select: { id: true, name: true } } },
       }),
-      this.prisma.branch.findMany({ orderBy: { legacyId: 'asc' }, select: { legacyId: true, name: true } }),
+      // Todas, también las desactivadas: esto alimenta el mapa `legacyId → nombre` y
+      // una bodega de una sede apagada no puede quedarse sin nombre. Lo que se LISTA
+      // en pantalla ("sedes: todas") sí se filtra, más abajo, con `sedesVisibles`.
+      this.prisma.branch.findMany({ orderBy: { legacyId: 'asc' }, select: { legacyId: true, name: true, isActive: true } }),
       // Sin filtrar por username: un empleado dado de alta en nexus puede tener su
       // bodega apuntada por nombre, y filtrando aquí no se le podía entregar nada.
       this.prisma.staff.findMany({ select: { id: true, username: true, name: true, email: true, sedeAccede: true, banned: true } }),
@@ -298,6 +317,8 @@ export class InventoryService {
     const mySedes = user.sedes?.length ? user.sedes : sedesDeCuenta;
 
     const branchName = new Map(branches.map((b) => [b.legacyId, b.name]));
+    /** Las que se pueden nombrar en pantalla como "todas las sedes" (sin las apagadas). */
+    const sedesVisibles = branches.filter((b) => b.isActive).map((b) => b.name);
     // `technicianRef` viene del legacy y trae basura de captura (mayúsculas
     // distintas, espacios al final: 'OmarTec '), así que se casa normalizado — y
     // por sus dos llaves posibles, username (legacy) o nombre (altas de nexus).
@@ -318,7 +339,7 @@ export class InventoryService {
           linked: Boolean(s),
           retired: Boolean(s?.banned),
           userId: s?.email ? userByEmail.get(s.email.trim().toLowerCase()) ?? null : null,
-          sedes, sedeNames: sedes.length ? sedes.map((n) => branchName.get(n) ?? `Sede ${n}`) : branches.map((b) => b.name),
+          sedes, sedeNames: sedes.length ? sedes.map((n) => branchName.get(n) ?? `Sede ${n}`) : sedesVisibles,
           materials: w._count.materials,
         };
       });
@@ -378,7 +399,7 @@ export class InventoryService {
       // la cajera mueve cualquier material, porque no sale de la custodia de la sede.
       onlyConsumable: !unrestricted,
       consumableCategoryIds: consumableIds,
-      mySedes, mySedeNames: mySedes.length ? mySedes.map((n) => branchName.get(n) ?? `Sede ${n}`) : branches.map((b) => b.name),
+      mySedes, mySedeNames: mySedes.length ? mySedes.map((n) => branchName.get(n) ?? `Sede ${n}`) : sedesVisibles,
       // Todas las bodegas (incluidas las de técnico) para el modo entre bodegas:
       // así bodega puede devolver material desde el almacén de un técnico.
       warehouses: warehouses.map(mapWarehouse),
@@ -456,7 +477,7 @@ export class InventoryService {
     return { ok: true };
   }
   async createWarehouse(dto: WarehouseDto, user?: AuthUser) {
-    this.exigirNoSerTecnico(user, 'crear bodegas');
+    this.exigirGestorDeBodegas(user, 'crear bodegas');
     const bodega = await this.prisma.materialWarehouse.create({ data: {
       title: dto.title, extra: dto.extra ?? null, managerId: dto.managerId || null,
       technicianRef: await this.refDelTecnico(dto.technicianStaffId),
@@ -466,7 +487,7 @@ export class InventoryService {
     return bodega;
   }
   async updateWarehouse(id: string, dto: WarehouseDto, user?: AuthUser) {
-    this.exigirNoSerTecnico(user, 'editar bodegas');
+    this.exigirGestorDeBodegas(user, 'editar bodegas');
     // `managerId: ''` (o null) desasigna al encargado; no enviarlo lo deja igual.
     const data: Prisma.MaterialWarehouseUpdateInput = { title: dto.title, extra: dto.extra ?? null };
     if (dto.managerId !== undefined) {
@@ -512,7 +533,7 @@ export class InventoryService {
     return s.username?.trim() || s.name;
   }
   async deleteWarehouse(id: string, user?: AuthUser) {
-    this.exigirNoSerTecnico(user, 'eliminar bodegas');
+    this.exigirGestorDeBodegas(user, 'eliminar bodegas');
     const count = await this.prisma.material.count({ where: { warehouseId: id } });
     if (count > 0) throw new BadRequestException(`No se puede eliminar: la bodega tiene ${count} material(es). Trasládalos primero.`);
     await this.prisma.materialWarehouse.delete({ where: { id } });
@@ -524,7 +545,8 @@ export class InventoryService {
    * mayúsculas): nombre, codigo, categoria, bodega, precio, costo, iva, cantidad,
    * alerta. Crea la categoría/bodega por título si no existe. Devuelve el resumen.
    */
-  async importMaterials(buffer: Buffer) {
+  async importMaterials(buffer: Buffer, user?: AuthUser) {
+    this.exigirGestorDeBodegas(user, 'importar material');
     const wb = new Workbook();
     await wb.xlsx.load(buffer as any);
     const ws = wb.worksheets[0];
@@ -658,7 +680,7 @@ export class InventoryService {
   }
 
   async createMaterial(dto: CreateMaterialDto, user?: AuthUser) {
-    this.exigirNoSerTecnico(user, 'crear material');
+    this.exigirGestorDeBodegas(user, 'crear material');
     return this.prisma.material.create({
       data: {
         name: dto.name, code: dto.code ?? null, categoryId: dto.categoryId ?? null, warehouseId: dto.warehouseId ?? null,
@@ -667,13 +689,13 @@ export class InventoryService {
     });
   }
   async updateMaterial(id: string, dto: UpdateMaterialDto, user?: AuthUser) {
-    this.exigirNoSerTecnico(user, 'editar material');
+    this.exigirGestorDeBodegas(user, 'editar material');
     const m = await this.prisma.material.findUnique({ where: { id } });
     if (!m) throw new NotFoundException('Material no encontrado');
     return this.prisma.material.update({ where: { id }, data: { ...dto, editedAt: new Date() } });
   }
   async deleteMaterial(id: string, user?: AuthUser) {
-    this.exigirNoSerTecnico(user, 'eliminar material');
+    this.exigirGestorDeBodegas(user, 'eliminar material');
     const m = await this.prisma.material.findUnique({ where: { id } });
     if (!m) throw new NotFoundException('Material no encontrado');
     await anotarBorradoLegacy(this.prisma, 'material', m, { label: m.name });

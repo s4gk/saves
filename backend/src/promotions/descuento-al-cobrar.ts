@@ -30,11 +30,41 @@
 import { InvoiceKind, Prisma } from '@prisma/client';
 import { aplicarNotaEnTx } from '../billing/facturas.service';
 import { num, round2 } from '../common/money';
+import { esDomingo, esFestivo } from '../common/festivos';
 import {
   audienceOfPromo, discountLabel, montoDeDescuento, reaches, subscriberFacts,
 } from './publico';
 
 type Tx = Prisma.TransactionClient;
+
+/**
+ * Días hábiles de gracia para los pagos que llegan por CONVENIO (cargue del Excel
+ * del banco). Regla del usuario (08-10-2026): el banco reporta los pagos con
+ * retraso y el Excel trae la fecha del día del archivo, no la del pago. Con la
+ * promo «5% Pronto pago» del 1 al 5 de octubre, el abonado 52337 pagó 73.150 (el
+ * 95% de 77.000) y el 51073 pagó 28.500 (el 95% de 30.000); los dos llegaron en
+ * los archivos del 6 y del 7, se quedaron sin el descuento y les quedó debiendo
+ * justo el 5%.
+ */
+export const DIAS_GRACIA_CONVENIO = 2;
+
+/**
+ * La fecha de fin MÍNIMA que tiene que tener una promoción para seguir valiendo en
+ * `fecha` con `diasHabiles` de gracia: se retrocede ese número de días hábiles.
+ * Hábil = ni domingo ni festivo; el sábado SÍ cuenta (convención de la empresa,
+ * ver `common/festivos.ts`; los corresponsales también suben archivo el sábado).
+ *
+ *   miércoles 07-oct con 2 días → lunes 05-oct: una promo que terminó el 5 vale.
+ */
+export function finMinimoConGracia(fecha: Date, diasHabiles: number): Date {
+  const d = new Date(fecha.getTime());
+  let faltan = Math.max(0, Math.trunc(diasHabiles));
+  while (faltan > 0) {
+    d.setUTCDate(d.getUTCDate() - 1);
+    if (!esDomingo(d) && !esFestivo(d)) faltan--;
+  }
+  return d;
+}
 
 /**
  * ¿Esta promoción alcanza a ESTA factura?
@@ -175,6 +205,12 @@ export async function descuentosDePromocionPendientes(
    * Sin la lista, se miran todas las vigentes (lo de siempre, en ventanilla).
    */
   soloPromociones?: string[],
+  /**
+   * Fin mínimo de vigencia (por defecto `hoy`). Una promo que terminó antes de
+   * `hoy` pero no antes de esta fecha sigue valiendo: es la gracia del convenio
+   * (`finMinimoConGracia`). El inicio se sigue midiendo contra `hoy`.
+   */
+  finMinimo?: Date,
 ): Promise<Map<string, DescuentoPendiente>> {
   const fuera = new Map<string, DescuentoPendiente>();
   if (!facturas.length) return fuera;
@@ -182,7 +218,7 @@ export async function descuentosDePromocionPendientes(
 
   const vigentes = await tx.promotion.findMany({
     where: {
-      active: true, startDate: { lte: hoy }, endDate: { gte: hoy },
+      active: true, startDate: { lte: hoy }, endDate: { gte: finMinimo ?? hoy },
       ...(soloPromociones ? { id: { in: soloPromociones } } : {}),
     },
     include: {
@@ -263,6 +299,18 @@ export async function descuentosDePromocionPendientes(
 }
 
 /**
+ * Lo que puede faltarle al pago para saldar una factura CON descuento sin perderlo.
+ *
+ * Caso real (2026-10-02, factura 505826 del abonado 1449): mensualidad de 77.000, con
+ * el 5 % había que cobrar 73.150 y se recibieron 73.141. Por 9 pesos el pago dejó de
+ * "saldar la factura entera", el descuento no se concedió y el recibo salió «Abonado»
+ * con 3.859 de saldo adeudado —el descuento completo, como deuda—. Menos de 50 pesos
+ * no es un abono parcial: no existe moneda más chica, es un redondeo. Lo que falte
+ * dentro de este margen se le suma al descuento y la factura queda en ceros.
+ */
+export const TOLERANCIA_REDONDEO = 50;
+
+/**
  * Concede el descuento a las facturas que el pago SÍ alcanza a saldar.
  *
  * Se llama dentro de la transacción del recaudo, después de retirar los descuentos
@@ -284,9 +332,11 @@ export async function aplicarPromocionesAlCobrar(
     staffId?: string | null;
     editedBy?: string | null;
     authorLegacyId?: number | null;
+    /** Fin mínimo de vigencia: la gracia del convenio (ver `finMinimoConGracia`). */
+    finMinimo?: Date;
   },
 ): Promise<{ facturas: { tid: number; descuento: number; promocion: string }[]; total: number }> {
-  const posibles = await descuentosDePromocionPendientes(tx, subscriberId, facturas, opts.payDate);
+  const posibles = await descuentosDePromocionPendientes(tx, subscriberId, facturas, opts.payDate, undefined, opts.finMinimo);
   if (!posibles.size) return { facturas: [], total: 0 };
 
   // Simulación del reparto con los saldos ya rebajados: quién queda saldada.
@@ -296,9 +346,18 @@ export async function aplicarPromocionesAlCobrar(
     if (disponible <= 0) break;
     const saldo = round2(num(f.total) - num(f.paidAmount));
     if (saldo <= 0) continue;
-    const descuento = posibles.get(f.id)?.amount ?? 0;
+    const posible = posibles.get(f.id);
+    const descuento = posible?.amount ?? 0;
     const aCubrir = round2(saldo - descuento);
-    if (disponible < aCubrir) break; // el dinero se agota aquí: pago parcial, sin premio
+    if (disponible < aCubrir) {
+      // Faltan unos pesos de redondeo: se le suman al descuento para que quede saldada.
+      const faltan = round2(aCubrir - disponible);
+      if (posible && faltan <= TOLERANCIA_REDONDEO) {
+        posible.amount = round2(descuento + faltan);
+        premiadas.push(f);
+      }
+      break; // el dinero se agota aquí: pago parcial, sin premio
+    }
     disponible = round2(disponible - aCubrir);
     if (descuento > 0) premiadas.push(f);
   }

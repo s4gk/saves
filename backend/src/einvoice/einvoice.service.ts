@@ -90,7 +90,7 @@ export class EinvoiceService {
     };
   }
 
-  /** Sedes con conteo de clientes y de marcados para e-factura (TV / Internet). */
+  /** Sedes ACTIVAS con conteo de clientes y de marcados para e-factura (TV / Internet). */
   async branches() {
     const rows = await this.prisma.$queryRaw<
       { id: string; name: string; subs: number; tv: number; internet: number }[]
@@ -101,6 +101,9 @@ export class EinvoiceService {
         count(s.id) FILTER (WHERE s."eInvoiceInternet")::int AS internet
       FROM "Branch" b
       LEFT JOIN "Subscriber" s ON s."branchId" = b.id
+      -- Sin las sedes desactivadas (ver src/common/sedes-activas.ts): aquí se ELIGE a
+      -- quién marcar para e-factura, y en una sede apagada no se marca a nadie nuevo.
+      WHERE b."isActive"
       GROUP BY b.id, b.name
       ORDER BY subs DESC`;
     return rows.map((r) => ({

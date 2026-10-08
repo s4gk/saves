@@ -15,7 +15,7 @@ const dia = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
 type Servicio = { kind: string; planName: string | null; price: number | null; taxRate: number; qty: number };
 type Item = { productName: string | null; description: string | null; price: number };
 
-type Factura = { id: string; tid: number; status: string; total: number; paidAmount: number; items: Item[] };
+type Factura = { id: string; tid: number; kind?: string; status: string; total: number; paidAmount: number; items: Item[] };
 
 function servicioDePrueba(opts: {
   ajuste?: string | null;
@@ -69,8 +69,19 @@ function servicioDePrueba(opts: {
       };
     })(),
   };
+  // La escritura sólo se registra: lo que se prueba es A DÓNDE va el cobro.
+  prisma.escrito = { renglonesEn: [] as string[], actualizada: null as any, nueva: false };
+  prisma.subInvoice.findUnique = async ({ where }: any) => {
+    const f = delMes.find((x) => x.id === where.id);
+    return f && { ...f, subscriberId: 'sub-1', subtotal: f.total, tax: 0, serviceCombo: null, serviceTv: null, puntos: null, electronicInvoices: [] };
+  };
+  prisma.subInvoice.update = async ({ data }: any) => { prisma.escrito.actualizada = data; };
+  prisma.subInvoice.create = async () => { prisma.escrito.nueva = true; return { id: 'nueva', tid: 999999 }; };
+  prisma.subInvoiceItem = { create: async ({ data }: any) => { prisma.escrito.renglonesEn.push(data.invoiceId); } };
+  prisma.$transaction = async (fn: any) => fn(prisma);
   const posting: any = { postSalesInvoice: async () => null, postSalesInvoiceAdjustment: async () => null, centroDeAbonado: async () => null };
-  return new ProrrateoReconexionService(prisma, posting);
+  const svc = new ProrrateoReconexionService(prisma, posting);
+  return Object.assign(svc, { escrito: prisma.escrito as { renglonesEn: string[]; actualizada: any; nueva: boolean } });
 }
 
 const INTERNET: Servicio = { kind: 'INTERNET', planName: '100 Megas F-26', price: 50500, taxRate: 0, qty: 1 };
@@ -350,6 +361,37 @@ describe('ProrrateoReconexionService.aplicar', () => {
     const r = await svc.aplicar('sub-1', ['INTERNET']);
     expect(r.cobrado).toBe(false);
     expect(r.mensaje).toMatch(/conexión caída/);
+  });
+});
+
+describe('ProrrateoReconexionService.aplicar — no parte el mes en dos facturas', () => {
+  // Regla del usuario (08-10-2026): la reconexión «2» se queda en la misma
+  // recurrente. Abonado 5236: TV de octubre en la #506339, ya pagada; al volverle el
+  // internet nació la #510379 aparte.
+  it('la recurrente del mes YA PAGADA recibe los días y vuelve a quedar con saldo', async () => {
+    const svc = servicioDePrueba({
+      servicios: [INTERNET],
+      factura: { id: 'mes', tid: 506339, kind: 'RECURRENTE', status: 'PAID', total: 22269, paidAmount: 22269, items: [{ productName: 'Television26', description: null, price: 22269 }] },
+    });
+    const r = await svc.aplicar('sub-1', ['INTERNET']);
+    expect(r.cobrado).toBe(true);
+    expect(r.invoiceTid).toBe(506339);
+    expect(r.facturaNueva).toBe(false);
+    expect(svc.escrito.nueva).toBe(false);
+    expect(svc.escrito.renglonesEn).toEqual(['mes']);
+    expect(svc.escrito.actualizada.status).toBe('PARTIAL');
+  });
+
+  it('entre una FIJA con servicio y la RECURRENTE del mes, va a la recurrente', async () => {
+    const svc = servicioDePrueba({
+      servicios: [INTERNET],
+      facturas: [
+        { id: 'fija', tid: 510289, kind: 'FIJA', status: 'DUE', total: 22269, paidAmount: 0, items: [{ productName: 'Television26', description: null, price: 22269 }] },
+        { id: 'mes', tid: 506162, kind: 'RECURRENTE', status: 'PAID', total: 22269, paidAmount: 22269, items: [{ productName: 'Television26', description: null, price: 22269 }] },
+      ],
+    });
+    const r = await svc.evaluar('sub-1', ['INTERNET'], dia('2026-10-05'));
+    expect(r.invoiceTid).toBe(506162);
   });
 });
 

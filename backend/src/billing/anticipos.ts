@@ -3,6 +3,8 @@ import { ivaDe, num, round2 } from '../common/money';
 import { hoyEnColombia } from '../common/fecha-colombia';
 import { conceptoMesAdelantado } from '../common/concepto-factura';
 import { aplicarNotaEnTx } from './nota-en-tx';
+import { serviciosContratados } from '../common/servicios-contratados';
+import type { PrismaService } from '../prisma/prisma.service';
 
 /**
  * ANTICIPOS (saldo a favor): la plata que el cliente paga de más se guarda y se
@@ -584,9 +586,25 @@ export async function baseDelAdelanto(
   });
   if (!ultima) return null;
 
-  const servicios = await tx.subscriberService.findMany({
-    where: { subscriberId, status: 'ACTIVO', price: { gt: 0 } },
-    select: { price: true, qty: true, taxRate: true },
+  // Un servicio CORTADO por deuda se le sigue facturando: el corte no da de baja nada.
+  // Contarlo sólo si estaba ACTIVO partía el adelanto de un combo con la TV cortada
+  // (55714, 28-09: pagó 75.500 del mes y el recibo decía "octubre 50.500 · noviembre
+  // 25.000"). Pero una fila CORTADO también puede ser una TV que el cliente suspendió
+  // y quedó desfasada (56993), así que la cortada sólo cuenta si sus mensualidades
+  // todavía la cobran.
+  const filas = await tx.subscriberService.findMany({
+    where: { subscriberId, status: { in: ['ACTIVO', 'CORTADO'] }, price: { gt: 0 } },
+    select: { price: true, qty: true, taxRate: true, status: true, kind: true },
+  });
+  const cobrados = filas.some((x) => x.status === 'CORTADO')
+    ? (await serviciosContratados(tx as unknown as PrismaService, [subscriberId])).get(subscriberId)
+    : undefined;
+  const servicios = filas.filter((x) => {
+    if (x.status !== 'CORTADO') return true;
+    if (!cobrados) return false;
+    if (x.kind === 'INTERNET') return cobrados.internet;
+    if (x.kind === 'TV' || x.kind === 'PUNTOS') return cobrados.tv;
+    return false;
   });
   let mensualidad = round2(servicios.reduce((s, x) => {
     const base = round2(num(x.price) * (x.qty ?? 1));

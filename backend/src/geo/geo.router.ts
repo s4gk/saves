@@ -5,7 +5,7 @@
  * controlador. Cablea HTTP -> método: extrae los argumentos de `req` y llama.
  * La lógica sigue viviendo en GeoController, que ya no lleva decoradores.
  *
- * Endpoints: 7
+ * Endpoints: 8
  */
 import { crearRouter, manejar } from '../core/http/ruta';
 import { validar, validarQuery } from '../core/http/validar';
@@ -13,12 +13,19 @@ import { autenticar, exigirArea, usuarioDe } from '../core/auth/instancias';
 import { GeoController } from './geo.controller';
 import { geoService } from '../core/contenedor';
 import { GeoService } from './geo.service';
-import { MapQueryDto, PingDto, RouteDto, SetSubscriberLocationDto } from './dto/geo.dto';
+import { MapQueryDto, PingDto, RouteDto, SetBranchOfficeDto, SetSubscriberLocationDto } from './dto/geo.dto';
 
 /** Instancia única del controlador. Las dependencias salen del contenedor. */
 const geo = new GeoController(geoService);
 
 export const geoRouter = crearRouter();
+geoRouter.put(
+  '/branches/:id/office',
+  autenticar,
+  exigirArea('gerencia', 'administracion', 'sistemas'),
+  manejar((req) => geo.setBranchOffice(req.params.id, validar(SetBranchOfficeDto, req.body))),
+);
+
 geoRouter.get(
   '/coverage',
   autenticar,
@@ -57,7 +64,7 @@ geoRouter.put(
 geoRouter.get(
   '/technicians',
   autenticar,
-  exigirArea('gerencia', 'administracion', 'sistemas'),
+  exigirArea('gerencia', 'administracion', 'sistemas', 'caja'),
   manejar((req) => geo.technicians(usuarioDe(req), req.query.horas as string)),
 );
 

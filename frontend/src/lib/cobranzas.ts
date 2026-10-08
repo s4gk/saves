@@ -79,6 +79,9 @@ export const BANKS = ["Bancolombia", "BBVA colombia", "Banco de Bogota", "Davivi
  * Simula el reparto en cascada (mismo algoritmo que el backend) para previsualizar
  * a qué facturas se aplicaría un monto. No muta nada; solo para la UI.
  */
+/** Lo que puede faltarle al pago para saldar una factura con descuento sin perderlo. */
+export const TOLERANCIA_REDONDEO = 50;
+
 type FilaCascada = { tid: number; applied: number; leftBalance: number; willBePaid: boolean; descuento: number };
 
 export function previewCascade(
@@ -95,7 +98,11 @@ export function previewCascade(
     if (saldo <= 0) continue;
     // El descuento de la promo sólo se gana si el dinero alcanza a SALDAR la factura
     // (misma regla que el backend). Si no alcanza, se abona lo que haya y no hay rebaja.
-    const premio = inv.descuento ?? 0;
+    // Si faltan unos pesos de redondeo (`TOLERANCIA_REDONDEO` del backend) se le suman
+    // al descuento y la factura queda saldada igual.
+    let premio = inv.descuento ?? 0;
+    const faltan = round2(saldo - premio - monto);
+    if (premio > 0 && faltan > 0 && faltan <= TOLERANCIA_REDONDEO) premio = round2(premio + faltan);
     const conPremio = premio > 0 && monto >= round2(saldo - premio);
     let applied: number;
     let descuento = 0;

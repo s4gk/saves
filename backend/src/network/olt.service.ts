@@ -172,7 +172,7 @@ export class OltService {
    */
   private static readonly colaPorOlt = new Map<string, Promise<unknown>>();
 
-  /** Sesión SSH viva por IP de OLT, con temporizador de cierre por inactividad. */
+  /** Sesión SSH viva por IP:puerto de OLT, con temporizador de cierre por inactividad. */
   private static readonly sesionPorOlt = new Map<string, { driver: OltDriver; timer: NodeJS.Timeout; lastUsed: number }>();
   /** Ociosa este tiempo → se cierra (muy por debajo del idle-timeout VTY del equipo). */
   private static readonly SESION_IDLE_MS = 90_000;
@@ -235,8 +235,13 @@ export class OltService {
     olt: { id: string; brand: string; ip: string; port: string; username: string; password: string; transport?: string },
     fn: (driver: OltDriver) => Promise<T>,
   ): Promise<{ ok: boolean; error: string; raw: string; data: T | null }> {
-    return this.enFila(olt.ip, async () => {
-      const pooled = OltService.sesionPorOlt.get(olt.ip);
+    // La llave es IP:PUERTO, no la IP: YOPAL (:5022) y CASIMENA (:5023) salen
+    // por la misma IP pública, y con la IP sola una consulta a una OLT se
+    // ejecutaba en la sesión abierta de la otra (lecturas cruzadas y, peor,
+    // escrituras en el equipo equivocado).
+    const llave = `${olt.ip}:${olt.port}`;
+    return this.enFila(llave, async () => {
+      const pooled = OltService.sesionPorOlt.get(llave);
       let driver = pooled?.driver ?? null;
       if (driver && pooled) {
         // Usada hace <10 s y sin señales de muerte → se confía sin probe: en una
@@ -247,7 +252,7 @@ export class OltService {
         if (usable) {
           driver.resetSession();
         } else {
-          this.descartarSesion(olt.ip);
+          this.descartarSesion(llave);
           driver = null;
         }
       }
@@ -275,17 +280,19 @@ export class OltService {
         // prompt de config y la sesión sirve para la próxima consulta. Pero si
         // el CLI quedó atascado en una pregunta (reenter/prompt repetido), la
         // sesión no es confiable y se descarta.
-        if (/Reenter times|prompt repetido|repitió la misma pregunta|falta un parámetro|pide un parámetro/i.test(error)) {
-          this.descartarSesion(olt.ip);
+        // `cortado`: el último comando se quedó sin respuesta (sesión muerta o
+        // CLI atascado a mitad de una salida) — tampoco se reutiliza.
+        if (driver.cortado || /Reenter times|prompt repetido|repitió la misma pregunta|falta un parámetro|pide un parámetro/i.test(error)) {
+          this.descartarSesion(llave);
           driver.disconnect();
         } else {
-          this.guardarSesion(olt.ip, driver);
+          this.guardarSesion(llave, driver);
         }
         return { ok: data !== false, error, raw: driver.getRawLog(), data: data === false ? null : data };
       } catch (e) {
         const error = (e as Error).message;
         this.logSesionFallida(olt, error, driver.getRawLog());
-        this.descartarSesion(olt.ip);
+        this.descartarSesion(llave);
         driver.disconnect();
         return { ok: false, error, raw: driver.getRawLog(), data: null };
       }
@@ -1425,6 +1432,13 @@ export class OltService {
     const res = r.data as any;
     await this.audit(action, olt, r.ok, false, r.ok ? (res?.message ?? action) : `ERROR: ${r.error}`, { fsp, sn: params.sn ?? null, user });
     if (!r.ok) return { ok: false, dryRun: false, error: r.error, raw: r.raw };
+    // Una ONU borrada de la OLT no puede seguir en el inventario local: su
+    // vínculo con el abonado es lo que impide autenticarla en otro cliente.
+    if (action === 'DELETE') {
+      await this.prisma.oltOnu.deleteMany({
+        where: { oltId: olt.id, frame: f, slot: Number(params.slot), port: Number(params.port), ontId: Number(params.ont_id) },
+      }).catch((e) => this.logger.warn(`No se pudo limpiar OltOnu ${fsp}: ${e?.message ?? e}`));
+    }
     return { ok: true, dryRun: false, message: res.message, servicePorts: res.servicePorts ?? [], raw: r.raw };
   }
 
@@ -1540,12 +1554,24 @@ export class OltService {
   async syncSlot(id: string, frame = 0, slot: number, user?: AuthUser) {
     const olt = await this.resolveOlt(id);
     const ts = new Date();
-    const r = await this.withDriver(olt, (d) => d.getSlotOnus(frame, slot));
-    if (!r.ok) {
-      await this.audit('SYNC', olt, false, false, `ERROR slot ${slot}: ${r.error}`, { user });
-      return { ok: false, error: r.error, synced: 0, raw: r.raw };
+    // Puerto por puerto, cada uno en su propio withDriver: en YOPAL slot 1 la
+    // sesión se muere leyendo la óptica del puerto 7 (06-oct) y, con una sola
+    // sesión para los 16 puertos, todo lo siguiente salía vacío y el sync lo
+    // marcaba ausente. Así una sesión caída se descarta y el puerto se reintenta
+    // con otra; si aun así no se lee, el slot falla SIN marcar nada ausente.
+    const onus: any[] = [];
+    let raw = '';
+    for (let p = 0; p <= 15; p++) {
+      let r = await this.withDriver(olt, (d) => d.getOnus(frame, slot, p));
+      if (!r.ok) r = await this.withDriver(olt, (d) => d.getOnus(frame, slot, p));
+      raw = r.raw;
+      if (!r.ok) {
+        const error = `puerto ${frame}/${slot}/${p}: ${r.error || 'sin respuesta de la OLT'}`;
+        await this.audit('SYNC', olt, false, false, `ERROR slot ${slot}: ${error}`, { user });
+        return { ok: false, error, synced: 0, raw };
+      }
+      for (const o of (r.data as any[]) ?? []) { o.frame = frame; o.slot = slot; o.port = p; onus.push(o); }
     }
-    const onus = (r.data as any[]) ?? [];
     for (const o of onus) await this.upsertOnu(olt.id, o, ts);
     // ONUs del slot no vistas en esta corrida → ausentes.
     await this.prisma.oltOnu.updateMany({
@@ -1553,7 +1579,7 @@ export class OltService {
       data: { syncState: 'ausente' },
     });
     await this.audit('SYNC', olt, true, false, `Sync slot ${slot}: ${onus.length} ONUs`, { user });
-    return { ok: true, synced: onus.length, raw: r.raw };
+    return { ok: true, synced: onus.length, raw };
   }
 
   /** Upsert de una ONU por (oltId, sn). NO toca el vínculo de cliente. */

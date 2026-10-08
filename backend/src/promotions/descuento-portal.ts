@@ -225,7 +225,15 @@ async function retirarVencidos(
 ) {
   const hoy = hoyEnColombia();
   const vencidas = await prisma.promotionApplication.findMany({
-    where: { revertedAt: null, promotion: { endDate: { lt: hoy }, portalPreapply: true } },
+    where: {
+      revertedAt: null,
+      // Vencidas del portal, o CUALQUIER promo desactivada: apagarla quita el descuento
+      // de lo que no se ha pagado (ver `revertirDescuentosVencidos`).
+      OR: [
+        { promotion: { endDate: { lt: hoy }, portalPreapply: true } },
+        { promotion: { active: false } },
+      ],
+    },
     select: { invoiceId: true },
   });
   if (!vencidas.length) return;

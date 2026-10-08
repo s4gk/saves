@@ -4,12 +4,14 @@ import type { Response } from 'express';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { MIMES_DOCUMENTO, enviarAdjuntoSeguro, mimeAceptado, nombreEnDisco } from '../common/uploads';
+import { MIMES_DOCUMENTO, MIMES_IMAGEN, enviarAdjuntoSeguro, mimeAceptado, nombreEnDisco } from '../common/uploads';
 import { StaffDocumentsService, type ArchivoSubido } from './staff-documents.service';
 import { StaffService, CreateStaffDto, UpdateStaffDto, SetStaffPermissionsDto, SetStaffRolesDto, CreateStaffAccountDto, SetStaffAccountActiveDto, SetStaffBannedDto, ResetStaffPasswordDto } from './staff.service';
 import { PerformanceService } from '../reports/performance.service';
 import { APP_PERMISSIONS } from '../auth/permissions.catalog';
 import { AuthUser } from '../auth/current-user.decorator';
+import { FOTOS_ROOT } from '../auth/profile.service';
+import { MAX_FOTO_BYTES } from '../auth/profile.controller';
 
 export const DOCS_ROOT = join(process.cwd(), 'uploads', 'staff');
 /** 20 MB: una hoja de vida escaneada cabe de sobra y frena las subidas absurdas. */
@@ -151,6 +153,31 @@ export class StaffController {
     const abs = join(DOCS_ROOT, id, doc.storedName);
     if (!existsSync(abs)) throw new NotFoundException('El archivo ya no está en el servidor');
     return enviarAdjuntoSeguro(res, abs, doc.fileName);
+  }
+
+  /**
+   * Foto de perfil de un empleado, para que Administración y Gerencia la vean en
+   * Empleados. Mismas cabeceras que `GET /profile/photo`: inline, nosniff y sin
+   * caché compartida.
+   */
+  async photo(id: string, res: Response) {
+    const abs = await this.staff.rutaFoto(id);
+    if (!abs) throw new NotFoundException('Sin foto de perfil');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Content-Disposition', 'inline');
+    return res.sendFile(abs);
+  }
+
+  /** Superadmin: cambia la foto de perfil del empleado. */
+  uploadPhoto(id: string, file: ArchivoSubido | undefined, user: AuthUser) {
+    if (!file) throw new BadRequestException('No se recibió ninguna imagen');
+    return this.staff.setFoto(id, file, user);
+  }
+
+  /** Superadmin: quita la foto de perfil del empleado. */
+  deletePhoto(id: string, user: AuthUser) {
+    return this.staff.quitarFoto(id, user);
   }
 
   async deleteDocument(id: string, docId: string) {

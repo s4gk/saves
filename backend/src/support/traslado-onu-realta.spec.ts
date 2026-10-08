@@ -39,6 +39,10 @@ describe('traslado · desautenticar y volver a autenticar', () => {
           id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1',
           defaultLineProfile: null, defaultSrvProfile: null, defaultVlan: null, defaultGemport: null, defaultUserVlan: null,
         }),
+        findMany: jest.fn().mockResolvedValue([{
+          id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1',
+          defaultLineProfile: null, defaultSrvProfile: null, defaultVlan: null, defaultGemport: null, defaultUserVlan: null,
+        }]),
       },
       subscriberService: {
         findMany: jest.fn().mockResolvedValue([
@@ -75,6 +79,8 @@ describe('traslado · desautenticar y volver a autenticar', () => {
         return { ok: true, dryRun: false, message: 'ONT agregada', ontId: 4, verificacion: { run_state: 'online', config_state: 'normal', servicePorts: [1] } };
       }),
       adoptar: jest.fn(),
+      // Señal Óptima: la prueba del protocolo 4.5 pasa y no estorba al traslado.
+      ontOptical: jest.fn().mockResolvedValue({ ok: true, optical: { rx: '-20.10', olt_rx: '-22.00' } }),
     };
     const planProfiles: any = {
       resolve: jest.fn().mockResolvedValue({ vlan: 100, lineprofile: 'LP', srvprofile: 'SP', gemport: 1, userVlan: 100, trafficIn: 11, trafficOut: 9 }),

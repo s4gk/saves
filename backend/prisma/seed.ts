@@ -257,6 +257,7 @@ async function main() {
     { code: 'COMP', name: 'Equipo de cómputo y comunicación', usefulLifeMonths: 36, asset: '1528' },
     { code: 'MUEB', name: 'Muebles y equipo de oficina', usefulLifeMonths: 120, asset: '1524' },
     { code: 'VEHIC', name: 'Flota y equipo de transporte', usefulLifeMonths: 60, asset: '1540' },
+    { code: 'RED', name: 'Equipo de red y telecomunicaciones', usefulLifeMonths: 60, asset: '1528' },
   ];
   for (const c of categories) {
     const data = {

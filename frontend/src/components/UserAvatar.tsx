@@ -104,3 +104,96 @@ export function UserAvatar({
     </span>
   );
 }
+
+/**
+ * Fotos de OTROS empleados (`GET /staff/:id/photo`, solo Administración y
+ * Gerencia). Caché por sesión como la propia: la lista de empleados monta un
+ * avatar por fila y volver a ella no debe pedirlas todas otra vez. Se guarda la
+ * promesa, así dos montajes simultáneos comparten la misma petición.
+ */
+const fotosStaff = new Map<string, Promise<string | null>>();
+let fotosStaffDe: string | null = null;
+
+function cargarStaff(authFetch: (p: string) => Promise<Response>, userId: string, staffId: string): Promise<string | null> {
+  if (fotosStaffDe !== userId) {
+    fotosStaff.forEach((p) => void p.then((u) => u && URL.revokeObjectURL(u)));
+    fotosStaff.clear();
+    fotosStaffDe = userId;
+  }
+  let p = fotosStaff.get(staffId);
+  if (!p) {
+    p = authFetch(`/staff/${encodeURIComponent(staffId)}/photo`)
+      .then((r) => (r.ok ? r.blob() : null))
+      .then((b) => (b ? URL.createObjectURL(b) : null))
+      .catch(() => null);
+    fotosStaff.set(staffId, p);
+  }
+  return p;
+}
+
+/** Descarta la foto guardada de un empleado (tras cambiarla o quitarla). */
+export function olvidarFotoStaff(staffId: string) {
+  const p = fotosStaff.get(staffId);
+  fotosStaff.delete(staffId);
+  void p?.then((u) => u && URL.revokeObjectURL(u));
+}
+
+/**
+ * Avatar de un empleado cualquiera: su foto o sus iniciales.
+ *
+ * `hasPhoto=false` evita la petición (la lista ya sabe quién no tiene foto y
+ * serían decenas de 404). `onOpen` recibe la foto cargada para verla en grande;
+ * con `abrirSinFoto` también se puede abrir sin foto (para subirle una).
+ * `version` cambia después de subir o quitar la foto para volver a pedirla.
+ */
+export function StaffAvatar({
+  staffId,
+  name,
+  hasPhoto = true,
+  size = 32,
+  className = "",
+  onOpen,
+  abrirSinFoto = false,
+  version = 0,
+}: {
+  staffId: string;
+  name: string;
+  hasPhoto?: boolean;
+  size?: number;
+  className?: string;
+  onOpen?: (url: string | null) => void;
+  abrirSinFoto?: boolean;
+  version?: number;
+}) {
+  const { user, authFetch } = useAuth();
+  const userId = user?.id ?? null;
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    setUrl(null);
+    if (!userId || !hasPhoto) return;
+    let vivo = true;
+    void cargarStaff(authFetch, userId, staffId).then((u) => { if (vivo) setUrl(u); });
+    return () => { vivo = false; };
+  }, [authFetch, userId, staffId, hasPhoto, version]);
+
+  const clase = `relative flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-accent font-semibold text-white ${className}`;
+  const estilo = { width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.36)) };
+  const contenido = (
+    <>
+      {initials(name)}
+      {url && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt="" className="absolute inset-0 h-full w-full object-cover" />
+      )}
+    </>
+  );
+  if (onOpen && (url || abrirSinFoto)) {
+    return (
+      <button type="button" title={url ? `Ver la foto de ${name}` : `Subir una foto para ${name}`} onClick={() => onOpen(url)} style={estilo} className={`${clase} ${url ? "cursor-zoom-in" : "cursor-pointer"}`}>
+        {contenido}
+      </button>
+    );
+  }
+  return <span title={name} style={estilo} className={clase}>{contenido}</span>;
+}

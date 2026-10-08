@@ -56,6 +56,19 @@ export function ReportView({ rep }: { rep: string }) {
     }
   }, [authFetch, rep, from, to, extra, meta]);
 
+  /** Vuelve a pedir el reporte sin el esqueleto: para pantallas que editan filas y no deben perder su estado. */
+  const recargar = useCallback(async () => {
+    if (!meta) return;
+    const qs = new URLSearchParams();
+    if (meta.dated) {
+      if (from) qs.set("from", from);
+      if (to) qs.set("to", to);
+    }
+    for (const [k, v] of Object.entries(extra)) if (v) qs.set(k, v);
+    const r = await authFetch(`${meta.endpoint ?? `/reports/${rep}`}?${qs}`);
+    if (r.ok) setData(await r.json());
+  }, [authFetch, rep, from, to, extra, meta]);
+
   useEffect(() => {
     if (!authLoading) void load();
   }, [authLoading, load]);
@@ -136,7 +149,7 @@ export function ReportView({ rep }: { rep: string }) {
         <PageSkeleton />
       ) : (
         <div className="flex flex-col gap-6">
-          <ReportBody rep={rep} data={data} from={from} to={to} />
+          <ReportBody rep={rep} data={data} from={from} to={to} recargar={recargar} />
         </div>
       )}
     </>

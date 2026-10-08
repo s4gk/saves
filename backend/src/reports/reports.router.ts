@@ -5,10 +5,11 @@
  * controlador. Cablea HTTP -> método: extrae los argumentos de `req` y llama.
  * La lógica sigue viviendo en ReportsController, que ya no lleva decoradores.
  *
- * Endpoints: 25
+ * Endpoints: 26
  */
 import { crearRouter, manejar } from '../core/http/ruta';
-import { autenticar, exigirArea } from '../core/auth/instancias';
+import { validar } from '../core/http/validar';
+import { autenticar, exigirArea, usuarioDe } from '../core/auth/instancias';
 import { ReportsController } from './reports.controller';
 import { ispReportsService, metricsService, performanceService, reportsService, staffReportsService } from '../core/contenedor';
 import { ReportsService } from './reports.service';
@@ -16,6 +17,7 @@ import { PerformanceService } from './performance.service';
 import { StaffReportsService } from './staff-reports.service';
 import { MetricsService, METRICAS, ETIQUETA, NO_RECONSTRUIBLES, NO_SUMABLES } from './metrics.service';
 import { IspReportsService } from './isp-reports.service';
+import { GestionarCarteraDto } from './dto/cartera-seguimiento.dto';
 
 /** Instancia única del controlador. Las dependencias salen del contenedor. */
 const reports = new ReportsController(reportsService, performanceService, staffReportsService, metricsService, ispReportsService);
@@ -59,8 +61,15 @@ reportsRouter.get(
 reportsRouter.get(
   '/cartera-seguimiento',
   autenticar,
-  exigirArea('gerencia'),
+  exigirArea('gerencia', 'administracion', 'contabilidad'),
   manejar((req) => reports.carteraSeguimiento(req.query.mes as string, req.query.sede as string, req.query.categoria as string)),
+);
+
+reportsRouter.patch(
+  '/cartera-seguimiento/:mes/:subscriberId',
+  autenticar,
+  exigirArea('gerencia', 'administracion', 'contabilidad'),
+  manejar((req) => reports.gestionarCartera(req.params.mes, req.params.subscriberId, validar(GestionarCarteraDto, req.body), usuarioDe(req))),
 );
 
 reportsRouter.get(

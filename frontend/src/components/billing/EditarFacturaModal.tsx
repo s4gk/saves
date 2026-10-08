@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/Button";
 import { Input, Select, Field } from "@/components/ui/Field";
 import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
-import { ConceptoPicker } from "@/components/billing/ConceptoPicker";
+import { ConceptoPicker, type CatalogoItem } from "@/components/billing/ConceptoPicker";
+import { puedeVerPlanesAntiguos } from "@/lib/auth";
 import { cop } from "@/lib/subscribers";
 import { mensajeDeError } from "@/lib/errores";
 
@@ -30,6 +31,9 @@ const MOTIVOS = [
 ];
 const fecha = (d: string | Date) => new Date(d).toISOString().slice(0, 10);
 
+/** Fuera del componente: referencia estable para el efecto del selector. */
+const esAntiguo = (x: CatalogoItem) => !!x.antiguo;
+
 /**
  * Edición de una factura ya emitida: cambiar el valor de un concepto, corregir la
  * cantidad, agregar conceptos nuevos o quitar los que sobran.
@@ -45,6 +49,7 @@ const fecha = (d: string | Date) => new Date(d).toISOString().slice(0, 10);
  *     SÍ se digita: corregir el valor cobrado es justo para lo que se edita una
  *     factura. Elegir del catálogo sigue trayendo precio e IVA de una vez.
  */
+
 export function EditarFacturaModal({
   open,
   onClose,
@@ -58,7 +63,9 @@ export function EditarFacturaModal({
   /** Factura tal como la devuelve GET /billing/invoices/:id. */
   factura: any;
 }) {
-  const { authFetch } = useAuth();
+  const { authFetch, user } = useAuth();
+  // Los planes antiguos solo los ve quien tiene el permiso nominal; el resto, los visibles.
+  const excluirAntiguos = puedeVerPlanesAntiguos(user) ? undefined : esAntiguo;
   const conceptos: any[] = (factura.items ?? []).filter((it: any) => !it.nota);
   const notas: any[] = (factura.items ?? []).filter((it: any) => it.nota);
 
@@ -171,6 +178,7 @@ export function EditarFacturaModal({
                     <ConceptoPicker
                       className="col-span-2 sm:col-span-1"
                       value={it.description}
+                      excluir={excluirAntiguos}
                       onPick={(p) => setItem(i, { description: p.name, productName: p.name, productId: p.productId, price: p.price, taxRate: p.taxRate })}
                       // Texto libre: sólo cambia la descripción. El precio que ya tenía
                       // la línea se respeta — al editar, lo normal es corregir el valor

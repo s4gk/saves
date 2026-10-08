@@ -8,7 +8,7 @@
  * Varios routers comparten prefijo a propósito (`network`, `whatsapp`, `admin`):
  * Express los prueba en orden y cada uno responde a las suyas.
  *
- * Routers: 51
+ * Routers: 52
  */
 import { accountingRouter } from '../accounting/accounting.router';
 import { auditRouter } from '../common/audit/audit.router';
@@ -26,6 +26,7 @@ import { dashboardRouter } from '../dashboard/dashboard.router';
 import { dataRouter } from '../data/data.router';
 import { einvoiceRouter } from '../einvoice/einvoice.router';
 import { extrasRouter } from '../extras/extras.router';
+import { fixedAssetsRouter } from '../fixed-assets/fixed-assets.router';
 import { geoRouter } from '../geo/geo.router';
 import { inventoryRouter } from '../inventory/inventory.router';
 import { manualsRouter } from '../manuals/manuals.router';
@@ -79,6 +80,7 @@ export const RUTAS = [
   { prefijo: 'data', router: dataRouter },
   { prefijo: 'einvoice', router: einvoiceRouter },
   { prefijo: 'extras', router: extrasRouter },
+  { prefijo: 'fixed-assets', router: fixedAssetsRouter },
   { prefijo: 'geo', router: geoRouter },
   { prefijo: 'inventory', router: inventoryRouter },
   { prefijo: 'manuals', router: manualsRouter },

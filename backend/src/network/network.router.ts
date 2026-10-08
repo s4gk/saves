@@ -5,21 +5,23 @@
  * controlador. Cablea HTTP -> método: extrae los argumentos de `req` y llama.
  * La lógica sigue viviendo en NetworkController, que ya no lleva decoradores.
  *
- * Endpoints: 52
+ * Endpoints: 53
  */
 import { crearRouter, manejar } from '../core/http/ruta';
 import { validar, validarQuery } from '../core/http/validar';
 import { autenticar, exigirArea, exigirAreaCon, exigirPermisos, moduloRed, abiertoAlTecnico, usuarioDe } from '../core/auth/instancias';
+import { ficheroDe, subirUno } from '../core/http/uploads';
 import { NetworkController, BatchIdsDto, EstadoMikrotikDto, MessageBatchDto, RestoreBranchDto, TransferOtpDto } from './network.controller';
 import { mikrotikService, networkService, networkWriteService } from '../core/contenedor';
 import type { Response } from 'express';
-import { IsArray, IsIn, IsOptional, IsString, ArrayNotEmpty } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsOptional, IsString, ArrayNotEmpty } from 'class-validator';
 import { NetworkService } from './network.service';
 import { NetworkWriteService, EquipTransferDto, AssignPortDto, AssignEquipmentSubDto, CreateEquipmentDto, CreateIpPoolDto, CreateNapDto, CreateVlanDto, ReceiveTransferDto, RejectTransferDto, SignTransferDto, UpdateEquipmentDto, UpdateIpPoolDto, UpdateNapDto } from './network-write.service';
 import { MikrotikService } from './mikrotik.service';
 import { INV_PERMISSIONS, APP_PERMISSIONS } from '../auth/permissions.catalog';
 import { ListNapsQueryDto } from './dto/naps.dto';
 import { actaPdf } from '../common/pdf/pdf-docs';
+import { BadRequestException } from '../core/http/errores';
 
 /** Instancia única del controlador. Las dependencias salen del contenedor. */
 const network = new NetworkController(networkService, networkWriteService, mikrotikService);
@@ -200,6 +202,15 @@ networkRouter.post(
   exigirArea('tecnicos', 'administracion'),
   moduloRed,
   manejar((req) => network.createNap(validar(CreateNapDto, req.body))),
+);
+
+networkRouter.post(
+  '/naps/importar-kmz',
+  autenticar,
+  exigirArea('tecnicos', 'administracion'),
+  moduloRed,
+  subirUno('file', { limits: { fileSize: 40 * 1024 * 1024 } }),
+  manejar((req) => network.importarNapsKmz(ficheroDe(req), req.query.branchId as string, req.query.aplicar as string, req.query.sobrescribir as string, req.query.parecidas as string, usuarioDe(req))),
 );
 
 networkRouter.delete(

@@ -26,11 +26,15 @@ type Fila = {
   sugerido: number;
   campo: boolean;
   usos: number;
+  /** Tiempo estándar de la visita en minutos; 0 = sin bono. */
+  minutos: number;
+  minutosOrigen: "definido" | "sugerido";
+  minutosSugeridos: number;
   updatedBy: string | null;
   updatedAt: string | null;
 };
 
-type Catalogo = { min: number; max: number; tipos: Fila[] };
+type Catalogo = { min: number; max: number; bono: number; minutosMax: number; tipos: Fila[] };
 
 /** Las cinco estrellas de una fila. Es un radio, no un rango: 3 no es "más que 2". */
 function Estrellas({
@@ -75,6 +79,8 @@ export default function PuntajesPage() {
   const [cat, setCat] = useState<Catalogo | null>(null);
   /** Sólo lo que el usuario tocó en esta sesión: tipo → puntos. */
   const [cambios, setCambios] = useState<Record<string, number>>({});
+  /** Tiempos estándar tocados: tipo → minutos. */
+  const [cambiosMin, setCambiosMin] = useState<Record<string, number>>({});
   const [busca, setBusca] = useState("");
   const [guardando, setGuardando] = useState(false);
 
@@ -94,7 +100,18 @@ export default function PuntajesPage() {
 
   const campo = filas.filter((f) => f.campo);
   const otros = filas.filter((f) => !f.campo);
-  const pendientes = Object.keys(cambios).length;
+  const pendientes = new Set([...Object.keys(cambios), ...Object.keys(cambiosMin)]).size;
+  const minutosDe = (f: Fila) => cambiosMin[f.tipo] ?? f.minutos;
+
+  function fijarMinutos(f: Fila, texto: string) {
+    const n = Math.min(cat?.minutosMax ?? 1440, Math.max(0, Math.floor(Number(texto) || 0)));
+    setCambiosMin((c) => {
+      const siguiente = { ...c };
+      if (n === f.minutos) delete siguiente[f.tipo];
+      else siguiente[f.tipo] = n;
+      return siguiente;
+    });
+  }
 
   const puntosDe = (f: Fila) => cambios[f.tipo] ?? f.puntos;
 
@@ -116,12 +133,17 @@ export default function PuntajesPage() {
       const res = await authFetch("/support/order-scores", {
         method: "PUT",
         body: JSON.stringify({
-          puntajes: Object.entries(cambios).map(([tipo, puntos]) => ({ tipo, puntos })),
+          puntajes: [...new Set([...Object.keys(cambios), ...Object.keys(cambiosMin)])].map((tipo) => ({
+            tipo,
+            ...(cambios[tipo] != null ? { puntos: cambios[tipo] } : {}),
+            ...(cambiosMin[tipo] != null ? { minutos: cambiosMin[tipo] } : {}),
+          })),
         }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.message || "No se pudo guardar");
-      toast(`${pendientes} ${pendientes === 1 ? "puntaje guardado" : "puntajes guardados"}`, "check");
+      toast(`${pendientes} ${pendientes === 1 ? "tipo guardado" : "tipos guardados"}`, "check");
       setCambios({});
+      setCambiosMin({});
       cargar();
     } catch (e) {
       toast((e as Error).message, "alert-circle");
@@ -160,18 +182,20 @@ export default function PuntajesPage() {
         {rows.map((f) => {
           const v = puntosDe(f);
           const cambiado = cambios[f.tipo] != null;
+          const minCambiado = cambiosMin[f.tipo] != null;
+          const min = minutosDe(f);
           return (
             <div
               key={f.tipo}
               className={`flex flex-col gap-2 rounded-xl border bg-surface p-3 sm:flex-row sm:items-center sm:justify-between ${
-                cambiado ? "border-warning-border" : "border-border-subtle"
+                cambiado || minCambiado ? "border-warning-border" : "border-border-subtle"
               }`}
             >
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[14px] font-semibold text-text-primary">{f.tipo}</span>
                   {f.origen === "definido" && !cambiado && <Badge tone="info" label="fijado a mano" />}
-                  {cambiado && <Badge tone="warning" label="sin guardar" />}
+                  {(cambiado || minCambiado) && <Badge tone="warning" label="sin guardar" />}
                 </div>
                 <div className="mt-0.5 text-[12px] text-text-tertiary">
                   {f.usos > 0 ? `${nfmt(f.usos)} órdenes en el último año` : "Sin uso en el último año"}
@@ -179,7 +203,22 @@ export default function PuntajesPage() {
                   {f.origen === "sugerido" ? ` · sugerido por el sistema` : ""}
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-3">
+              <div className="flex shrink-0 flex-wrap items-center gap-3">
+                {/* Tiempo estándar: cerrar en menos da el bono. 0 = este tipo no da bono. */}
+                <label
+                  className="flex items-center gap-1.5 text-[12px] text-text-tertiary"
+                  title={`Tiempo estándar de la visita. Sugerido: ${f.minutosSugeridos} min. Con 0 este tipo no da bono.`}
+                >
+                  <Icon name="clock" size={13} />
+                  <Input
+                    type="number" inputMode="numeric" min={0} max={cat!.minutosMax} step={5}
+                    value={String(min)}
+                    onChange={(e) => fijarMinutos(f, e.target.value)}
+                    className="w-[72px] text-right tabular-nums"
+                    aria-label={`Tiempo estándar de ${f.tipo}, en minutos`}
+                  />
+                  min
+                </label>
                 <Estrellas valor={v} max={cat!.max} cambiado={cambiado} onPick={(n) => fijar(f, n)} />
                 {f.origen === "definido" && !cambiado && f.puntos !== f.sugerido && (
                   <button
@@ -223,6 +262,11 @@ export default function PuntajesPage() {
         <strong>3</strong> una visita normal y <strong>1</strong> un trámite que se hace desde la oficina.
         {" "}Un cambio vale desde el <strong>siguiente cierre</strong>: lo que ya se le abonó a un técnico no se
         reescribe, para que ajustar la tabla no le mueva el rendimiento del mes pasado a nadie.
+        <br />
+        <strong>Bono por terminar temprano:</strong> cada tipo tiene un tiempo estándar en minutos. El sistema sella la
+        hora en que el técnico empieza la orden y la hora en que la cierra; si la visita duró menos que ese tiempo, gana{" "}
+        <strong>+{cat?.bono ?? 1} punto</strong>. Con <strong>0</strong> el tipo no da bono, y una orden cerrada sin haberla
+        empezado tampoco.
       </div>
 
       <Input

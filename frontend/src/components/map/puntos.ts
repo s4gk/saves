@@ -2,7 +2,7 @@
 // sacaran de Mapa.tsx, ese import (que no es sólo de tipos) arrastra Leaflet al
 // render del servidor y la página revienta con "window is not defined".
 
-export type TipoPunto = "abonado" | "nap" | "tecnico" | "yo";
+export type TipoPunto = "abonado" | "nap" | "tecnico" | "yo" | "oficina";
 
 export type PuntoMapa = {
   id: string;

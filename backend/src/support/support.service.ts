@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { scopeDate } from '../common/date-scope';
 import { AuthUser } from '../auth/current-user.decorator';
-import { sedesDe, whereSedePorSuscriptor, exigirSedeSuscriptor } from '../common/sede-scope';
+import { sedesDe, whereSedePorSuscriptor } from '../common/sede-scope';
 import { clavesDe, esTecnicoDeCampo, fichaDelUsuario } from '../common/tecnico-scope';
 import { hoyEnColombia } from '../common/fecha-colombia';
 import { textoPlano } from '../common/texto-legacy';
@@ -17,6 +17,7 @@ import { OrderScoreService } from './order-score.service';
 import { direccionDe, referenciaDe } from '../common/subscriber-address';
 import { ORDEN_CRONOLOGICO, porFecha } from './orden-cronologico';
 import { DIAS_REZAGO, whereTrabajoDelDia } from './agenda-dia';
+import { esOrdenPosterior, MOTIVO_AUN_NO_TOCA, ordenQueLeToca, whereUnaAUna } from './turno';
 import { GeofenceService } from './geofence.service';
 import { esOrdenDeCampo } from './geofence.policy';
 import { datosQueFaltan } from './datos-cliente.policy';
@@ -26,6 +27,7 @@ import { esUsuarioPppUtil } from '../subscribers/conexion-alta';
 import { esOrdenDeServicio, esReconexion } from './order-types';
 import { mixPorAbonado } from '../common/servicios-del-abonado';
 import { whereDeServicios } from './servicio-orden.filtro';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Días tras los cuales una orden abierta se marca como vencida en el panel del
@@ -119,7 +121,9 @@ export class SupportService {
     // anteriores no se pierde — lo enseña su historial (`/mi-agenda/historial`), que
     // pasa `todoSuHistorial` porque justamente va a buscar lo de otros días.
     if (todoSuHistorial) return suyas;
-    return { AND: [suyas, whereTrabajoDelDia(hoyEnColombia())] };
+    // Y de lo abierto, UNA (2026-10-01): la que le toca. Lo que viene después no sale.
+    const unaAUna = await ordenQueLeToca(this.prisma, ficha.id, user);
+    return { AND: [suyas, whereTrabajoDelDia(hoyEnColombia()), whereUnaAUna(unaAUna)] };
   }
 
   async stats(user?: AuthUser) {
@@ -162,21 +166,59 @@ export class SupportService {
   /**
    * Opciones para los selectores de filtro: sedes y tipos de orden (detalle).
    *
-   * Las sedes van acotadas a las del usuario: a quien sólo llega a una sede no se le
-   * ofrecen las demás en el desplegable (el listado ya viene filtrado por
-   * `whereSedePorSuscriptor`, esto es que la pantalla no le mienta).
+   * TODAS las sedes, también para quien está acotado a una (2026-09-24: "todo el que
+   * tenga acceso a esta vista que pueda filtrar por sede"). La lista de /soporte ya
+   * no se acota por sede —ver `tickets`, opción `todasLasSedes`—, así que ofrecerle
+   * sólo la suya sería otra vez una pantalla que miente.
    */
-  async filterOptions(user?: AuthUser) {
-    const mias = await sedesDe(this.prisma, user);
-    const [sedes, byType] = await Promise.all([
+  async filterOptions(_user?: AuthUser) {
+    const [sedes, byType, barrios] = await Promise.all([
       this.prisma.branch.findMany({
-        where: mias ? { legacyId: { in: mias } } : undefined,
+        where: SEDE_ACTIVA,
         orderBy: { name: 'asc' },
         select: { id: true, name: true },
       }),
       this.prisma.ticket.groupBy({ by: ['type'], orderBy: { type: 'asc' } }),
+      this.barriosParaFiltro(),
     ]);
-    return { sedes, types: byType.map((t) => t.type).filter((t) => t && t.trim()) };
+    return { sedes, types: byType.map((t) => t.type).filter((t) => t && t.trim()), barrios };
+  }
+
+  /**
+   * Los barrios del filtro de /soporte (2026-10-05): sólo los que tienen algún
+   * abonado —el catálogo trae ~490 y la mitad no los pisa nadie—, cada uno con la
+   * sede en la que están sus abonados.
+   *
+   * El barrio no tiene sede propia (el legacy lo cuelga de una ciudad), así que se
+   * toma la sede de la MAYORÍA de sus abonados. Hace falta por dos cosas: hay
+   * nombres repetidos en ciudades distintas, y la pantalla acota la lista de
+   * barrios a la sede elegida. Y el legacy repite barrios DENTRO de la misma sede
+   * ('1 de Mayo' de Yopal son los ids 44 y 239): esos van como UNA opción cuyo
+   * valor lleva todos los ids unidos por '-' (la coma ya separa opciones en la URL).
+   */
+  private async barriosParaFiltro() {
+    const filas = await this.prisma.$queryRaw<{ legacyId: number; name: string; branchId: string | null; sede: string | null }[]>`
+      SELECT n."legacyId", n.name, x."branchId", b.name AS sede
+      FROM (
+        SELECT neighborhood, "branchId",
+               row_number() OVER (PARTITION BY neighborhood ORDER BY count(*) DESC) AS r
+        FROM "Subscriber" WHERE neighborhood IS NOT NULL
+        GROUP BY neighborhood, "branchId"
+      ) x
+      JOIN "Neighborhood" n ON n."legacyId"::text = x.neighborhood
+      LEFT JOIN "Branch" b ON b.id = x."branchId"
+      WHERE x.r = 1`;
+    const porClave = new Map<string, { ids: number[]; name: string; sedeId: string | null; sede: string | null }>();
+    for (const f of filas) {
+      const name = f.name.trim().replace(/\s+/g, ' ');
+      const clave = `${name.toLowerCase()}|${f.branchId ?? ''}`;
+      const b = porClave.get(clave);
+      if (b) b.ids.push(f.legacyId);
+      else porClave.set(clave, { ids: [f.legacyId], name, sedeId: f.branchId, sede: f.sede });
+    }
+    return [...porClave.values()]
+      .map((b) => ({ value: b.ids.sort((x, y) => x - y).join('-'), name: b.name, sedeId: b.sedeId, sede: b.sede }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'es') || (a.sede ?? '').localeCompare(b.sede ?? '', 'es'));
   }
 
   /**
@@ -209,7 +251,7 @@ export class SupportService {
     status: 'status',
   };
 
-  async tickets(params: { search?: string; status?: string; type?: string; servicio?: string; tec?: string; priority?: string; sede?: string; subscriberId?: string; from?: string; to?: string; all?: string; page?: number; pageSize?: number; sortBy?: string; sortDir?: string }, user?: AuthUser) {
+  async tickets(params: { search?: string; status?: string; type?: string; servicio?: string; tec?: string; priority?: string; sede?: string; barrio?: string; subscriberId?: string; from?: string; to?: string; all?: string; page?: number; pageSize?: number; sortBy?: string; sortDir?: string }, user?: AuthUser, opciones: { todasLasSedes?: boolean } = {}) {
     const { page, pageSize } = paginacion(params);
     const where: Prisma.TicketWhereInput = {};
     // Acceso por sede: el ticket la hereda de su suscriptor. Un ticket SIN suscriptor
@@ -227,14 +269,27 @@ export class SupportService {
     // "Es mía" gana sobre "es de mi sede": una orden asignada a él es suya aunque el
     // cliente esté en otra sede (a Miguel le tapaba 38 de sus 966, y su pantalla no
     // tiene filtro de sede con el que enterarse de que le faltaban).
-    if (!mias) Object.assign(where, whereSedePorSuscriptor(await sedesDe(this.prisma, user)));
+    //
+    // `todasLasSedes` (2026-09-24): la pantalla /soporte la ven todas las sedes a quien
+    // tenga acceso a ella —la cajera también— y cada quien acota con el filtro de sede.
+    // Se pidió así para que la cajera pudiera consultar las órdenes de las otras sedes.
+    // Es opción de quien llama y no regla del listado: el chatbot interno sigue acotado.
+    if (!mias && !opciones.todasLasSedes) Object.assign(where, whereSedePorSuscriptor(await sedesDe(this.prisma, user)));
     // Los filtros de la barra son de selección MÚLTIPLE: viajan separados por comas
     // ("PENDIENTE,REALIZANDO"). Un solo valor sigue siendo el caso corriente y se
     // comporta igual que antes, así que los enlaces guardados no se rompen.
     const estados = variosDeQuery(params.status);
     if (estados.length) where.status = { in: estados as any };
     const detalles = variosDeQuery(params.type);
-    if (detalles.length) where.type = { in: detalles };
+    // El legacy escribió la suspensión de dos formas ('Suspension Combo' y 'Suspencion
+    // Combo'): quien filtra por una se lleva también la otra.
+    // Lo mismo con la reinstalación: 'Reinstalación' (la de hoy) y 'Reinstalacion' sin
+    // tilde (las de 2021) son el mismo detalle.
+    const conErratas = detalles.flatMap((d) =>
+      /^suspension /i.test(d) ? [d, d.replace(/^suspension/i, 'Suspencion')]
+        : /^reinstalaci[oó]n$/i.test(d) ? ['Reinstalación', 'Reinstalacion']
+        : [d]);
+    if (detalles.length) where.type = { in: conErratas };
     // QUÉ TIENE CONTRATADO EL CLIENTE (solo TV, solo internet, combo). Es el filtro
     // hermano del cartel que lleva cada fila: quien reparte el trabajo puede así
     // sacar de un golpe las órdenes de servicio de los abonados de solo televisión
@@ -268,6 +323,11 @@ export class SupportService {
     // ver las de otra mandando su id a mano en la URL.
     const sedes = variosDeQuery(params.sede);
     if (sedes.length) and.push({ subscriber: { is: { branchId: { in: sedes } } } });
+    // Barrio: el abonado guarda el id legacy en texto. Cada opción puede traer
+    // varios ids unidos por '-' (barrios repetidos en el legacy, ver
+    // `barriosParaFiltro`). En `AND` por lo mismo que la sede.
+    const barrios = variosDeQuery(params.barrio).flatMap((v) => v.split('-')).filter((v) => /^\d+$/.test(v));
+    if (barrios.length) and.push({ subscriber: { is: { neighborhood: { in: barrios } } } });
     // Filtro por cliente concreto. Lo usa el aviso de "este cliente ya tiene
     // órdenes abiertas" del formulario de orden nueva. Va en `AND` por lo mismo
     // que los de arriba: en la raíz pisaría el alcance por sede.
@@ -358,11 +418,13 @@ export class SupportService {
 
   /** Filas planas para exportar a Excel (respeta los mismos filtros del listado). */
   async exportRows(params: Parameters<SupportService['tickets']>[0], user?: AuthUser) {
-    const r = await this.tickets({ ...params, page: 1, pageSize: 100 }, user);
+    // Mismo alcance que la tabla de /soporte (todas las sedes, ver `tickets`).
+    const op = { todasLasSedes: true };
+    const r = await this.tickets({ ...params, page: 1, pageSize: 100 }, user, op);
     // Se recorren todas las páginas (tope sano de 20k filas), igual que en `orders`.
     const all = [...r.items];
     for (let p = 2; p <= Math.min(r.pages, 200); p++) {
-      all.push(...(await this.tickets({ ...params, page: p, pageSize: 100 }, user)).items);
+      all.push(...(await this.tickets({ ...params, page: p, pageSize: 100 }, user, op)).items);
     }
     return all;
   }
@@ -432,7 +494,6 @@ export class SupportService {
   }
 
   async ticketDetail(id: string, user?: AuthUser) {
-    const dueno = await this.prisma.ticket.findUnique({ where: { id }, select: { subscriberId: true } });
     // La lista ya va acotada, pero la ficha se abre por URL: sin esta puerta bastaba
     // con teclear un id para leer (y cerrar) la orden de otro técnico.
     //
@@ -445,11 +506,20 @@ export class SupportService {
       if (!(await this.prisma.ticket.findFirst({ where: { AND: [{ id }, mias] }, select: { id: true } }))) {
         throw new ForbiddenException('Esta orden no está asignada a ti.');
       }
+      // Una a una (2026-10-01, a pedido del dueño): lo abierto que viene DESPUÉS de la
+      // que le toca tampoco se abre por enlace. Lo cerrado —su historial— sí.
+      const ficha = await fichaDelUsuario(this.prisma, user!);
+      const suEstado = await this.prisma.ticket.findUnique({ where: { id }, select: { id: true, status: true } });
+      if (ficha && suEstado && esOrdenPosterior(await ordenQueLeToca(this.prisma, ficha.id, user), suEstado)) {
+        throw new ForbiddenException({ message: MOTIVO_AUN_NO_TOCA, code: 'AUN_NO_TE_TOCA' });
+      }
       // Ser suya basta para el alcance: no se le pide además que el cliente sea de su
       // sede (mismo criterio que la lista, o no podría abrir las 38 que le salen ahí).
-    } else if (dueno?.subscriberId) {
-      await exigirSedeSuscriptor(this.prisma, user, dueno.subscriberId);
     }
+    // Sin puerta de sede para LEER la orden (2026-09-24): la lista de /soporte enseña
+    // todas las sedes y cada fila tiene que poder abrirse. La ficha del CLIENTE sigue
+    // acotada (`exigirSedeSuscriptor` en subscribers), igual que asignarle equipo.
+    //
     // Aquí NO hay candado de "una orden a la vez" (2026-09-10). Lo hubo durante un día
     // —abrir la ficha de una segunda orden daba 403— y se quitó al mirar el legacy: allá
     // la regla vive sólo en el momento de EMPEZAR (`update_status` con `Realizando`) y
@@ -649,6 +719,9 @@ export class SupportService {
             planAnterior: t.planFromName,
             de: t.planFromMegas,
             aplicado: t.planAppliedAt,
+            /** Combo destino (internet + TV / streaming), si la orden cambia el paquete entero. */
+            comboId: t.bundleToId,
+            combo: t.bundleToName,
           }
         : null,
       /**
@@ -683,6 +756,14 @@ export class SupportService {
       score: t.score,
       scoredAt: t.scoredAt,
       puntajeVigente: await this.puntajes.puntajeDe(t.type),
+      /**
+       * Las horas REALES de la visita (las sella el sistema) y el tiempo estándar de
+       * su tipo: quien cierra dentro de ese tiempo gana el bono, ya sumado en `score`.
+       */
+      startedAt: t.startedAt,
+      resolvedAt: t.resolvedAt,
+      earlyBonus: t.earlyBonus,
+      minutosEstandar: await this.puntajes.minutosDe(t.type),
       subscriber: sub
         ? {
             id: sub.id, name: subName(sub), abonado: sub.abonado, doc: sub.docNumber,

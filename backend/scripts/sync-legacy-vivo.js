@@ -2629,12 +2629,27 @@ async function syncInventario(my, st, sum, subMap, lapidas) {
     qty: num(r.qty), description: norm(r.product_des), alert: r.alert ?? null,
     serviceType: norm(r.tipo_servicio), tvOrNet: norm(r.pertence_a_tv_o_net),
   });
+  // El legacy, al asignarle un equipo a un técnico (`asigna_e`), crea un `products` con la
+  // `equipos.mac` por nombre (a veces es el serial) en la bodega del técnico y al instalarlo
+  // lo pasa a "Almacén Clientes". Es el mismo aparato que ya vive en Equipment: como
+  // material sólo duplica y ensucia las categorías (caían en MUEBLES Y ENSERES). Limpiados
+  // el 2026-10-06; aquí no se vuelven a dar de alta. Los que ya están (categoría
+  // histórica, porque aparecen en órdenes) siguen al día.
+  const claveEq = (s) => String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+  const ES_MAC = /^\s*([0-9a-f]{2}[:.-]){5,}[0-9a-f]{2}\s*$/i;
+  const eqClaves = new Set();
+  for (const e of await prisma.equipment.findMany({ select: { mac: true, serial: true } })) {
+    // Con dígitos y largo: hay equipos con "IMPRESORA EPSON" de serial.
+    for (const k of [claveEq(e.mac), claveEq(e.serial)]) if (k.length >= 8 && /\d/.test(k)) eqClaves.add(k);
+  }
+  const esEquipo = (nombre) => ES_MAC.test(nombre || '') || eqClaves.has(claveEq(nombre));
   const matNuevos = [], matCambios = [];
-  let matBlindados = 0;
+  let matBlindados = 0, matMac = 0;
   for (const r of matRows) {
     const mapped = mapMaterial(r);
     const pg = matByLegacy.get(r.pid);
     if (!pg) {
+      if (esEquipo(r.product_name)) { matMac++; continue; }
       if (!lapidas.tiene('material', r.pid)) matNuevos.push({ legacyId: r.pid, ...mapped });
       continue;
     }
@@ -2642,7 +2657,7 @@ async function syncInventario(my, st, sum, subMap, lapidas) {
     const keys = diffKeys(mapped, pg);
     if (keys.length) matCambios.push({ legacyId: r.pid, keys, mapped });
   }
-  res.material = { nuevos: matNuevos.length, actualizados: matCambios.length, tocadosAqui: matBlindados };
+  res.material = { nuevos: matNuevos.length, actualizados: matCambios.length, tocadosAqui: matBlindados, macOmitidos: matMac };
   if (!DRY) {
     await createMany('material', matNuevos);
     await pooled(matCambios, 5, async (c) => {

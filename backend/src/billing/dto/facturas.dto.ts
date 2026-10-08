@@ -185,7 +185,6 @@ export class CreateNoteDto {
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString({ message: 'Escribe la observación de la nota: por qué se aplica.' })
   @MinLength(5, { message: 'La observación debe explicar el motivo de la nota (mínimo 5 caracteres).' })
-  @MaxLength(500, { message: 'La observación no puede pasar de 500 caracteres.' })
   description!: string;
 
   /**
@@ -231,7 +230,6 @@ export class CreateNotesBulkDto {
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString({ message: 'Escribe la observación de la nota: por qué se aplica.' })
   @MinLength(5, { message: 'La observación debe explicar el motivo de la nota (mínimo 5 caracteres).' })
-  @MaxLength(500, { message: 'La observación no puede pasar de 500 caracteres.' })
   description!: string;
 
   @IsOptional() @IsIn(RETENTION_TYPES as unknown as string[])
@@ -252,6 +250,12 @@ export class CreateNotesBulkDto {
 
 /** Anulación de una factura de venta (legacy `Transactions::cancelinvoice`, motivo por GET). */
 export class VoidInvoiceDto {
+  @IsString() @MinLength(3)
+  reason!: string;
+}
+
+/** Anular lo que quede sin aplicar de una nota pendiente: el porqué es obligatorio. */
+export class CancelPendingNoteDto {
   @IsString() @MinLength(3)
   reason!: string;
 }

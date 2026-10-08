@@ -6,6 +6,7 @@ import { AuthUser } from '../auth/current-user.decorator';
 import { sedesDeUsuario } from './bodega-scope';
 import { clavesDe, esTecnicoDeCampo, fichaDelUsuario } from '../common/tecnico-scope';
 import { ListNapsQueryDto } from './dto/naps.dto';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 function subName(s: {
   firstName: string | null; secondName: string | null; lastName1: string | null;
@@ -208,8 +209,13 @@ export class NetworkService {
 
   /** Sedes con su número de cajas NAP y de VLANs (las dos pantallas de red entran por sede). */
   async branches() {
-    const rows = await this.prisma.branch.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, _count: { select: { naps: true, vlans: true } } } });
-    return rows.map((b) => ({ id: b.id, name: b.name, naps: b._count.naps, vlans: b._count.vlans }));
+    const rows = await this.prisma.branch.findMany({ where: SEDE_ACTIVA, orderBy: { name: 'asc' }, select: { id: true, legacyId: true, name: true, officeLat: true, officeLng: true, _count: { select: { naps: true, vlans: true } } } });
+    // `legacyId` y la oficina los usa el mapa: con la sede elegida (o la del usuario
+    // acotado, que viene como gid en el token) vuela a la oficina de esa sede.
+    return rows.map((b) => ({
+      id: b.id, legacyId: b.legacyId, name: b.name, naps: b._count.naps, vlans: b._count.vlans,
+      office: b.officeLat != null && b.officeLng != null ? { lat: b.officeLat, lng: b.officeLng } : null,
+    }));
   }
 
   /**
@@ -257,14 +263,14 @@ export class NetworkService {
     if (params.search?.trim()) {
       const s = params.search.trim();
       const n = Number(s);
-      where.OR = [{ mac: { contains: s, mode: 'insensitive' } }, { serial: { contains: s, mode: 'insensitive' } }, { brand: { contains: s, mode: 'insensitive' } }, ...(Number.isFinite(n) ? [{ code: n }] : [])];
+      where.OR = [{ mac: { contains: s, mode: 'insensitive' } }, { serial: { contains: s, mode: 'insensitive' } }, { brand: { contains: s, mode: 'insensitive' } }, { equipmentType: { contains: s, mode: 'insensitive' } }, ...(Number.isFinite(n) ? [{ code: n }] : [])];
     }
     const [rows, total] = await Promise.all([
       this.prisma.equipment.findMany({ where, orderBy: orden(params, NetworkService.ORDEN_EQUIPOS, { code: 'desc' }), skip: (page - 1) * pageSize, take: pageSize, include: { warehouse: { select: { name: true } }, subscriber: { select: SUB } } }),
       this.prisma.equipment.count({ where }),
     ]);
     return {
-      items: rows.map((e) => ({ id: e.id, code: e.code, mac: e.mac, serial: e.serial, brand: e.brand, status: e.status, observation: e.observation, warehouse: e.warehouse?.name ?? null, client: subName(e.subscriber), subscriberId: e.subscriber?.id ?? null, installType: e.installType, genieacs: !!e.genieacsId, returnedAt: e.returnedAt })),
+      items: rows.map((e) => ({ id: e.id, code: e.code, mac: e.mac, serial: e.serial, brand: e.brand, status: e.status, observation: e.observation, warehouse: e.warehouse?.name ?? null, client: subName(e.subscriber), subscriberId: e.subscriber?.id ?? null, installType: e.installType, category: e.category, equipmentType: e.equipmentType, genieacs: !!e.genieacsId, returnedAt: e.returnedAt })),
       total, page, pageSize, pages: Math.ceil(total / pageSize),
     };
   }

@@ -293,7 +293,7 @@ r('POST', 'billing/notes', (b) => {
   const suma = Array.isArray(b.items) ? b.items.reduce((t: number, i: any) => t + (Number(i.amount) || 0), 0) : Number(b.total) || 0;
   return `Creó una nota ${tipo === 'CREDITO' ? 'crédito' : tipo === 'DEBITO' ? 'débito' : 'contable'}${suma ? ` por ${dinero(suma)}` : ''}${cuantos(b.items) > 1 ? ` sobre ${plural(cuantos(b.items), 'factura', 'facturas')}` : ''}${cita(b.description, 80)}`;
 });
-r('DELETE', 'subscribers/:id/invoices/:f', (_b, p) => ({ frase: 'Eliminó una factura del abonado', ref: abonado(p[0]) }));
+r('DELETE', 'subscribers/:id/invoices/:f', (b, p) => ({ frase: `Eliminó una factura del abonado${cita(b.reason, 100)}`, ref: abonado(p[0]) }));
 r('PATCH', 'subscribers/:id/invoices/:f', (_b, p) => ({ frase: 'Editó una factura del abonado', ref: factura(p[1]) }));
 
 // --- Soporte / órdenes -----------------------------------------------------
@@ -357,7 +357,8 @@ r('POST', 'subscribers/:id/plans', (b, p) => {
   return { frase: `Cambió los servicios contratados del abonado${partes.length ? ` (${partes.join('; ')})` : ''}`, ref: abonado(p[0]) };
 });
 r('POST', 'subscribers/:id/files', (b, p) => ({ frase: `Subió un documento del abonado${b.tipo || b.docType ? ` (${txt(b.tipo ?? b.docType, 30)})` : ''}`, ref: abonado(p[0]) }));
-r('DELETE', 'subscribers/:id/files/:f', (_b, p) => ({ frase: 'Borró un documento del abonado', ref: abonado(p[0]) }));
+r('DELETE', 'subscribers/:id/files/:f', (b, p) => ({ frase: `Borró un documento del abonado${cita(b.reason, 100)}`, ref: abonado(p[0]) }));
+r('DELETE', 'subscribers/:id/notes/:n', (b, p) => ({ frase: `Borró una nota de la ficha${cita(b.reason, 100)}`, ref: abonado(p[0]) }));
 r('POST', 'subscribers/:id/notes', (b, p) => ({ frase: `Escribió una nota en la ficha${cita(b.note ?? b.text ?? b.nota, 110)}`, ref: abonado(p[0]) }));
 r('POST', 'subscribers/:id/house-photo', (_b, p) => ({ frase: 'Subió la foto de la vivienda', ref: abonado(p[0]) }));
 r('POST', 'subscribers/:id/carta-retiro', (_b, p) => ({ frase: 'Cargó la carta de retiro del abonado', ref: abonado(p[0]) }));

@@ -15,6 +15,9 @@ import { AuditService } from '../common/audit/audit.service';
 import { num } from '../common/money';
 import { CARGO_TECNICO, cargoLegacy } from './cargos-legacy';
 import { olvidarNombres } from './nombre-tecnico';
+import { existsSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { FOTOS_ROOT, ProfileService } from '../auth/profile.service';
 
 export class CreateStaffDto {
   @IsString() @MinLength(1) name!: string;
@@ -164,6 +167,7 @@ export class StaffService {
         id: e.id, name: e.name, docNumber: e.docNumber, email: e.email,
         role: e.role, roleLabel: cargoLegacy(e.role), area: e.area?.name ?? null,
         phone: e.phone, banned: e.banned, lastLogin: e.lastLogin,
+        hasPhoto: ProfileService.fotoSegura(e.picture) != null,
       })),
       total, page, pageSize, pages: Math.ceil(total / pageSize),
     };
@@ -188,6 +192,53 @@ export class StaffService {
       address: e.address, city: e.city, region: e.region, phone: e.phone, phoneAlt: e.phoneAlt,
       banned: e.banned, lastLogin: e.lastLogin, sedeAccede: e.sedeAccede, picture: e.picture, activity,
     };
+  }
+
+  /**
+   * Ruta absoluta de la foto de perfil de un empleado, o null si no tiene o el
+   * archivo ya no está. El nombre pasa por el mismo filtro que «Mi perfil»:
+   * `Staff.picture` viene del legacy sin sanear.
+   */
+  async rutaFoto(id: string): Promise<string | null> {
+    const e = await this.prisma.staff.findUnique({ where: { id }, select: { picture: true } });
+    if (!e) throw new NotFoundException('Empleado no encontrado');
+    const archivo = ProfileService.fotoSegura(e.picture);
+    if (!archivo) return null;
+    const abs = join(FOTOS_ROOT, archivo);
+    return existsSync(abs) ? abs : null;
+  }
+
+  /**
+   * Cambia la foto de perfil de un empleado (solo superadmin, desde su ficha).
+   * El archivo ya está en disco cuando se llega aquí: si el empleado no existe se
+   * borra para no dejarlo huérfano. La foto anterior también se borra.
+   */
+  async setFoto(id: string, archivo: { filename: string; path: string }, actor: AuthUser) {
+    const e = await this.prisma.staff.findUnique({ where: { id }, select: { id: true, picture: true } });
+    if (!e) {
+      try { unlinkSync(archivo.path); } catch { /* noop */ }
+      throw new NotFoundException('Empleado no encontrado');
+    }
+    const anterior = ProfileService.fotoSegura(e.picture);
+    await this.prisma.staff.update({ where: { id }, data: { picture: archivo.filename } });
+    if (anterior && anterior !== archivo.filename) {
+      try { unlinkSync(join(FOTOS_ROOT, anterior)); } catch { /* ya no estaba */ }
+    }
+    void this.audit.record({ userId: actor.id, action: 'staff.photo', entity: 'Staff', entityId: id });
+    return { ok: true };
+  }
+
+  /** Quita la foto de perfil de un empleado (vuelve a las iniciales). */
+  async quitarFoto(id: string, actor: AuthUser) {
+    const e = await this.prisma.staff.findUnique({ where: { id }, select: { id: true, picture: true } });
+    if (!e) throw new NotFoundException('Empleado no encontrado');
+    const actual = ProfileService.fotoSegura(e.picture);
+    await this.prisma.staff.update({ where: { id }, data: { picture: null } });
+    if (actual) {
+      try { unlinkSync(join(FOTOS_ROOT, actual)); } catch { /* ya no estaba */ }
+    }
+    void this.audit.record({ userId: actor.id, action: 'staff.photo.delete', entity: 'Staff', entityId: id });
+    return { ok: true };
   }
 
   areas() { return this.prisma.staffArea.findMany({ orderBy: { name: 'asc' } }); }

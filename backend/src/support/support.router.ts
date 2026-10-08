@@ -309,7 +309,7 @@ supportRouter.get(
   '/tickets',
   autenticar,
   exigirArea('tecnicos', 'administracion', 'caja'),
-  manejar((req) => support.tickets(req.query.search as string, req.query.status as string, req.query.type as string, req.query.servicio as string, req.query.tec as string, req.query.priority as string, req.query.sede as string, req.query.subscriberId as string, req.query.from as string, req.query.to as string, req.query.all as string, req.query.page as string, req.query.pageSize as string, req.query.sortBy as string, req.query.sortDir as string, usuarioDe(req))),
+  manejar((req) => support.tickets(req.query.search as string, req.query.status as string, req.query.type as string, req.query.servicio as string, req.query.tec as string, req.query.priority as string, req.query.sede as string, req.query.barrio as string, req.query.subscriberId as string, req.query.from as string, req.query.to as string, req.query.all as string, req.query.page as string, req.query.pageSize as string, req.query.sortBy as string, req.query.sortDir as string, usuarioDe(req))),
 );
 
 supportRouter.post(
@@ -323,7 +323,7 @@ supportRouter.get(
   '/tickets/export.xlsx',
   autenticar,
   exigirArea('tecnicos', 'administracion', 'caja'),
-  manejar((req, res) => support.ticketsXlsx(res, req.query.search as string, req.query.status as string, req.query.type as string, req.query.servicio as string, req.query.tec as string, req.query.priority as string, req.query.sede as string, req.query.from as string, req.query.to as string, req.query.all as string, usuarioDe(req))),
+  manejar((req, res) => support.ticketsXlsx(res, req.query.search as string, req.query.status as string, req.query.type as string, req.query.servicio as string, req.query.tec as string, req.query.priority as string, req.query.sede as string, req.query.barrio as string, req.query.from as string, req.query.to as string, req.query.all as string, usuarioDe(req))),
 );
 
 supportRouter.get(
@@ -405,7 +405,7 @@ supportRouter.post(
   autenticar,
   exigirArea('tecnicos', 'administracion', 'caja'),
   exigirPermisos(APP_PERMISSIONS.NETWORK_OLT_MANAGE),
-  manejar((req) => support.aplicarVelocidadOnu(req.params.id, usuarioDe(req))),
+  manejar((req) => support.aplicarVelocidadOnu(req.params.id, req.body?.sn, usuarioDe(req))),
 );
 
 supportRouter.get(

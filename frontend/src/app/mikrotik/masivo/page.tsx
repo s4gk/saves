@@ -158,11 +158,11 @@ function parteDeTvSoloSistema(d: RespTv, kind: "cut" | "reconnect", verbo: strin
     titulo: verbo,
     resumen: `${verbo}: ${marcados} de ${total} ${total === 1 ? "cliente quedó" : "clientes quedaron"} ${kind === "cut" ? "con la TV cortada" : "con la TV activa"} en el sistema.`
       + " El TR-069 está en pausa: no se tocó ningún equipo, el trabajo en la red se hace a mano."
-      + (kind === "cut" && d.ordenes ? ` Quedaron ${d.ordenes} ${d.ordenes === 1 ? "orden" : "órdenes"} de corte PENDIENTES: se cierran al cortar en sitio.` : ""),
+      + (kind === "cut" && d.ordenes ? ` ${d.ordenes === 1 ? "Quedó 1 orden de corte registrada y cerrada" : `Quedaron ${d.ordenes} órdenes de corte registradas y cerradas`}.` : ""),
     dryRun: false,
     chips: [
       { label: "marcados en el sistema", valor: marcados, tono: "success" },
-      { label: "órdenes pendientes para hacer en sitio", valor: d.ordenes ?? 0, tono: "default" },
+      { label: "órdenes de corte registradas y cerradas", valor: d.ordenes ?? 0, tono: "default" },
       { label: "protegidos por compromiso de pago", valor: d.protegidos?.compromiso ?? d.compromisosProtegidos ?? 0, tono: "warning" },
       { label: "no cortados: aún en plazo (sin factura vencida)", valor: d.protegidos?.sinVencer ?? 0, tono: "warning" },
       // Marcados por deuda, pero no tienen contratado lo que se corta (sólo TV / sólo internet).

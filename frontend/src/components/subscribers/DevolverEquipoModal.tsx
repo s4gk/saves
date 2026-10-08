@@ -33,8 +33,9 @@ type Saldo = { balance: number; alDia: boolean };
 const hoy = () => new Date().toLocaleDateString("en-CA");
 
 /**
- * Por qué vuelve el equipo. "Retiro" no es un motivo más: arrastra la baja del
- * cliente (RETIRADO + corte en el router), igual que cerrar una orden de retiro.
+ * Por qué vuelve el equipo. "Retiro" sólo cambia el equipo y pide el motivo del
+ * retiro para la nota: el estado del cliente NO se toca (la baja va por la orden de
+ * retiro o a mano en la ficha).
  */
 const TIPOS = [
   { value: "cambio", label: "Cambio / daño / mantenimiento — el cliente sigue" },
@@ -133,10 +134,8 @@ export function DevolverEquipoModal({
   const retiro = tipo === "retiro";
   const equipo = equipos.find((e) => e.id === equipoId) ?? null;
 
-  // El saldo se pregunta SÓLO al elegir "Retiro": es la devolución que pasa al cliente
-  // a RETIRADO, y desde ahí deja de facturarse y el cron de cartera ya no lo mira
-  // (RETIRADO está fuera de `ESTADOS_QUE_CAEN_EN_CARTERA`). Quien recibe el equipo en
-  // la ventanilla tiene que ver la deuda ANTES de dar la baja, no después.
+  // El saldo se pregunta SÓLO al elegir "Retiro": quien recibe el equipo en la
+  // ventanilla ve la deuda antes de dar la baja en la ficha.
   // Una sola vez por apertura; si la ruta no le deja (área sin cuenta) se calla.
   useEffect(() => {
     if (!open || !retiro || saldo) return;
@@ -176,12 +175,7 @@ export function DevolverEquipoModal({
       const cuerpo = await res.json().catch(() => null);
       if (!res.ok) throw new Error(cuerpo?.message || "No se pudo devolver el equipo");
       const w = cuerpo?.withdrawal;
-      toast(
-        `Equipo devuelto a ${cuerpo?.warehouse?.name ?? "bodega"}`
-          + (w?.statusSet ? " · cliente retirado" : w?.yaRetirado ? " · el cliente ya estaba retirado" : ""),
-        "check",
-      );
-      if (w?.note) toast(w.note, "alert-triangle");
+      toast(`Equipo devuelto a ${cuerpo?.warehouse?.name ?? "bodega"}`, "check");
       if (w && w.equiposPendientes > 0) {
         toast(`Ojo: al cliente le quedan ${w.equiposPendientes} equipo(s) por devolver.`, "alert-triangle");
       }
@@ -227,18 +221,16 @@ export function DevolverEquipoModal({
 
         {retiro && (
           <div className="rounded-lg border border-warning-border bg-warning-soft px-3 py-2 text-[11px] text-text-secondary">
-            Además de recoger el equipo, el cliente queda en <b>Retirado</b> y se le corta
-            la conexión en el router. Si le quedan más equipos instalados, hay que devolverlos aparte.
+            Sólo se recoge el equipo: el estado del cliente <b>no cambia</b>. Para darle la
+            baja, usa la orden de retiro o cambia el estado desde la ficha. Si le quedan más
+            equipos instalados, hay que devolverlos aparte.
           </div>
         )}
 
         {retiro && saldo && !saldo.alDia && (
           <div className="rounded-lg border border-error-border bg-error-soft px-3 py-2 text-[11px] text-error-text">
-            <b>Este cliente debe {cop(saldo.balance)}.</b> El retiro no borra la deuda: las
-            facturas siguen vivas y se pueden cobrar en ventanilla, y el paz y salvo seguirá
-            bloqueado hasta que pague. Pero deja de facturársele el mes y el sistema ya no lo
-            pasará a Cartera. Si se le va a seguir gestionando el cobro, recoge el equipo
-            como <b>Cambio</b> y da el retiro cuando esté a paz y salvo.
+            <b>Este cliente debe {cop(saldo.balance)}.</b> El paz y salvo seguirá bloqueado
+            hasta que pague.
           </div>
         )}
 
@@ -326,7 +318,7 @@ export function DevolverEquipoModal({
           <Button onClick={devolver} disabled={busy || !listo}>
             {busy
               ? "Devolviendo…"
-              : retiro ? "Devolver y retirar cliente" : "Devolver a bodega"}
+              : "Devolver a bodega"}
           </Button>
         </div>
       </div>

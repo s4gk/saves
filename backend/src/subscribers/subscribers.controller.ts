@@ -15,7 +15,7 @@ import { APP_PERMISSIONS } from '../auth/permissions.catalog';
 import { type AuthUser } from '../auth/current-user.decorator';
 import { esTecnicoDeCampo } from '../common/tecnico-scope';
 import { ForbiddenException } from '../core/http/errores';
-import { UpdateSubscriberDto, AddNoteDto, UpdateInvoiceDto, CreateSubscriberDto, CheckDuplicatesDto, ChangeStatusDto, ChangeServiceStatusDto, ReturnEquipmentDto } from './dto/update-subscriber.dto';
+import { UpdateSubscriberDto, AddNoteDto, UpdateInvoiceDto, CreateSubscriberDto, CheckDuplicatesDto, ChangeStatusDto, ChangeServiceStatusDto, ReturnEquipmentDto, MotivoBorradoDto } from './dto/update-subscriber.dto';
 import { AssignPlanDto, AssignPlansDto, SetPuntosDto } from '../plans/dto/plan.dto';
 import { ApplyBundleDto } from '../plans/dto/bundle.dto';
 import { BulkFilterDto, BulkMessageDto } from './dto/bulk.dto';
@@ -90,6 +90,20 @@ export class SubscribersController {
   }
 
   /**
+   * El alta de clientes es SÓLO de las cajeras y del superadministrador (2026-09-24,
+   * decisión del negocio). La ruta sigue abierta a administración, contabilidad y
+   * técnicos porque comparte guarda con el resto de `/subscribers`; el cierre va
+   * aquí para no tocar el contrato. `area.caja` hoy sólo lo tienen los roles
+   * `area-caja` y `super-admin`; `system.admin` se mira aparte por si algún día un
+   * superusuario pierde el área.
+   */
+  private soloCajaDaDeAlta(user: AuthUser | undefined) {
+    const p = user?.permissions ?? [];
+    if (p.includes('system.admin') || p.includes(APP_PERMISSIONS.AREA_CAJA)) return;
+    throw new ForbiddenException('Sólo las cajeras y el superadministrador pueden dar de alta clientes nuevos.');
+  }
+
+  /**
    * El técnico de campo no busca clientes: el buscador global (⌘K) se le quitó de
    * la barra (2026-09-10) y el listado que lo alimentaba se cierra aquí, o la
    * puerta seguiría abierta por API como pasó con la edición de la ficha. Lo suyo
@@ -127,6 +141,11 @@ export class SubscribersController {
 
   branchesStats(user: AuthUser) {
     return this.subscribers.branchesStats(user);
+  }
+
+  /** Clientes en un estado (o todos) día a día y al cierre de cada mes: la gráfica de /clientes. */
+  activosPorMes(branchId: string, status: string, user: AuthUser) {
+    return this.subscribers.activosPorMes(branchId, status, user);
   }
 
   // ── Operaciones masivas por FILTRO (corta/reconecta TODOS los que cumplen) ──
@@ -191,7 +210,7 @@ export class SubscribersController {
    * respuesta con su hecho/motivo para que la pantalla diga qué quedó pendiente.
    */
   create(dto: CreateSubscriberDto, user: AuthUser) {
-    this.soloMira(user, 'dar de alta clientes');
+    this.soloCajaDaDeAlta(user);
     return this.alta.alta(dto, user);
   }
 
@@ -465,7 +484,8 @@ export class SubscribersController {
     res.download(abs, f.originalName);
   }
 
-  async deleteFile(id: string, fileId: string, user?: AuthUser) {
+  // `_dto`: sólo se valida. El motivo lo guarda la bitácora con el cuerpo de la petición.
+  async deleteFile(id: string, fileId: string, _dto: MotivoBorradoDto, user?: AuthUser) {
     await this.subscribers.exigirSuCliente(user, id);
     const storedName = await this.files.deleteFile(id, fileId, user);
     try { unlinkSync(join(UPLOAD_ROOT, id, storedName)); } catch { /* archivo ya no existe */ }
@@ -479,7 +499,7 @@ export class SubscribersController {
     return this.notes.addNote(id, dto.body, user?.name ?? user?.email, user);
   }
 
-  async deleteNote(id: string, noteId: string, user: AuthUser) {
+  async deleteNote(id: string, noteId: string, _dto: MotivoBorradoDto, user: AuthUser) {
     await this.subscribers.exigirSuCliente(user, id);
     return this.notes.deleteNote(id, noteId, user);
   }
@@ -512,8 +532,8 @@ export class SubscribersController {
     return this.subscribers.updateInvoice(id, invoiceId, dto, user);
   }
 
-  deleteInvoice(id: string, invoiceId: string, user: AuthUser) {
-    return this.subscribers.deleteInvoice(id, invoiceId, user);
+  deleteInvoice(id: string, invoiceId: string, dto: MotivoBorradoDto, user: AuthUser) {
+    return this.subscribers.deleteInvoice(id, invoiceId, dto.reason, user);
   }
 
   // ── Estado de cuenta ─────────────────────────────────────────

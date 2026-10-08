@@ -7,6 +7,8 @@ import { Section } from "./Section";
 /**
  * Reporte de IVA. A diferencia del legacy, discrimina base gravable / exenta / IVA por
  * tarifa, aísla las notas y excluye los documentos anulados (el legacy los sumaba).
+ * En ventas solo entran las facturas marcadas para factura electrónica (lo que decidió
+ * contabilidad); las compras no llevan esa marca.
  */
 export function ReporteIva({ data }: { data: any }) {
   const t = data.totales ?? {};
@@ -32,12 +34,12 @@ export function ReporteIva({ data }: { data: any }) {
         />
       </ChartCard>
 
-      <ChartCard title="Detalle por documento" subtitle="No incluye documentos anulados">
+      <ChartCard title="Detalle por documento" subtitle={data.tipo === "compras" ? "No incluye documentos anulados" : "Solo facturas marcadas para factura electrónica · sin anuladas"}>
         <DataTable
           rows={data.items ?? []}
           empty="Sin documentos en el periodo."
           columns={[
-            { key: "fecha", header: "Fecha", render: (r: any) => new Date(r.fecha).toLocaleDateString("es-CO") },
+            { key: "fecha", header: "Fecha", render: (r: any) => new Date(r.fecha).toLocaleDateString("es-CO", { timeZone: "UTC" }) },
             { key: "numero", header: "Documento", render: (r: any) => `#${r.numero}` },
             { key: "tercero", header: "Tercero", render: (r: any) => r.tercero },
             { key: "documento", header: "NIT / Documento", render: (r: any) => r.documento ?? "—" },

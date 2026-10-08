@@ -5,6 +5,7 @@ import { Modal } from "@/components/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input, Select, Textarea, Field } from "@/components/ui/Field";
 import { toast } from "@/components/ui/Toast";
+import { CategoriaTipoEquipo } from "@/components/red/CategoriaTipoEquipo";
 import { useAuth } from "@/context/AuthProvider";
 import { can, PERM } from "@/lib/auth";
 import { mensajeDeError } from "@/lib/errores";
@@ -13,6 +14,7 @@ import { mensajeDeError } from "@/lib/errores";
 export type EquipoEditable = {
   id: string; code: number; brand: string | null; mac: string | null; serial: string | null;
   status: string | null; observation?: string | null; warehouse: string | null;
+  category?: string | null; equipmentType?: string | null;
 };
 
 const MARCAS = ["Bestcom", "Huawei", "Cisco", "Mikrotik", "ZTE", "Ubiquiti", "TP-link", "V-sol", "Grandstream", "Otro"];
@@ -26,8 +28,8 @@ export function puedeEditarEquipos(user: Parameters<typeof can>[0]) {
 
 /**
  * Editar un equipo desde Administrar equipos y desde la vista de una bodega
- * (2026-09-14). Corrige lo que se tecleó al darlo de alta: marca, MAC, serial,
- * estado y observación.
+ * (2026-09-14). Corrige lo que se tecleó al darlo de alta: categoría y tipo, marca,
+ * MAC, serial, estado y observación.
  *
  * La BODEGA no se edita aquí a propósito: mover un equipo de bodega es una
  * transferencia, que entre sedes lleva firma de salida y de entrada. Cambiarla con
@@ -35,6 +37,7 @@ export function puedeEditarEquipos(user: Parameters<typeof can>[0]) {
  */
 export function EditarEquipoModal({ equipo, onClose, onSaved }: { equipo: EquipoEditable | null; onClose: () => void; onSaved: () => void }) {
   const { authFetch } = useAuth();
+  const [tipo, setTipo] = useState({ category: "", equipmentType: "" });
   const [brand, setBrand] = useState("");
   const [mac, setMac] = useState("");
   const [serial, setSerial] = useState("");
@@ -45,6 +48,7 @@ export function EditarEquipoModal({ equipo, onClose, onSaved }: { equipo: Equipo
 
   useEffect(() => {
     if (!equipo) return;
+    setTipo({ category: equipo.category ?? "", equipmentType: equipo.equipmentType ?? "" });
     setBrand(equipo.brand ?? "");
     setMac(equipo.mac ?? "");
     setSerial(equipo.serial ?? "");
@@ -68,7 +72,7 @@ export function EditarEquipoModal({ equipo, onClose, onSaved }: { equipo: Equipo
     try {
       const res = await authFetch(`/network/equipment/${equipo.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ brand, mac, serial, status, observation }),
+        body: JSON.stringify({ ...tipo, brand, mac, serial, status, observation }),
       });
       const d = await res.json().catch(() => null);
       if (!res.ok) throw new Error(d?.message || "No se pudo guardar el equipo");
@@ -88,6 +92,7 @@ export function EditarEquipoModal({ equipo, onClose, onSaved }: { equipo: Equipo
   return (
     <Modal open onClose={onClose} title={`Editar equipo #${equipo.code}`}>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <CategoriaTipoEquipo category={tipo.category} equipmentType={tipo.equipmentType} onChange={setTipo} />
         <Field label="Marca">
           <Select value={brand} onChange={(e) => setBrand(e.target.value)}>
             {!brand && <option value="">—</option>}

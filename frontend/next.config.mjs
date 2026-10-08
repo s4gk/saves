@@ -8,6 +8,11 @@ process.env.NEXT_PUBLIC_BUILD_ID ??= `b${Date.now().toString(36)}`;
 const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID;
 
 const nextConfig = {
+  // `NEXT_DIST_DIR=.next-build` compila en una carpeta aparte mientras el servidor
+  // sigue sirviendo `.next`; después se cambian las carpetas con el proceso parado
+  // unos segundos. Compilar encima de `.next` en caliente lo corrompe, y pararlo
+  // durante todo el build deja el sistema caído varios minutos.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   generateBuildId: async () => BUILD_ID,
   env: { NEXT_PUBLIC_BUILD_ID: BUILD_ID },
   reactStrictMode: true,

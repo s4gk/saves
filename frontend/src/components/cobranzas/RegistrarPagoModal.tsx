@@ -60,6 +60,44 @@ const NOMBRE_SERVICIO: Record<string, string> = { INTERNET: "internet", TV: "tel
 const listar = (nombres: string[]) =>
   nombres.length > 1 ? `${nombres.slice(0, -1).join(", ")} y ${nombres[nombres.length - 1]}` : (nombres[0] ?? "");
 
+/**
+ * "150000" → "150.000" (y "1234.5" → "1.234,5"). La cajera cuenta los ceros a ojo y
+ * con los puntos no se le escapa uno. El estado sigue siendo el número crudo con
+ * punto decimal, así que Number(...) y el resto del formulario no cambian.
+ */
+function conPuntos(crudo: string): string {
+  if (!crudo) return "";
+  const [ent, dec] = crudo.split(".");
+  const miles = (ent || "0").replace(/^0+(?=\d)/, "").replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return dec !== undefined ? `${miles},${dec}` : miles;
+}
+
+/** Lo que se escribe → número crudo: los puntos son de miles, la coma es decimal. */
+function sinPuntos(escrito: string): string {
+  const limpio = escrito.replace(/\./g, "").replace(/[^\d,]/g, "");
+  const [ent, ...resto] = limpio.split(",");
+  return resto.length ? `${ent}.${resto.join("").slice(0, 2)}` : ent;
+}
+
+function MontoInput({ value, onChange, autoFocus }: { value: string; onChange: (v: string) => void; autoFocus?: boolean }) {
+  return (
+    <Input type="text" inputMode="decimal" value={conPuntos(value)} placeholder="0" autoFocus={autoFocus}
+      onChange={(e) => {
+        const el = e.target;
+        // El cursor se queda detrás del mismo dígito aunque aparezca o se vaya un punto.
+        const digitosAntes = el.value.slice(0, el.selectionStart ?? el.value.length).replace(/[^\d,]/g, "").length;
+        const crudo = sinPuntos(el.value);
+        onChange(crudo);
+        requestAnimationFrame(() => {
+          const txt = conPuntos(crudo);
+          let pos = 0;
+          for (let n = 0; pos < txt.length && n < digitosAntes; pos++) if (/[\d,]/.test(txt[pos])) n++;
+          el.setSelectionRange(pos, pos);
+        });
+      }} />
+  );
+}
+
 export function RegistrarPagoModal({
   subscriberId, open, onClose, onDone,
 }: {
@@ -76,6 +114,12 @@ export function RegistrarPagoModal({
   const [debt, setDebt] = useState<Debt | null>(null);
   const [accounts, setAccounts] = useState<CashAccount[]>([]);
   const [amount, setAmount] = useState<string>("");
+  /**
+   * Efectivo que el cliente le ENTREGÓ a la cajera (2026-10-03, pedido de caja): el
+   * monto a recaudar es lo que se aplica a la deuda; esto es el billete que puso en el
+   * mostrador, y de la diferencia sale el cambio. Sólo se pide en efectivo.
+   */
+  const [recibido, setRecibido] = useState<string>("");
   const [method, setMethod] = useState("Cash");
   const [bank, setBank] = useState(BANKS[0]);
   const [cashAccountId, setCashAccountId] = useState<string>("");
@@ -109,7 +153,7 @@ export function RegistrarPagoModal({
 
   useEffect(() => {
     if (!open) return;
-    setDebt(null); setErr(null); setFallo(null); setReciboUrl(null); setAmount(""); setNote(""); setMethod("Cash");
+    setDebt(null); setErr(null); setFallo(null); setReciboUrl(null); setAmount(""); setRecibido(""); setNote(""); setMethod("Cash");
     setFecha(hoyColombia());
     setElegidas([]); setReconectar(true); setAdelantar(false);
     void authFetch(`/treasury/subscribers/${subscriberId}/debt`)
@@ -147,6 +191,11 @@ export function RegistrarPagoModal({
   }, [open, isSuperadmin, mi]);
 
   const amountNum = Number(amount) || 0;
+  const enEfectivo = method === "Cash";
+  const recibidoNum = Number(recibido) || 0;
+  /** Lo que se le devuelve al cliente. Negativo = el billete no alcanza. */
+  const cambio = Math.round((recibidoNum - amountNum) * 100) / 100;
+  const faltaRecibido = enEfectivo && recibido !== "" && cambio < 0;
   /**
    * Cliente al día: no hay ninguna factura que cubrir. No es un callejón sin salida —
    * el pago se le recibe igual y queda como saldo a favor, que se aplica solo cuando
@@ -189,7 +238,10 @@ export function RegistrarPagoModal({
    */
   const sobraAdelanto = puedeAdelantar && adelantar && excedente > 1 ? excedente : 0;
   /** Lo que le falta al monto para saldar lo marcado (0 = alcanza o sobra). */
-  const falta = Math.max(0, Math.round((deudaElegida + netoAdelanto - amountNum) * 100) / 100);
+  const faltaBruta = Math.max(0, Math.round((deudaElegida + netoAdelanto - amountNum) * 100) / 100);
+  // Unos pesos de redondeo no dejan abono parcial: el descuento los absorbe y la
+  // factura queda saldada (ver `TOLERANCIA_REDONDEO`), así que no se avisa.
+  const falta = preview.length === seleccionadas.length && preview.every((p) => p.willBePaid) ? 0 : faltaBruta;
 
   /**
    * Lo que hay que cobrar por las facturas `ids` (ya con su descuento) más, si se
@@ -234,9 +286,17 @@ export function RegistrarPagoModal({
     return (
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Monto a recaudar" required hint={hintMonto}>
-          <Input type="number" min={0} inputMode="numeric" value={amount}
-            onChange={(e) => setAmount(e.target.value)} placeholder="0" autoFocus />
+          <MontoInput value={amount} onChange={setAmount} autoFocus />
         </Field>
+        {enEfectivo && (
+          <Field label="Efectivo recibido (opcional)"
+            error={faltaRecibido ? `Faltan ${cop(-cambio)} para cubrir el monto.` : undefined}
+            hint={!faltaRecibido && recibido !== "" && amountNum > 0
+              ? <>Cambio a devolver: <b className="text-[13px] text-success-text">{cop(cambio)}</b></>
+              : "Opcional: escribe lo que entregó el cliente y te calcula el cambio."}>
+            <MontoInput value={recibido} onChange={setRecibido} />
+          </Field>
+        )}
         <Field label="Método de pago" required>
           <Select value={method} onChange={(e) => setMethod(e.target.value)}>
             {metodos.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
@@ -490,6 +550,9 @@ export function RegistrarPagoModal({
           "alert-circle",
         );
       }
+      // El cambio va de último y con su propio ícono: es lo que la cajera tiene que
+      // hacer con las manos antes de despedir al cliente.
+      if (enEfectivo && cambio > 0) toast(`Devuélvale al cliente ${cop(cambio)} de cambio`, "hand-coins");
       // El recibo de caja se guarda y sale a la impresora. Va por `imprimirPdf` y no
       // por `window.open`: después de un `await`, el navegador trata la pestaña nueva
       // como emergente y la bloquea — así se quedaba la caja sin voucher.

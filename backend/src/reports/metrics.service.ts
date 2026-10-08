@@ -37,11 +37,36 @@ export const METRICAS = {
   BASE_FACTURABLE: 'facturacion.abonados',
 } as const;
 
+/**
+ * Los demás estados del abonado, además de los cuatro de arriba. Se fotografían desde
+ * el 2026-10-02 (la gráfica de /clientes deja mirar cualquier estado), así que su
+ * serie empieza ese día: antes no hay nada y no se rellena.
+ */
+const OTROS_ESTADOS: Record<string, string> = {
+  COMPROMISO: 'en compromiso', DEPURADO: 'depurados', EVENTO: 'de evento', EXONERADO: 'exonerados',
+  INSTALAR: 'por instalar', POR_RETIRAR: 'por retirar', REPORTADO: 'reportados',
+  SUSPENDIDO: 'suspendidos', INACTIVO: 'inactivos',
+};
+const ESTADOS_CON_CLAVE: Record<string, string> = {
+  ACTIVO: METRICAS.ABONADOS_ACTIVOS, CORTADO: METRICAS.ABONADOS_CORTADOS,
+  CARTERA: METRICAS.ABONADOS_CARTERA, RETIRADO: METRICAS.ABONADOS_RETIRADOS,
+};
+/** Todos los estados que se fotografían. */
+export const ESTADOS_ABONADO = [...Object.keys(ESTADOS_CON_CLAVE), ...Object.keys(OTROS_ESTADOS)];
+/** Métrica de un estado del abonado; sin estado (o uno desconocido), el total. */
+export function metricaDeEstado(status?: string): string {
+  if (!status) return METRICAS.ABONADOS_TOTAL;
+  if (ESTADOS_CON_CLAVE[status]) return ESTADOS_CON_CLAVE[status];
+  return OTROS_ESTADOS[status] ? `abonados.estado.${status.toLowerCase()}` : METRICAS.ABONADOS_TOTAL;
+}
+const METRICAS_OTROS_ESTADOS = Object.keys(OTROS_ESTADOS).map(metricaDeEstado);
+
 /** Las que solo existen desde que empezó a correr el cron. Se declaran para poder avisar. */
 export const NO_RECONSTRUIBLES: string[] = [
   METRICAS.ABONADOS_TOTAL, METRICAS.ABONADOS_ACTIVOS, METRICAS.ABONADOS_CORTADOS,
   METRICAS.ABONADOS_CARTERA, METRICAS.ABONADOS_RETIRADOS,
   METRICAS.CARTERA_TOTAL, METRICAS.CARTERA_FACTURAS, METRICAS.CARTERA_MORA_90,
+  ...METRICAS_OTROS_ESTADOS,
 ];
 
 /** Etiqueta legible de cada métrica, para reportes y chat. */
@@ -61,6 +86,7 @@ export const ETIQUETA: Record<string, string> = {
   [METRICAS.ALTAS]: 'Altas de clientes',
   [METRICAS.ORDENES]: 'Órdenes creadas',
   [METRICAS.BASE_FACTURABLE]: 'Base facturable (abonados con factura)',
+  ...Object.fromEntries(Object.entries(OTROS_ESTADOS).map(([k, v]) => [metricaDeEstado(k), `Abonados ${v}`])),
 };
 
 /**
@@ -81,6 +107,7 @@ export const NO_SUMABLES: string[] = [
   METRICAS.ABONADOS_CARTERA, METRICAS.ABONADOS_RETIRADOS,
   METRICAS.CARTERA_TOTAL, METRICAS.CARTERA_FACTURAS, METRICAS.CARTERA_MORA_90,
   METRICAS.BASE_FACTURABLE,
+  ...METRICAS_OTROS_ESTADOS,
 ];
 
 /** Métricas que son plata (para formatearlas como tal). */
@@ -166,6 +193,8 @@ export class MetricsService {
       [METRICAS.ORDENES, ordenes],
     ];
     for (const [m, v] of puntos) await this.guardar(fecha, m, v);
+    // Los demás estados, con su cero incluido: que un estado se vacíe también es un dato.
+    for (const e of Object.keys(OTROS_ESTADOS)) await this.guardar(fecha, metricaDeEstado(e), estado(e));
 
     // Y lo mismo por sede: sin esto solo se puede comparar la empresa entera, y la
     // pregunta real casi siempre es "¿cómo viene Villanueva contra el año pasado?".
@@ -188,6 +217,18 @@ export class MetricsService {
       await this.guardar(fecha, METRICAS.RECAUDO, Number(rec._sum.credit ?? 0), s.id);
       await this.guardar(fecha, METRICAS.ORDENES, ord, s.id);
       await this.guardar(fecha, METRICAS.ALTAS, alt, s.id);
+    }
+
+    // Cada estado (y el total) por sede, para la gráfica de /clientes. Los activos ya
+    // quedaron guardados arriba.
+    const porSedeEstado = await this.prisma.subscriber.groupBy({ by: ['branchId', 'status'], _count: { _all: true } });
+    for (const s of sedes) {
+      const suyos = porSedeEstado.filter((r) => r.branchId === s.id);
+      await this.guardar(fecha, METRICAS.ABONADOS_TOTAL, suyos.reduce((a, r) => a + r._count._all, 0), s.id);
+      for (const e of ESTADOS_ABONADO) {
+        if (e === 'ACTIVO') continue;
+        await this.guardar(fecha, metricaDeEstado(e), suyos.find((r) => r.status === e)?._count._all ?? 0, s.id);
+      }
     }
 
     return { fecha: f, metricas: puntos.length + sedes.length * 5 };

@@ -437,22 +437,32 @@ export function serviciosReporte(d: any): ReporteData {
   };
 }
 
-/** Cortes, activaciones y bajas del periodo. */
+/** Cortes, reconexiones y bajas del periodo (desde las órdenes; ver cortes-activaciones.ts). */
 export function cortesReporte(d: any, periodo: string): ReporteData {
+  const router = (con: number | null, sin: number | null) => (con == null ? '—' : `${int(con)} / ${int(sin)}`);
   return {
     titulo: d.sede ? `Cortes y activaciones · ${d.sede}` : 'Cortes y activaciones',
     periodo,
-    resumen: [
-      ['Cortes', int(d.cortes)],
-      ['Activaciones', int(d.activaciones)],
-      ['Suspensiones', int(d.suspensiones)],
-      ['Retiros', int(d.retiros)],
-    ],
+    resumen: (d.resumen ?? []).map((r: any) => [r.label, `${int(r.hechos)} (${int(r.clientes)} clientes)`] as [string, string]),
     tablas: [
-      distribucion('Detalle por estado', 'Estado', 'Cambios', (d.detalle ?? []).map((r: any) => [r.estado, r.count])),
+      {
+        titulo: 'Por servicio',
+        cols: [
+          { label: 'Evento', peso: 22 },
+          { label: 'Servicio', peso: 14 },
+          { label: 'Órdenes', peso: 12, align: 'right' },
+          { label: 'Clientes', peso: 12, align: 'right' },
+          { label: 'Router sí / no', peso: 16, align: 'right' },
+          { label: 'Anuladas', peso: 12, align: 'right' },
+          { label: 'Abiertas', peso: 12, align: 'right' },
+        ],
+        filas: (d.filas ?? []).map((f: any) => [
+          (d.resumen ?? []).find((r: any) => r.evento === f.evento)?.label ?? f.evento, f.servicio,
+          { t: int(f.hechos), bold: true }, int(f.clientes), router(f.conRouter, f.sinRouter), int(f.anuladas), int(f.abiertas),
+        ]),
+      },
     ],
-    notas: ['Sale del historial de estados del abonado: cuenta CAMBIOS, no personas. Un mismo cliente cortado y reconectado dos veces aparece cuatro veces.',
-      ...(d.notaSede ? [d.notaSede] : [])],
+    notas: [...(d.notas ?? []), ...(d.notaSede ? [d.notaSede] : [])],
   };
 }
 
@@ -477,7 +487,7 @@ export function ordenesReporte(d: any, periodo: string): ReporteData {
         int, 'Ninguna orden del periodo tiene técnico asignado.'),
     ],
     notas: [
-      'Cuenta TODAS las órdenes, incluidos los cortes y reconexiones automáticas. Es volumen de trabajo, no rendimiento: para eso está el reporte de rendimiento de técnicos.',
+      `No incluye cortes ni reconexiones${d.excluidas ? ` (${int(d.excluidas)} en el periodo)` : ''}: esas están en el reporte de cortes y activaciones. Es volumen de trabajo, no rendimiento: para eso está el reporte de rendimiento de técnicos.`,
       'El agrupado por técnico usa el texto del campo "asignado", así que un mismo técnico escrito de dos formas sale dos veces.',
       d.sede
         ? `La sede sale del ABONADO de cada orden, no de la orden. ${d.sinAbonado ? `${int(d.sinAbonado)} orden(es) del periodo no tienen abonado y por tanto no tienen sede: no están contadas aquí.` : 'Todas las órdenes del periodo tienen abonado, así que no falta ninguna por ese motivo.'}`
@@ -665,6 +675,7 @@ export function ivaReporte(d: any, periodo: string): ReporteData {
     ],
     notas: [
       'Excluye los documentos ANULADOS y aísla las notas crédito/débito en "Ajustes", para que no contaminen la base gravable.',
+      ...(d.tipo === 'compras' ? [] : ['Solo incluye las facturas marcadas para factura electrónica (las que decidió contabilidad).']),
       ...(d.sedeIgnorada
         ? ['OJO: se pidió filtrar por sede, pero este reporte es de COMPRAS y una compra es a un proveedor, que no pertenece a ninguna sede. Lo que ves NO está filtrado por sede.']
         : []),

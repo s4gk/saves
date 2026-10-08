@@ -8,11 +8,13 @@ import { invoicePdfBuffer } from './billing-pdf';
 import { ReciboRolloData } from '../common/pdf/recibo-rollo';
 import { conceptoFactura } from '../common/concepto-factura';
 import { etiquetaDeMotivo } from './motivos-factura';
+import { servicioDeRenglon } from './servicio-de-renglon';
 import { terminoDePago } from '../common/terminos-pago';
 import { num } from '../common/money';
 import { sedesDe, whereSedePorSuscriptor, exigirSedeSuscriptor } from '../common/sede-scope';
 import { AuthUser } from '../auth/current-user.decorator';
 import { orden, paginacion } from '../common/pagination-params';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 const cop = (n: number) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
@@ -26,6 +28,46 @@ function subName(s: {
   const person = [s.firstName, s.secondName, s.lastName1, s.lastName2].map((p) => (p || '').trim()).filter(Boolean).join(' ');
   return person || (s.companyName || '').trim() || 'Sin nombre';
 }
+
+/**
+ * El valor de la factura partido por servicio: internet y televisión en base (antes
+ * de IVA) + su IVA; lo demás, IVA incluido, en `otros`.
+ *
+ * Cada renglón tiene base `qty*price - discountTotal` e IVA `taxTotal` (`price` es la
+ * base sin IVA en los dos orígenes, ver dos convenciones de subtotal) y va a internet,
+ * televisión u otros según su producto. El descuento de pronto pago va en la cabecera,
+ * no en los renglones. Lo que aun así no cuadra con el total —prorrateos y facturas
+ * acumuladas del legacy, ~5 % de 2026— queda en `ajuste`, para que siempre se cumpla:
+ * internet + IVA internet + TV + IVA TV + otros − descuento + ajuste = total.
+ */
+function partirPorServicio(i: {
+  total: Prisma.Decimal; discount: Prisma.Decimal;
+  items: { productName: string | null; qty: number; price: Prisma.Decimal; taxTotal: Prisma.Decimal; discountTotal: Prisma.Decimal }[];
+}) {
+  const p = { internet: 0, ivaInternet: 0, television: 0, ivaTv: 0, otro: 0 };
+  for (const it of i.items) {
+    const base = it.qty * num(it.price) - num(it.discountTotal);
+    const iva = num(it.taxTotal);
+    const servicio = servicioDeRenglon(it.productName);
+    if (servicio === 'internet') { p.internet += base; p.ivaInternet += iva; }
+    else if (servicio === 'television') { p.television += base; p.ivaTv += iva; }
+    else p.otro += base + iva;
+  }
+  const dos = (x: number) => Math.round(x * 100) / 100;
+  const ajuste = dos(num(i.total) - (p.internet + p.ivaInternet + p.television + p.ivaTv + p.otro - num(i.discount)));
+  return {
+    baseInternet: dos(p.internet), ivaInternet: dos(p.ivaInternet),
+    baseTv: dos(p.television), ivaTv: dos(p.ivaTv),
+    valorOtros: dos(p.otro),
+    ajuste: Math.abs(ajuste) < 1 ? 0 : ajuste,
+  };
+}
+
+type FiltrosFacturas = {
+  search?: string; status?: string; ron?: string; branchId?: string;
+  from?: string; to?: string; all?: string; overdue?: string;
+  sortBy?: string; sortDir?: string;
+};
 
 const SUB_SELECT = {
   firstName: true, secondName: true, lastName1: true, lastName2: true,
@@ -100,19 +142,40 @@ export class BillingService {
     return { ...res, email };
   }
 
-  /** Resumen de facturación (actividad del periodo) y cartera (histórico completo). */
-  async stats(params: { from?: string; to?: string; all?: string } = {}) {
+  /**
+   * Resumen de facturación (actividad del periodo) y cartera (histórico completo).
+   *
+   * `sede` es el cuid de `Branch`; se SUMA al alcance de quien mira (nunca lo
+   * amplía): una cajera acotada que pida otra sede por la URL recibe ceros.
+   */
+  async stats(params: { from?: string; to?: string; all?: string; sede?: string } = {}, user?: AuthUser) {
     // Actividad (facturas emitidas) → por defecto AÑO ACTUAL para velocidad.
     const period = scopeDate(params.from, params.to, params.all);
-    const activityWhere = period ? { invoiceDate: period } : {};
-    const [byStatus, agg, cartera] = await Promise.all([
+    const alcance = await sedesDe(this.prisma, user);
+    const porSede: Prisma.SubInvoiceWhereInput = params.sede
+      ? { AND: [whereSedePorSuscriptor(alcance), { subscriber: { branchId: params.sede } }] }
+      : whereSedePorSuscriptor(alcance);
+    const activityWhere: Prisma.SubInvoiceWhereInput = { ...porSede, ...(period ? { invoiceDate: period } : {}) };
+    const abiertas = { status: { in: ['DUE', 'PARTIAL'] as any } };
+    const [byStatus, agg, cartera, pendientePeriodo, sedes] = await Promise.all([
       this.prisma.subInvoice.groupBy({ by: ['status'], _count: { _all: true }, where: activityWhere }),
       this.prisma.subInvoice.aggregate({ _sum: { total: true }, where: activityWhere }),
-      // Cartera = saldo pendiente TODO el histórico (no depende de la fecha).
+      // Cartera = saldo pendiente TODO el histórico (no depende de la fecha, sí de la sede).
       this.prisma.subInvoice.aggregate({
         _sum: { total: true, paidAmount: true },
         _count: { _all: true },
-        where: { status: { in: ['DUE', 'PARTIAL'] } },
+        where: { ...porSede, ...abiertas },
+      }),
+      // Lo que falta por cobrar de lo facturado EN EL PERIODO: es lo que se compara
+      // contra el facturado del periodo. Restarle la cartera histórica mezclaba años.
+      this.prisma.subInvoice.aggregate({
+        _sum: { total: true, paidAmount: true },
+        where: { ...activityWhere, ...abiertas },
+      }),
+      this.prisma.branch.findMany({
+        where: { ...SEDE_ACTIVA, ...(alcance ? { legacyId: { in: alcance } } : {}) },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
       }),
     ]);
     const status: Record<string, number> = {};
@@ -123,10 +186,12 @@ export class BillingService {
       pagadas: status['PAID'] ?? 0,
       pendientes: status['DUE'] ?? 0,
       parciales: status['PARTIAL'] ?? 0,
+      pendientePeriodo: num(pendientePeriodo._sum.total) - num(pendientePeriodo._sum.paidAmount),
       carteraTotal: num(cartera._sum.total) - num(cartera._sum.paidAmount),
       carteraFacturas: cartera._count._all,
       status,
       periodo: params.all ? 'Histórico' : params.from || params.to ? 'Rango' : `Año ${currentYear()}`,
+      opciones: { sedes: sedes.map((b) => ({ id: b.id, nombre: b.name })) },
     };
   }
 
@@ -153,14 +218,11 @@ export class BillingService {
     status: 'status',
   };
 
-  /** Listado paginado de facturas con filtros. */
-  async list(params: {
-    search?: string; status?: string; ron?: string; branchId?: string;
-    from?: string; to?: string; all?: string; overdue?: string;
-    page?: number; pageSize?: number;
-    sortBy?: string; sortDir?: string;
-  }, user?: AuthUser) {
-    const { page, pageSize } = paginacion(params);
+  /**
+   * Filtros del listado de facturas. Lo comparten la pantalla y el Excel, para que
+   * lo que se baja sea exactamente lo que se ve.
+   */
+  private async whereLista(params: FiltrosFacturas, user?: AuthUser) {
     const search = (params.search || '').trim();
 
     const where: Prisma.SubInvoiceWhereInput = {};
@@ -207,6 +269,14 @@ export class BillingService {
       ];
     }
 
+    return { where, period };
+  }
+
+  /** Listado paginado de facturas con filtros. */
+  async list(params: FiltrosFacturas & { page?: number; pageSize?: number }, user?: AuthUser) {
+    const { page, pageSize } = paginacion(params);
+    const { where, period } = await this.whereLista(params, user);
+
     const [rows, total, agg] = await Promise.all([
       this.prisma.subInvoice.findMany({
         where, orderBy: orden(params, BillingService.ORDEN_LISTA, { invoiceDate: 'desc' }),
@@ -243,6 +313,63 @@ export class BillingService {
       scope: !period ? 'historico' : params.from || params.to ? 'rango' : 'anio',
       scopeYear: period && !(params.from || params.to) ? currentYear() : null,
       total, page, pageSize, pages: Math.ceil(total / pageSize),
+    };
+  }
+
+  /** Tope de filas del Excel: un año entero cabe de sobra (~45.000 facturas). */
+  static readonly EXPORT_MAX = 100_000;
+
+  /**
+   * Filas del Excel de facturación: el set filtrado COMPLETO (no la página), en el
+   * orden de la pantalla, con los datos del cliente que en la tabla no caben
+   * (documento, celular, sede).
+   */
+  async exportRows(params: FiltrosFacturas, user?: AuthUser) {
+    const { where, period } = await this.whereLista(params, user);
+    const rows = await this.prisma.subInvoice.findMany({
+      where, orderBy: orden(params, BillingService.ORDEN_LISTA, { invoiceDate: 'desc' }),
+      take: BillingService.EXPORT_MAX + 1,
+      select: {
+        tid: true, invoiceDate: true, dueDate: true, status: true, ron: true, purpose: true,
+        serviceCombo: true, serviceTv: true, eInvoiceFlag: true,
+        subtotal: true, discount: true, tax: true, total: true, paidAmount: true,
+        subscriber: { select: {
+          ...SUB_SELECT, docType: true, docNumber: true, phone1: true,
+          branch: { select: { name: true } },
+        } },
+        items: { select: { productName: true, qty: true, price: true, taxTotal: true, discountTotal: true } },
+      },
+    });
+    if (rows.length > BillingService.EXPORT_MAX) {
+      throw new BadRequestException(
+        `Son más de ${BillingService.EXPORT_MAX.toLocaleString('es-CO')} facturas: acote con fechas, sede o estado antes de exportar.`,
+      );
+    }
+    const branch = params.branchId
+      ? await this.prisma.branch.findUnique({ where: { id: params.branchId }, select: { name: true } })
+      : null;
+    return {
+      branchName: branch?.name ?? null,
+      scope: !period ? 'historico' : params.from || params.to ? 'rango' : 'anio',
+      scopeYear: period && !(params.from || params.to) ? currentYear() : null,
+      rows: rows.map((i) => ({
+        ...partirPorServicio(i),
+        tid: i.tid,
+        date: i.invoiceDate, dueDate: i.dueDate,
+        abonado: i.subscriber?.abonado ?? null,
+        subscriber: subName(i.subscriber),
+        docType: i.subscriber?.docType ?? null,
+        docNumber: i.subscriber?.docNumber ?? null,
+        phone: i.subscriber?.phone1 ?? null,
+        branch: i.subscriber?.branch?.name ?? null,
+        internet: i.serviceCombo && i.serviceCombo !== 'no' ? i.serviceCombo : null,
+        tv: i.serviceTv && i.serviceTv !== 'no' ? i.serviceTv : null,
+        ron: i.ron, purpose: etiquetaDeMotivo(i.purpose),
+        subtotal: num(i.subtotal), discount: num(i.discount), tax: num(i.tax),
+        total: num(i.total), paid: num(i.paidAmount), balance: num(i.total) - num(i.paidAmount),
+        status: i.status,
+        eInvoice: i.eInvoiceFlag === 'Factura Electronica Creada',
+      })),
     };
   }
 
@@ -423,7 +550,7 @@ export class BillingService {
       }],
       // Las demás pendientes, que el legacy imprime en negrita cursiva debajo.
       pending: pendientes
-        .filter((i) => i.id !== inv.id)
+        .filter((i) => i.id !== inv.id && saldoDe(i) > 0)
         .map((i) => ({ tid: i.tid, concept: conceptoFactura(i), amount: saldoDe(i) })),
       total: inv.total,
       paid: inv.paid,

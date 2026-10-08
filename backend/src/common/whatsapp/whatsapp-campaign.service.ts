@@ -8,6 +8,7 @@ import { whereExigible } from '../../billing/factura-exigible';
 import { hoyEnColombia } from '../fecha-colombia';
 import { WhatsappService } from './whatsapp.service';
 import { WHATSAPP_STATUS_EVENT, type WhatsappStatusUpdate } from './whatsapp.types';
+import { SEDE_ACTIVA } from '../sedes-activas';
 import {
   CampaignFilterDto, CampaignPreviewDto, CampaignTestDto, CreateCampaignDto, TemplateDto, TemplateVariableDto,
 } from './dto/campaign.dto';
@@ -87,6 +88,8 @@ type Audiencia = {
   sinTelefono: number;
   enAtencion: number;
   telefonoRepetido: number;
+  /** De la lista a mano: lo que no corresponde a ningún cliente. */
+  noEncontrados: string[];
 };
 
 /**
@@ -301,9 +304,53 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
 
   // ---------- Público ----------
 
-  /** Resuelve los destinatarios (por ids explícitos o por filtro). */
-  private async resolveRecipients(dto: { subscriberIds?: string[]; filter?: CampaignFilterDto }): Promise<SubRow[]> {
+  /**
+   * Clientes de una lista pegada a mano. Cada renglón puede ser un celular (10
+   * dígitos que empiezan por 3), un abonado o una cédula; si un número es a la vez
+   * abonado de uno y cédula de otro, gana el abonado, que es como se piden en caja.
+   */
+  private async porIdentificadores(lista: string[]): Promise<{ subs: SubRow[]; noEncontrados: string[] }> {
+    const tokens = [...new Set(lista.map((t) => t.replace(/[^\dA-Za-z]/g, '')).filter(Boolean))];
+    const celulares = tokens.filter((t) => /^(57)?3\d{9}$/.test(t)).map((t) => t.slice(-10));
+    const otros = tokens.filter((t) => !/^(57)?3\d{9}$/.test(t));
+    const abonados = otros.filter((t) => /^\d{1,9}$/.test(t)).map(Number);
+    if (!tokens.length) return { subs: [], noEncontrados: [] };
+
+    const filas = await this.prisma.subscriber.findMany({
+      where: {
+        OR: [
+          ...(abonados.length ? [{ abonado: { in: abonados } }] : []),
+          ...(otros.length ? [{ docNumber: { in: otros } }] : []),
+          ...celulares.flatMap((c) => [{ phone1: { endsWith: c } }, { phone2: { endsWith: c } }]),
+        ],
+      },
+      select: { ...SUB_NAME_SELECT, docNumber: true },
+    });
+
+    const elegidos = new Map<string, SubRow>();
+    const noEncontrados: string[] = [];
+    for (const t of tokens) {
+      let hallados: typeof filas;
+      if (/^(57)?3\d{9}$/.test(t)) {
+        const c = t.slice(-10);
+        hallados = filas.filter((f) => [f.phone1, f.phone2].some((p) => normalizePhone(p)?.endsWith(c)));
+      } else {
+        const porAbonado = /^\d{1,9}$/.test(t) ? filas.filter((f) => f.abonado === Number(t)) : [];
+        hallados = porAbonado.length ? porAbonado : filas.filter((f) => f.docNumber === t);
+      }
+      if (!hallados.length) noEncontrados.push(t);
+      for (const { docNumber: _doc, ...sub } of hallados) elegidos.set(sub.id, sub);
+    }
+    const subs = [...elegidos.values()].sort((a, b) => (a.abonado ?? 0) - (b.abonado ?? 0));
+    return { subs, noEncontrados };
+  }
+
+  /** Resuelve los destinatarios (por ids explícitos, por lista a mano o por filtro). */
+  private async resolveRecipients(dto: { subscriberIds?: string[]; filter?: CampaignFilterDto }): Promise<{ subs: SubRow[]; noEncontrados: string[] }> {
     const where: Prisma.SubscriberWhereInput = {};
+    if (!dto.subscriberIds?.length && dto.filter?.identificadores?.length) {
+      return this.porIdentificadores(dto.filter.identificadores);
+    }
     if (dto.subscriberIds?.length) {
       where.id = { in: dto.subscriberIds };
     } else if (dto.filter) {
@@ -324,7 +371,8 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
     } else {
       throw new BadRequestException('Indica destinatarios (subscriberIds) o un filtro.');
     }
-    return this.prisma.subscriber.findMany({ where, select: SUB_NAME_SELECT, orderBy: { abonado: 'asc' } });
+    const subs = await this.prisma.subscriber.findMany({ where, select: SUB_NAME_SELECT, orderBy: { abonado: 'asc' } });
+    return { subs, noEncontrados: [] };
   }
 
   /**
@@ -371,7 +419,7 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
    * la misma persona = un solo mensaje, no dos seguidos).
    */
   private async audiencia(dto: { subscriberIds?: string[]; filter?: CampaignFilterDto }): Promise<Audiencia> {
-    const subs = await this.resolveRecipients(dto);
+    const { subs, noEncontrados } = await this.resolveRecipients(dto);
     const f = dto.subscriberIds?.length ? undefined : dto.filter;
     const [deudas, enAtencion] = await Promise.all([
       this.debtMap(subs.map((s) => s.id)),
@@ -380,7 +428,7 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
     const deudaMin = Math.max(1, Number(f?.deudaMin) || 1);
 
     const aud: Audiencia = {
-      destinatarios: [], coinciden: subs.length, fueraPorDeuda: 0, sinTelefono: 0, enAtencion: 0, telefonoRepetido: 0,
+      destinatarios: [], coinciden: subs.length, fueraPorDeuda: 0, sinTelefono: 0, enAtencion: 0, telefonoRepetido: 0, noEncontrados,
     };
     const vistos = new Set<string>();
     for (const sub of subs) {
@@ -399,7 +447,7 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
   /** Sedes, planes activos y estados (con cuántos clientes hay en cada uno). */
   async opcionesCampana() {
     const [sedes, planes, porEstado] = await Promise.all([
-      this.prisma.branch.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      this.prisma.branch.findMany({ where: SEDE_ACTIVA, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
       this.prisma.plan.findMany({
         where: { active: true }, orderBy: [{ kind: 'asc' }, { name: 'asc' }], select: { id: true, name: true, kind: true },
       }),
@@ -465,7 +513,9 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
         telefonoRepetido: aud.telefonoRepetido,
       },
       deudaTotal: aud.destinatarios.reduce((a, d) => a + d.deuda, 0),
-      muestra: aud.destinatarios.slice(0, 8).map((d) => ({
+      noEncontrados: aud.noEncontrados,
+      // Con una lista a mano se muestran todos: hay que poder revisarla uno a uno.
+      muestra: aud.destinatarios.slice(0, dto.filter?.identificadores?.length ? 5_000 : 8).map((d) => ({
         subscriberId: d.sub.id, nombre: subName(d.sub), abonado: d.sub.abonado, telefono: d.phone, deuda: d.deuda,
       })),
       plantilla: template
@@ -539,7 +589,7 @@ export class WhatsappCampaignService implements OnApplicationBootstrap {
 
     if (!dto.subscriberIds?.length && dto.filter) {
       const f = dto.filter;
-      if (!f.status && !f.statuses?.length) {
+      if (!f.status && !f.statuses?.length && !f.identificadores?.length) {
         throw new BadRequestException('Elige al menos un estado de cliente: sin eso la campaña también les escribiría a retirados y depurados.');
       }
     }

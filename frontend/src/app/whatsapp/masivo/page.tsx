@@ -6,7 +6,7 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { Icon } from "@/components/Icon";
 import { Modal } from "@/components/Modal";
 import { Button } from "@/components/ui/Button";
-import { Input, Select, Field } from "@/components/ui/Field";
+import { Input, Select, Field, Textarea } from "@/components/ui/Field";
 import { Badge } from "@/components/ui/Badge";
 import { PagedTable } from "@/components/ui/PagedTable";
 import { ListToolbar } from "@/components/ui/ListToolbar";
@@ -53,6 +53,11 @@ const FILTRO_INICIAL: WaFiltroCampana = {
 };
 
 type Paso = 1 | 2 | 3;
+/** `filtros` = por estado/sede/plan · `lista` = clientes puntuales pegados a mano. */
+type ModoPublico = "filtros" | "lista";
+
+/** Renglones de la lista pegada (de un Excel, separados por salto, coma o espacio). */
+const identificadoresDe = (texto: string) => [...new Set(texto.split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean))];
 type Vista = "nueva" | "campanas";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,9 +276,10 @@ function Casilla({ checked, onChange, label, hint }: { checked: boolean; onChang
   );
 }
 
-function Resumen({ preview, cargando }: { preview: WaPreviewCampana | null; cargando: boolean }) {
+function Resumen({ preview, cargando, modo }: { preview: WaPreviewCampana | null; cargando: boolean; modo: ModoPublico }) {
   if (!preview) {
-    return <div className="rounded-xl border border-border-subtle bg-surface-2 p-4 text-[13px] text-text-tertiary">{cargando ? "Contando clientes…" : "Elige al menos un estado."}</div>;
+    const vacio = modo === "lista" ? "Pega los abonados, cédulas o celulares." : "Elige al menos un estado.";
+    return <div className="rounded-xl border border-border-subtle bg-surface-2 p-4 text-[13px] text-text-tertiary">{cargando ? "Contando clientes…" : vacio}</div>;
   }
   const d = preview.descartes;
   const caidas = ([
@@ -287,7 +293,7 @@ function Resumen({ preview, cargando }: { preview: WaPreviewCampana | null; carg
       <div className="text-[12px] uppercase tracking-wide text-text-tertiary">Recibirán el mensaje</div>
       <div className="text-[32px] font-bold leading-tight tabular-nums text-text-primary">{num(preview.destinatarios)}</div>
       <div className="text-[12px] text-text-secondary">
-        de {num(preview.coinciden)} clientes que cumplen el filtro
+        de {num(preview.coinciden)} clientes {modo === "lista" ? "de la lista" : "que cumplen el filtro"}
         {preview.deudaTotal > 0 && <> · {cop(preview.deudaTotal)} en deuda</>}
       </div>
       {caidas.length > 0 && (
@@ -307,6 +313,8 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
   const [opciones, setOpciones] = useState<WaOpcionesCampana | null>(null);
   const [plantillas, setPlantillas] = useState<WaTemplate[]>([]);
   const [filtro, setFiltro] = useState<WaFiltroCampana>(FILTRO_INICIAL);
+  const [modo, setModo] = useState<ModoPublico>("filtros");
+  const [lista, setLista] = useState("");
   const [templateName, setTemplateName] = useState("");
   const [buscarPlantilla, setBuscarPlantilla] = useState("");
   const [preview, setPreview] = useState<WaPreviewCampana | null>(null);
@@ -339,16 +347,22 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
   // Conteo en vivo. Cada cambio de filtro o plantilla recalcula con una pausa corta;
   // `pedido` descarta respuestas viejas que lleguen después de una nueva.
   const pedido = useRef(0);
-  const clave = JSON.stringify([filtro, templateName]);
+  const identificadores = useMemo(() => identificadoresDe(lista), [lista]);
+  // Con lista a mano solo cuentan las casillas: estado, sede, plan y deuda no aplican.
+  const filtroEnviado: WaFiltroCampana = modo === "lista"
+    ? { ...FILTRO_INICIAL, statuses: [], deuda: undefined, soloMoviles: filtro.soloMoviles, omitirEnAtencion: filtro.omitirEnAtencion, identificadores }
+    : filtro;
+  const listo = modo === "lista" ? identificadores.length > 0 : filtro.statuses.length > 0;
+  const clave = JSON.stringify([filtroEnviado, templateName]);
   useEffect(() => {
-    if (!filtro.statuses.length) { setPreview(null); return; }
+    if (!listo) { pedido.current++; setPreview(null); setCargando(false); return; }
     const id = ++pedido.current;
     setCargando(true);
     const t = setTimeout(async () => {
       try {
         const r = await authFetch("/admin/whatsapp/campaigns/preview", {
           method: "POST",
-          body: JSON.stringify({ filter: filtro, templateName: templateName || undefined }),
+          body: JSON.stringify({ filter: filtroEnviado, templateName: templateName || undefined }),
         });
         const d = await r.json();
         if (id !== pedido.current) return;
@@ -376,7 +390,7 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
   function siguiente() {
     setAviso(null);
     if (paso === 1) {
-      if (!filtro.statuses.length) return setAviso("Elige al menos un estado de cliente.");
+      if (!listo) return setAviso(modo === "lista" ? "Pega al menos un abonado, cédula o celular." : "Elige al menos un estado de cliente.");
       if (!preview || preview.destinatarios === 0) return setAviso("Con estos filtros no le llega a nadie.");
       setPaso(2);
     } else if (paso === 2) {
@@ -415,14 +429,14 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
       const r = await authFetch("/admin/whatsapp/campaigns", {
         method: "POST",
         body: JSON.stringify({
-          name: nombre.trim(), templateName: plantilla.name, templateId: plantilla.id, language: plantilla.language, filter: filtro,
+          name: nombre.trim(), templateName: plantilla.name, templateId: plantilla.id, language: plantilla.language, filter: filtroEnviado,
         }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d?.message || "No se pudo lanzar la campaña");
       toast(`Campaña lanzada a ${num(d.total)} clientes`, "check");
       setConfirmar(false);
-      setPaso(1); setFiltro(FILTRO_INICIAL); setTemplateName(""); setNombre(""); setPreview(null);
+      setPaso(1); setFiltro(FILTRO_INICIAL); setLista(""); setTemplateName(""); setNombre(""); setPreview(null);
       onLanzada();
     } catch (e) { toast(mensajeDeError(e), "alert-triangle"); } finally { setLanzando(false); }
   }
@@ -441,6 +455,43 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
         <div className="min-w-0">
           {paso === 1 && (
             <div className="flex flex-col gap-4">
+              <Segmented
+                ariaLabel="Cómo elegir a quién"
+                value={modo}
+                onChange={(v) => setModo(v as ModoPublico)}
+                options={[
+                  { value: "filtros", label: "Por filtros" },
+                  { value: "lista", label: "Lista de clientes" },
+                ]}
+              />
+
+              {modo === "lista" && (
+                <Field
+                  label="Clientes"
+                  required
+                  hint="Uno por renglón: abonado, cédula o celular. Se puede pegar una columna de Excel. Solo les llega a estos, sin importar estado ni sede."
+                >
+                  <Textarea
+                    rows={8} value={lista} onChange={(e) => setLista(e.target.value)}
+                    placeholder={"12345\n1118550123\n3102549725"} className="font-mono text-[13px]"
+                  />
+                  {identificadores.length > 0 && (
+                    <span className="mt-1 block text-[12px] text-text-tertiary">{num(identificadores.length)} en la lista</span>
+                  )}
+                </Field>
+              )}
+
+              {modo === "lista" && preview && preview.noEncontrados.length > 0 && (
+                <div className="flex gap-2 rounded-lg border border-warning-subtle bg-warning-soft px-3 py-2 text-[13px] text-warning-text">
+                  <Icon name="alert-triangle" size={15} className="mt-0.5 shrink-0" />
+                  <span className="min-w-0 break-words">
+                    No corresponden a ningún cliente ({num(preview.noEncontrados.length)}):{" "}
+                    <span className="font-mono">{preview.noEncontrados.join(", ")}</span>
+                  </span>
+                </div>
+              )}
+
+              {modo === "filtros" && (<>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <Field label="Estado del cliente" required>
                   <MultiSelect
@@ -485,6 +536,7 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
                   </Field>
                 )}
               </div>
+              </>)}
 
               <div className="flex flex-col gap-3 rounded-xl border border-border-subtle p-3">
                 <Casilla
@@ -501,7 +553,9 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
 
               {preview && preview.muestra.length > 0 && (
                 <div>
-                  <h3 className="mb-1.5 text-[12px] font-medium uppercase tracking-wide text-text-tertiary">Algunos de los que lo recibirán</h3>
+                  <h3 className="mb-1.5 text-[12px] font-medium uppercase tracking-wide text-text-tertiary">
+                    {modo === "lista" ? "Los que lo recibirán" : "Algunos de los que lo recibirán"}
+                  </h3>
                   <PagedTable
                     rows={preview.muestra}
                     empty="—"
@@ -636,7 +690,7 @@ function NuevaCampana({ onLanzada }: { onLanzada: () => void }) {
         {/* En celular el conteo va ARRIBA: es la respuesta a cada filtro que se toca,
             y abajo quedaba fuera de la pantalla. */}
         <aside className="-order-1 flex min-w-0 flex-col gap-3 lg:order-none">
-          <Resumen preview={preview} cargando={cargando} />
+          <Resumen preview={preview} cargando={cargando} modo={modo} />
           {paso >= 2 && (
             preview?.ejemplo ? (
               <div>

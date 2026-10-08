@@ -1,5 +1,5 @@
 import {
-  IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsObject, IsOptional, IsString, Min, MinLength, ValidateNested,
+  ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsObject, IsOptional, IsString, Min, MinLength, ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -85,6 +85,13 @@ export class CampaignFilterDto {
   /** Saltar a quien tiene la conversación en manos de una persona en la bandeja. */
   @IsOptional() @IsBoolean()
   omitirEnAtencion?: boolean;
+
+  /**
+   * Lista a mano: abonados, cédulas o celulares (lo que se pegue de un Excel).
+   * Si viene, manda sobre estado, sede y plan: el público son esos clientes y nada más.
+   */
+  @IsOptional() @IsArray() @ArrayMaxSize(5_000) @IsString({ each: true })
+  identificadores?: string[];
 }
 
 /** Crear y lanzar una campaña de envío masivo por plantilla. */

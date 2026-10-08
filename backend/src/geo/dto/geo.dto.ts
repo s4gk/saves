@@ -35,6 +35,15 @@ export class PingDto {
 }
 
 /** Fijar las coordenadas de un abonado (botón "capturar GPS aquí" o pin en el mapa). */
+/** Ubicación de la oficina de una sede (se coloca desde el mapa). */
+export class SetBranchOfficeDto {
+  @IsNumber() @Min(-90) @Max(90)
+  lat!: number;
+
+  @IsNumber() @Min(-180) @Max(180)
+  lng!: number;
+}
+
 export class SetSubscriberLocationDto {
   @IsNumber() @Min(-90) @Max(90)
   lat!: number;

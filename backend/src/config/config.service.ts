@@ -1,14 +1,20 @@
 import { BadRequestException, NotFoundException } from '../core/http/errores';
 import { Type } from 'class-transformer';
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, MinLength } from 'class-validator';
 import { PrismaService } from '../prisma/prisma.service';
 import { num } from '../common/money';
+import { CatalogoDirecciones, CreateBranchDto, CreateDireccionDto, RenameDireccionDto, nivelValido } from './catalogo-direcciones';
 
 
 export class UpdateBranchDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsString() summary?: string;
   @IsOptional() @IsString() dir?: string;
+  /**
+   * El interruptor de la sede: `false` la saca de todos los selectores y filtros sin
+   * borrar nada. Ver `src/common/sedes-activas.ts`.
+   */
+  @IsOptional() @IsBoolean() isActive?: boolean;
 }
 export class CategoryDto {
   @IsString() @MinLength(2) name!: string;
@@ -24,7 +30,10 @@ export class UpdateCompanyDto {
 }
 
 export class ConfigDataService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly catalogo: CatalogoDirecciones;
+  constructor(private readonly prisma: PrismaService) {
+    this.catalogo = new CatalogoDirecciones(prisma);
+  }
 
   /** Cajas / cuentas bancarias. */
   async cashAccounts() {
@@ -40,16 +49,32 @@ export class ConfigDataService {
     }));
   }
 
-  /** Sedes (branches) con conteo de abonados. */
+  /**
+   * Sedes (branches) con conteo de abonados. TODAS, también las desactivadas: ésta es
+   * la pantalla desde la que se apagan y se vuelven a encender, así que es el único
+   * sitio donde una sede oculta tiene que verse (con su estado).
+   */
   async branches() {
-    const rows = await this.prisma.branch.findMany({ orderBy: { name: 'asc' }, include: { _count: { select: { subscribers: true } } } });
-    return rows.map((b) => ({ id: b.id, name: b.name, summary: b.summary, dir: b.dir, subscribers: b._count.subscribers }));
+    const rows = await this.prisma.branch.findMany({ orderBy: [{ isActive: 'desc' }, { name: 'asc' }], include: { _count: { select: { subscribers: true } } } });
+    return rows.map((b) => ({ id: b.id, name: b.name, summary: b.summary, dir: b.dir, isActive: b.isActive, subscribers: b._count.subscribers }));
   }
   async updateBranch(id: string, dto: UpdateBranchDto) {
     const b = await this.prisma.branch.findUnique({ where: { id } });
     if (!b) throw new NotFoundException('Sede no encontrada');
-    return this.prisma.branch.update({ where: { id }, data: { name: dto.name, summary: dto.summary, dir: dto.dir } });
+    return this.prisma.branch.update({
+      where: { id },
+      data: { name: dto.name, summary: dto.summary, dir: dto.dir, isActive: dto.isActive },
+    });
   }
+
+  createBranch(dto: CreateBranchDto) { return this.catalogo.crearSede(dto); }
+  deleteBranch(id: string) { return this.catalogo.borrarSede(id); }
+
+  /** Departamentos, ciudades, localidades y barrios: ver `catalogo-direcciones.ts`. */
+  addresses() { return this.catalogo.listar(); }
+  createAddress(nivel: string, dto: CreateDireccionDto) { return this.catalogo.crear(nivelValido(nivel), dto); }
+  renameAddress(nivel: string, id: string, dto: RenameDireccionDto) { return this.catalogo.renombrar(nivelValido(nivel), id, dto); }
+  deleteAddress(nivel: string, id: string) { return this.catalogo.borrar(nivelValido(nivel), id); }
 
   /** Empresa (CompanyInfo, fila única). */
   async company() {

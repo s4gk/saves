@@ -161,6 +161,13 @@ function FirmaImg({ ticketId }: { ticketId: string }) {
   return <img src={url} alt="Firma de quien recibe" className="h-24 w-auto rounded border border-border-subtle bg-white" />;
 }
 
+/** Hora real (la del sistema, en Colombia) de inicio o cierre: "2:35 p. m.". */
+const horaDe = (d: string | Date) =>
+  new Date(d).toLocaleTimeString("es-CO", { hour: "numeric", minute: "2-digit", timeZone: "America/Bogota" });
+/** 150 → "2 h 30 min". */
+const duracionTexto = (min: number) =>
+  [min >= 60 && `${Math.floor(min / 60)} h`, (min % 60 > 0 || min < 60) && `${min % 60} min`].filter(Boolean).join(" ");
+
 export default function OrdenDetallePage() {
   const { id } = useParams<{ id: string }>();
   const { loading: authLoading, authFetch, user, isSuperadmin } = useAuth();
@@ -543,13 +550,25 @@ export default function OrdenDetallePage() {
                 si sigue abierta, lo que va a valer — que es lo que el técnico
                 necesita saber antes de salir, no cuando ya volvió. */}
             {t.score != null ? (
-              <Badge label={`${t.score} ${t.score === 1 ? "punto" : "puntos"}`} tone="success" />
+              <Badge label={`${t.score} ${t.score === 1 ? "punto" : "puntos"}${t.earlyBonus ? ` (+${t.earlyBonus} por terminar temprano)` : ""}`} tone="success" />
             ) : t.puntajeVigente != null && t.status !== "ANULADA" ? (
               <Badge label={`Vale ${t.puntajeVigente} ${t.puntajeVigente === 1 ? "punto" : "puntos"}`} tone="default" />
             ) : null}
+            {/* Bono por terminar temprano: mientras está abierta se le dice al
+                técnico contra qué reloj corre; empezada, hasta qué hora lo gana. */}
+            {t.score == null && t.status !== "ANULADA" && t.minutosEstandar > 0 && (
+              <Badge
+                label={
+                  t.status === "REALIZANDO" && t.startedAt
+                    ? `+1 punto si cierras antes de las ${horaDe(new Date(new Date(t.startedAt).getTime() + t.minutosEstandar * 60_000))}`
+                    : `+1 punto si dura menos de ${duracionTexto(t.minutosEstandar)}`
+                }
+                tone="info"
+              />
+            )}
           </>
         }
-        subtitle={<>Creada {fmtDate(t.created)}{t.generadaPor ? ` por ${t.generadaPor.nombre}` : ""}{t.finalDate ? ` · Finalizada ${fmtDate(t.finalDate)}` : ""}{t.assigned ? ` · Técnico: ${t.assigned}` : " · Sin técnico asignado"}</>}
+        subtitle={<>Creada {fmtDate(t.created)}{t.generadaPor ? ` por ${t.generadaPor.nombre}` : ""}{t.startedAt ? ` · Inicio ${horaDe(t.startedAt)}` : ""}{t.finalDate ? ` · Finalizada ${fmtDate(t.finalDate)}${t.resolvedAt ? ` ${horaDe(t.resolvedAt)}` : ""}` : ""}{t.startedAt && t.resolvedAt && t.status === "RESUELTO" ? ` · Duró ${duracionTexto(Math.max(0, Math.floor((new Date(t.resolvedAt).getTime() - new Date(t.startedAt).getTime()) / 60_000)))}` : ""}{t.assigned ? ` · Técnico: ${t.assigned}` : " · Sin técnico asignado"}</>}
         actions={
           <>
             <Button variant="secondary" size="sm" disabled={pdfBusy} onClick={abrirPdf} className="w-full sm:w-auto">
@@ -797,7 +816,7 @@ export default function OrdenDetallePage() {
                     {t.megas.de != null ? `${t.megas.de} Megas` : t.megas.planAnterior || "plan sin registrar"}
                   </b>{" "}
                   a <b className="text-text-primary">{t.megas.a != null ? `${t.megas.a} Megas` : t.megas.plan}</b>
-                  {t.megas.plan ? <> · plan «{t.megas.plan}»</> : null}
+                  {t.megas.combo ? <> · combo «{t.megas.combo}» (internet + TV)</> : t.megas.plan ? <> · plan «{t.megas.plan}»</> : null}
                 </p>
                 <p className="mt-1 text-[12px] text-text-tertiary">
                   {t.megas.aplicado

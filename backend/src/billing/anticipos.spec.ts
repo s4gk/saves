@@ -11,7 +11,7 @@ jest.mock('./nota-en-tx', () => ({
 
 import {
   concederDescuentosAdelantados, mesSiguiente, MINIMO_ANTICIPO, NOTA_ADELANTO,
-  propuestaAdelanto, repartirAnticipos,
+  propuestaAdelanto, mesesCubiertos, repartirAnticipos,
 } from './anticipos';
 
 beforeEach(() => { notas.length = 0; });
@@ -88,7 +88,9 @@ describe('mesSiguiente', () => {
  */
 function txFalso(opts: {
   ultimaFactura?: { invoiceDate: Date; total: number } | null;
-  servicios?: { price: number; qty: number; taxRate: number }[];
+  servicios?: { price: number; qty: number; taxRate: number; status?: string; kind?: string }[];
+  /** Líneas de las mensualidades recientes (lo que lee `serviciosContratados`). */
+  lineas?: string[];
   pct?: string | null;
   anticipos?: Record<string, unknown>[];
   pendientes?: Record<string, unknown>[];
@@ -103,6 +105,7 @@ function txFalso(opts: {
         findMany: async () => opts.pendientes ?? [],
       },
       subscriberService: { findMany: async () => opts.servicios ?? [] },
+      $queryRaw: async () => (opts.lineas ?? []).map((nombre) => ({ subscriberId: 's1', nombre })),
       appSetting: { findUnique: async () => (opts.pct == null ? null : { value: opts.pct }) },
       customerAdvance: {
         findMany: async () => opts.anticipos ?? [],
@@ -149,6 +152,34 @@ describe('propuestaAdelanto', () => {
 
   it('sin ninguna factura de referencia no propone nada', async () => {
     expect(await propuestaAdelanto(txFalso({ ultimaFactura: null }).tx, 's1')).toBeNull();
+  });
+});
+
+describe('mesesCubiertos', () => {
+  const agosto = { invoiceDate: new Date(Date.UTC(2026, 8, 1)), total: 75500 };
+  const combo = (tv: string) => [
+    { price: 50500, qty: 1, taxRate: 0, status: 'ACTIVO', kind: 'INTERNET' },
+    { price: 21008, qty: 1, taxRate: 19, status: tv, kind: 'TV' },
+  ];
+
+  // 55714 (28-09): la TV cortada por deuda dejaba la mensualidad en 50.500 y el
+  // recibo partía el pago de un mes en "octubre 50.500 · noviembre 25.000".
+  it('la TV cortada por deuda que se sigue cobrando cuenta en la mensualidad', async () => {
+    const { tx } = txFalso({
+      ultimaFactura: agosto, servicios: combo('CORTADO'), lineas: ['100 Megas F-26', 'Television24'],
+    });
+    const meses = await mesesCubiertos(tx, 's1', 75500);
+    expect(meses.map((m) => m.monto)).toEqual([75500]);
+    expect(meses[0].fecha.getUTCMonth()).toBe(9); // octubre
+  });
+
+  // 56993: fila TV en CORTADO que quedó así al suspenderla; ya no se le cobra.
+  it('la TV cortada que las mensualidades ya no cobran no cuenta', async () => {
+    const { tx } = txFalso({
+      ultimaFactura: agosto, servicios: combo('CORTADO'), lineas: ['100 Megas F-26'],
+    });
+    const meses = await mesesCubiertos(tx, 's1', 50500);
+    expect(meses.map((m) => m.monto)).toEqual([50500]);
   });
 });
 

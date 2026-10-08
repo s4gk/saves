@@ -12,6 +12,8 @@ import { esUsuarioPppUtil } from '../subscribers/conexion-alta';
 import type { SubscribersService } from '../subscribers/subscribers.service';
 import type { VlanEquiposService } from '../network/vlan-equipos.service';
 import { normalizarSerial, formasDeSerial, formaHex } from '../common/serial-onu';
+import { esSuperusuario } from '../network/bodega-scope';
+import { dbmTexto, evaluarSenalRx, EvaluacionSenal, RANGO_OPTIMO_TEXTO } from './senal-optica-aceptacion';
 
 /**
  * OnuProvisionService — autenticar la ONU DESDE LA ORDEN DE INSTALACIÓN.
@@ -181,6 +183,12 @@ export { normalizarSerial, formasDeSerial, formaHex } from '../common/serial-onu
  */
 const VENTANA_RECIEN_VISTA_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * Estados de abonado sin servicio: una ONU que en la OLT siga a nombre de uno de
+ * estos es un resto y se puede desautenticar para montarla en otro cliente.
+ */
+const ESTADOS_SIN_SERVICIO = new Set(['RETIRADO', 'DEPURADO', 'INACTIVO', '']);
+
 /** Hace cuántos minutos empezó a anunciarse (null si la OLT no lo reporta). */
 function minutosDesde(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -190,6 +198,9 @@ function minutosDesde(iso: string | null | undefined): number | null {
 }
 
 /** Lo que quedó apuntado en el inventario al autenticar (null = no se registró nada). */
+/** Lo que dejó `liberarAltaAnterior`: de dónde se desautenticó la ONU. */
+type Liberacion = { borrado: boolean; dryRun: boolean; anterior: string | null; tambienEn: string[]; avisos: string[] };
+
 type EquipoRegistrado = { code: number; serialCorregido: boolean; bodega: string | null } | null;
 
 /** Coletilla de la nota: de dónde salió el equipo y si se le corrigió el serial. */
@@ -281,12 +292,41 @@ export class OnuProvisionService {
    * null y la UI lo dice — adivinar el equipo equivocado sería peor.
    */
   private async oltDeSede(branchId: string | null) {
-    if (!branchId) return null;
-    return this.prisma.olt.findFirst({
+    return (await this.oltsDeSede(branchId))[0] ?? null;
+  }
+
+  /**
+   * TODAS las OLT de la sede, la de por defecto primero. Yopal tiene dos (YOPAL y
+   * CASIMENA, desde 30-sep): mirar solo la de por defecto dejaba a los clientes
+   * colgados de la otra con «la OLT todavía no lo ve» (2026-10-06, traslado 511555:
+   * el ZTE del cliente se anunciaba en CASIMENA 0/1/0).
+   */
+  private async oltsDeSede(branchId: string | null) {
+    if (!branchId) return [];
+    return this.prisma.olt.findMany({
       where: { branchId },
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
       select: { id: true, name: true, ip: true, defaultLineProfile: true, defaultSrvProfile: true, defaultVlan: true, defaultGemport: true, defaultUserVlan: true },
     });
+  }
+
+  /**
+   * Autofind de todas las OLT de la sede, cada ONU marcada con la OLT que la ve
+   * (`oltId`, `oltName`). Una OLT que no contesta no tumba la lectura mientras
+   * otra sí lo haga: su error viaja en `error`. `porOlt` guarda la respuesta cruda
+   * de cada una para no volver a pedirla en la misma operación.
+   */
+  private async autofindDeSede(olts: { id: string; name: string }[]) {
+    const porOlt = new Map<string, Awaited<ReturnType<OltService['autofind']>>>();
+    const onus: any[] = [];
+    const errores: string[] = [];
+    for (const o of olts) {
+      const r = await this.olt.autofind(o.id);
+      porOlt.set(o.id, r);
+      if (!r.ok) { errores.push(olts.length > 1 ? `${o.name}: ${r.error}` : r.error); continue; }
+      for (const x of Array.isArray(r.onus) ? r.onus : []) onus.push({ ...x, oltId: o.id, oltName: o.name });
+    }
+    return { ok: errores.length < olts.length, error: errores.join('; '), onus, porOlt };
   }
 
   /**
@@ -389,12 +429,17 @@ export class OnuProvisionService {
       return {
         sn: o.sn,
         fsp: o.fsp,
+        /** OLT que la está viendo (en sedes con varias OLT no es siempre la de por defecto). */
+        oltId: o.oltId ?? null,
+        olt: o.oltName ?? null,
         model: o.model || null,
         vendor: o.vendor || null,
         mac: o.mac || null,
         /** Desde cuándo se anuncia, en minutos. null = la OLT no lo reporta. */
         haceMin: minutosDesde(o.autofind_time),
-        delAbonado: mios.has(normalizarSerial(o.sn)) || (o.mac ? mios.has(normalizarSerial(o.mac)) : false),
+        // Por cualquier forma del serial: la OLT dice `5A544547C6405372` y el
+        // inventario rotula `ZTEGC6405372`.
+        delAbonado: formasDeSerial(o.sn).some((f) => mios.has(f)) || (o.mac ? mios.has(normalizarSerial(o.mac)) : false),
         equipo: eq && { code: eq.code, serial: eq.serial, bodega: eq.bodega, status: eq.status },
         // Motivo por el que NO se puede autenticar este equipo concreto.
         impedimento: deOtro
@@ -505,7 +550,7 @@ export class OnuProvisionService {
    * alguna OLT (y por eso NO sale en el autofind: no es un problema, es lo que
    * pasa con el equipo viejo de un cambio de equipo).
    */
-  private async equipoDelAbonado(subscriberId: string, ticketId: string, candidatos: any[], oltId?: string | null) {
+  private async equipoDelAbonado(subscriberId: string, ticketId: string, candidatos: any[], olts: { id: string; name: string }[] = []) {
     const filas = await this.prisma.equipment.findMany({
       where: { OR: [{ subscriberId }, { reservedTicketId: ticketId }] },
       select: {
@@ -546,7 +591,7 @@ export class OnuProvisionService {
         impedimento: c?.impedimento ?? null,
         autenticada: altas.has(String(formaHex(e.serial) ?? '')),
         /** Dónde la tiene dada de alta la OLT, cuando se le preguntó (ver abajo). */
-        autenticadaEn: null as null | { fsp: string; ontId: number; descripcion: string; runState: string },
+        autenticadaEn: null as null | { olt: string; fsp: string; ontId: number; descripcion: string; runState: string },
       };
     });
 
@@ -563,16 +608,20 @@ export class OnuProvisionService {
     // mandando a revisar la fibra de un equipo que estaba encendido). Antes de
     // decir eso se le pregunta a la OLT por el serial: es un comando más en la
     // misma sesión, y solo cuando no hay otra forma de saberlo.
-    if (elegido && !elegido.anunciandose && !elegido.autenticada && elegido.sn && oltId) {
-      // Una OLT que no contesta no puede tumbar la orden: se queda el aviso de siempre.
-      let r: Awaited<ReturnType<OltService['estadoPorSn']>> | null = null;
-      try { r = await this.olt.estadoPorSn(oltId, elegido.sn); } catch { r = null; }
-      if (r?.ok && r.estado) {
-        elegido.autenticada = true;
-        elegido.autenticadaEn = {
-          fsp: r.estado.fsp, ontId: r.estado.ont_id,
-          descripcion: r.estado.description ?? '', runState: r.estado.run_state ?? '',
-        };
+    // En TODAS las OLT de la sede: en Yopal el equipo puede estar en CASIMENA.
+    if (elegido && !elegido.anunciandose && !elegido.autenticada && elegido.sn) {
+      for (const o of olts) {
+        // Una OLT que no contesta no puede tumbar la orden: se queda el aviso de siempre.
+        let r: Awaited<ReturnType<OltService['estadoPorSn']>> | null = null;
+        try { r = await this.olt.estadoPorSn(o.id, elegido.sn); } catch { r = null; }
+        if (r?.ok && r.estado) {
+          elegido.autenticada = true;
+          elegido.autenticadaEn = {
+            olt: o.name, fsp: r.estado.fsp, ontId: r.estado.ont_id,
+            descripcion: r.estado.description ?? '', runState: r.estado.run_state ?? '',
+          };
+          break;
+        }
       }
     }
     return elegido;
@@ -798,10 +847,18 @@ export class OnuProvisionService {
     // Un EPON no tiene OLT que consultar: su "autenticación" es el perfil del
     // plan en la Mikrotik. Se sale antes de gastar la sesión SSH del autofind.
     if (viaDeTecnologia(sub.installTech) === 'MIKROTIK') return this.estadoMikrotik(t, sub, modo);
-    const olt = await this.oltDeSede(sub.branchId);
+    const olts = await this.oltsDeSede(sub.branchId);
+    let olt = olts[0] ?? null;
     const plan = await this.planDeLaOrden(t, sub.id);
-    const mapeo = await this.planProfiles.resolveConEtiqueta(plan?.planId, olt?.id);
+    let mapeo = await this.planProfiles.resolveConEtiqueta(plan?.planId, olt?.id);
     const { live } = await this.olt.mode();
+    const velocidadDe = (m: typeof mapeo) => m
+      ? {
+          trafficIn: m.trafficIn, trafficOut: m.trafficOut,
+          mbpsIn: (m as any).mbpsIn ?? null, mbpsOut: (m as any).mbpsOut ?? null,
+          origen: m.origen,
+        }
+      : null;
 
     const base = {
       via: 'OLT' as ViaOnu,
@@ -813,13 +870,7 @@ export class OnuProvisionService {
         // del registro del abonado o de lo que se le viene facturando.
         ? { id: plan.planId, name: plan.planName, megas: plan.megas, estado: plan.status, derivado: plan.derivado }
         : null,
-      velocidad: mapeo
-        ? {
-            trafficIn: mapeo.trafficIn, trafficOut: mapeo.trafficOut,
-            mbpsIn: (mapeo as any).mbpsIn ?? null, mbpsOut: (mapeo as any).mbpsOut ?? null,
-            origen: mapeo.origen,
-          }
-        : null,
+      velocidad: velocidadDe(mapeo),
       // Motivo por el que el botón no se puede usar (uno solo, el primero que aplica).
       bloqueo: this.motivoDeBloqueo({ modo, olt, plan, mapeo, tipo: t.type }),
       candidatos: [] as any[],
@@ -840,6 +891,11 @@ export class OnuProvisionService {
       /** Todas las ONUs vinculadas al abonado: con más de una, la orden lo avisa. */
       onusDelCliente: [] as any[],
       /**
+       * Las ONUs del abonado tal como las ve la OLT ahora (`enOlt`), para elegir
+       * cuál desautenticar y volver a autenticar en un «subir megas».
+       */
+      onusRevisadas: [] as any[],
+      /**
        * El abonado va a estrenar internet y todavía no tiene usuario PPPoE: al
        * autenticar se le crean solos sus datos de integración con la Mikrotik
        * (ver `asegurarAltaEnMikrotik`). Se dice ANTES para que el técnico no lo
@@ -853,37 +909,68 @@ export class OnuProvisionService {
        */
       vlanPuerto: null as Awaited<ReturnType<VlanEquiposService['chequeoDePuerto']>> | null,
       /** El mismo chequeo para cada puerto con ONUs esperando (hasta 3): la pantalla enseña el de la elegida. */
-      vlanPuertos: [] as Awaited<ReturnType<VlanEquiposService['chequeoDePuerto']>>[],
+      vlanPuertos: [] as (Awaited<ReturnType<VlanEquiposService['chequeoDePuerto']>> & { oltId?: string })[],
       /** Lo que dio la comprobación de navegación tras autenticar (60 s después). */
       navegacion: this.navegacionDeOrden(t.id),
     };
 
     // Sin OLT, sin plan o sin mapeo no tiene sentido gastar una sesión SSH: se
     // devuelve el motivo y la UI enseña qué hay que arreglar y dónde.
-    if (base.bloqueo) return base;
+    // Con varias OLT en la sede, que el plan no tenga velocidad en la de por
+    // defecto no es todavía un bloqueo: la ONU puede estar en otra (se decide abajo,
+    // con el autofind en la mano).
+    const decidirOltLuego = olts.length > 1 && puedeAutenticar(modo) && base.bloqueo?.code === 'SIN_VELOCIDAD';
+    if (base.bloqueo && !decidirOltLuego) return base;
 
     // ONU ya vinculada al abonado (para "subir megas" y para avisar de duplicados).
-    const yaTiene = await this.prisma.oltOnu.findFirst({
-      where: { subscriberId: sub.id },
-      orderBy: { lastSync: 'desc' },
-      select: { id: true, sn: true, oltId: true, frame: true, slot: true, port: true, ontId: true, runState: true, description: true },
-    });
+    // En las órdenes que cambian la velocidad se le pregunta a la OLT cuál de las
+    // vinculadas sigue dada de alta: `OltOnu` puede llevar meses sin sincronizar.
+    const vig = puedeVelocidad(modo) && olt
+      ? await this.onuVigenteDelAbonado(sub.id, olt.id)
+      : { onu: await this.prisma.oltOnu.findFirst({
+          where: { subscriberId: sub.id },
+          orderBy: { lastSync: 'desc' },
+          select: { id: true, sn: true, oltId: true, frame: true, slot: true, port: true, ontId: true, runState: true, description: true },
+        }), revisadas: [] as any[] };
+    const yaTiene = vig.onu;
     base.onuActual = yaTiene;
+    base.onusRevisadas = vig.revisadas;
 
     if (puedeAutenticar(modo) && olt) {
-      const r = await this.olt.autofind(olt.id);
-      const { candidatos, inv } = await this.candidatosDeAutofind(sub, Array.isArray(r.onus) ? r.onus : []);
+      const r = await this.autofindDeSede(olts);
+      const { candidatos, inv } = await this.candidatosDeAutofind(sub, r.onus);
       base.candidatos = candidatos;
-      if (!r.ok) {
-        base.bloqueo = { code: 'AUTOFIND_ERROR', message: `No se pudo leer el autofind de la OLT ${olt.name}: ${r.error}` };
+      base.auto = await this.decidirAutomatico(sub, base.candidatos, inv, t.id, !esTraslado(t.type));
+      base.equipoAsignado = await this.equipoDelAbonado(sub.id, t.id, base.candidatos, r.ok ? olts : []);
+
+      // La OLT de la orden es la que ve el equipo: el que eligió el sistema, el
+      // que el inventario da por del cliente o uno suyo; si no, la de por defecto.
+      const conOlt = (sn?: string | null) => (sn ? base.candidatos.find((c: any) => c.sn === sn)?.oltId : null) ?? null;
+      const oltId = conOlt(base.auto?.sn)
+        ?? (base.equipoAsignado?.anunciandose ? conOlt(base.equipoAsignado.sn) : null)
+        ?? base.candidatos.find((c: any) => c.delAbonado)?.oltId
+        ?? null;
+      const elegidaOlt = oltId ? olts.find((o) => o.id === oltId) : null;
+      if (elegidaOlt && elegidaOlt.id !== olt.id) {
+        olt = elegidaOlt;
+        mapeo = await this.planProfiles.resolveConEtiqueta(plan?.planId, olt.id);
+        base.olt = { id: olt.id, name: olt.name };
+        base.velocidad = velocidadDe(mapeo);
+      }
+      base.bloqueo = this.motivoDeBloqueo({ modo, olt, plan, mapeo, tipo: t.type });
+      if (base.bloqueo) {
+        // sigue: la lista de ONUs se enseña igual para que se vea dónde está la suya
+      } else if (!r.ok) {
+        base.bloqueo = { code: 'AUTOFIND_ERROR', message: `No se pudo leer el autofind de la OLT ${olts.length > 1 ? '' : olt.name + ': '}${r.error}` };
       } else if (!base.candidatos.length) {
         base.bloqueo = {
           code: 'AUTOFIND_VACIO',
-          message: `La OLT ${olt.name} no ve ninguna ONU esperando autenticación. `
+          message: (olts.length > 1
+            ? `Ni la OLT ${olts.map((o) => o.name).join(' ni la ')} ven ninguna ONU esperando autenticación. `
+            : `La OLT ${olt.name} no ve ninguna ONU esperando autenticación. `)
             + 'Conecte la fibra y encienda el equipo; luego refresque.',
         };
       }
-      base.auto = await this.decidirAutomatico(sub, base.candidatos, inv, t.id, !esTraslado(t.type));
       // La VLAN de los puertos donde hay ONUs esperando: primero el de la que se
       // autenticaría sola, luego los demás (hasta 3: cada puerto nuevo cuesta ~2 s de
       // OLT la primera vez; luego sale de la caché de `chequeoDePuerto`).
@@ -891,17 +978,25 @@ export class OnuProvisionService {
         const elegida = base.candidatos.find((c: any) => c.sn && c.sn === base.auto?.sn) ?? base.candidatos[0];
         // Si el sistema ya eligió la ONU, basta su puerto; si elige el técnico, varios.
         const aRevisar = base.auto?.sn ? [elegida] : [elegida, ...base.candidatos];
-        const fsps = [...new Set(aRevisar.map((c: any) => String(c?.fsp ?? '')).filter(Boolean))].slice(0, 3);
-        for (const fsp of fsps) {
-          const pos = fsp.match(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)/);
+        // El puerto es de la OLT que ve la ONU: el 0/1/0 de YOPAL no es el de CASIMENA.
+        const puertos = new Map<string, string>();
+        for (const c of aRevisar) {
+          const fsp = String(c?.fsp ?? '');
+          if (fsp) puertos.set(`${c.oltId ?? olt.id}|${fsp}`, c.oltId ?? olt.id);
+        }
+        for (const [clave, oltDelPuerto] of [...puertos].slice(0, 3)) {
+          const pos = clave.split('|')[1].match(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)/);
           if (!pos) continue;
-          base.vlanPuertos.push(await this.vlanEquipos.chequeoDePuerto(
-            olt.id, Number(pos[1]), Number(pos[2]), Number(pos[3]), Number((mapeo as any)?.vlan) || null,
-          ));
+          base.vlanPuertos.push({
+            ...(await this.vlanEquipos.chequeoDePuerto(
+              oltDelPuerto, Number(pos[1]), Number(pos[2]), Number(pos[3]),
+              oltDelPuerto === olt.id ? Number((mapeo as any)?.vlan) || null : null,
+            )),
+            oltId: oltDelPuerto,
+          });
         }
         base.vlanPuerto = base.vlanPuertos[0] ?? null;
       }
-      base.equipoAsignado = await this.equipoDelAbonado(sub.id, t.id, base.candidatos, r.ok ? olt.id : null);
       // Dos ONUs dadas de alta a nombre del mismo cliente es lo que deja un cambio
       // de equipo a medias: autenticar la nueva no borra la vieja de la OLT (y no
       // debe hacerlo solo: puede ser la ONU de la TV). Se enseña para que alguien decida.
@@ -1287,8 +1382,12 @@ export class OnuProvisionService {
    * ya funciona en ese puerto, velocidad tomada del plan, comentario con el
    * abonado y vínculo ONU↔cliente en el inventario.
    */
-  async autenticar(ticketId: string, dto: { sn?: string; equipmentId?: string }, user?: AuthUser) {
+  async autenticar(ticketId: string, dto: { sn?: string; equipmentId?: string; forzarSenal?: string }, user?: AuthUser) {
     const { t, sub } = await this.cargarOrden(ticketId, user);
+    // Forzar el criterio de señal es del superadministrador, y con motivo. Se
+    // comprueba ANTES de tocar nada: no vale enterarse de que no podía después
+    // de haber dado de alta la ONU.
+    const forzarSenal = this.motivoParaForzarSenal(dto?.forzarSenal, user);
     // En un EPON no hay ONU que dar de alta: autenticar es ponerle el perfil de
     // su plan en la Mikrotik. Mismo botón, misma orden, otra vía.
     if (viaDeTecnologia(sub.installTech) === 'MIKROTIK') return this.aplicarPlanEnMikrotik(t, sub, user);
@@ -1306,8 +1405,46 @@ export class OnuProvisionService {
      */
     const traslado = esTraslado(t.type);
 
-    const olt = await this.oltDeSede(sub.branchId);
+    const olts = await this.oltsDeSede(sub.branchId);
+    let olt = olts[0] ?? null;
     const plan = await this.planDeLaOrden(t, sub.id);
+    // Lo que no depende de la OLT se comprueba antes de gastar ninguna sesión SSH.
+    const previo = this.motivoDeBloqueo({ modo: 'AUTENTICAR', olt, plan, mapeo: {}, tipo: t.type });
+    if (previo) throw new BadRequestException(previo.message);
+
+    let sn = String(dto?.sn ?? '').trim().toUpperCase();
+    let auto: Awaited<ReturnType<typeof this.decidirAutomatico>> | null = null;
+    /** El autofind que se acaba de leer para decidir, para no pedir dos sesiones SSH seguidas. */
+    let afReciente: any = null;
+
+    /**
+     * Sede con varias OLT (Yopal): se autentica en la que ve la ONU. Se leen todas
+     * y, si el SN no se anuncia en ninguna, en la que lo tenga dado de alta (se
+     * desautentica y re-autentica ahí, como en una sola OLT).
+     */
+    if (olts.length > 1) {
+      const r = await this.autofindDeSede(olts);
+      if (!r.ok) throw new BadRequestException(`No se pudo leer el autofind de las OLT: ${r.error}`);
+      if (!sn) {
+        const { candidatos, inv } = await this.candidatosDeAutofind(sub, r.onus);
+        auto = await this.decidirAutomatico(sub, candidatos, inv, t.id, !traslado);
+        if (!auto.sn) throw new BadRequestException(auto.motivo);
+        sn = auto.sn;
+        if (auto.origen === 'STOCK_SEDE' && auto.equipo) dto = { ...dto, equipmentId: auto.equipo.id };
+      }
+      const visto = r.onus.find((o: any) => String(o.sn ?? '').toUpperCase() === sn);
+      let donde = visto ? olts.find((o) => o.id === visto.oltId) ?? null : null;
+      if (!donde) {
+        for (const o of olts) {
+          const y = await this.olt.findBySn(o.id, sn).catch(() => null);
+          if (y?.ok && (y.onu as any)?.fsp) { donde = o; break; }
+        }
+      }
+      if (donde) olt = donde;
+      afReciente = r.porOlt.get(olt!.id) ?? null;
+      if (afReciente && !afReciente.ok) afReciente = null;
+    }
+
     const mapeo = await this.planProfiles.resolve(plan?.planId, olt?.id);
     const bloqueo = this.motivoDeBloqueo({ modo: 'AUTENTICAR', olt, plan, mapeo, tipo: t.type });
     if (bloqueo) throw new BadRequestException(bloqueo.message);
@@ -1329,10 +1466,6 @@ export class OnuProvisionService {
      * bodega de su sede — pero solo entre los que la OLT está viendo, que es lo
      * único que prueba cuál es el aparato que está en esa casa.
      */
-    let sn = String(dto?.sn ?? '').trim().toUpperCase();
-    let auto: Awaited<ReturnType<typeof this.decidirAutomatico>> | null = null;
-    /** El autofind que se acaba de leer para decidir, para no pedir dos sesiones SSH seguidas. */
-    let afReciente: any = null;
     if (!sn) {
       const r = await this.olt.autofind(olt!.id);
       if (!r.ok) throw new BadRequestException(`No se pudo leer el autofind de la OLT: ${r.error}`);
@@ -1363,15 +1496,25 @@ export class OnuProvisionService {
     // otro abonado en el inventario de la OLT. Importa sobre todo al ADOPTAR una
     // ONU ya autenticada, donde no hay autofind que confirme que es la recién
     // instalada: sin esta guarda se le podría quitar la ONU a un vecino.
+    // Si ese abonado ya no tiene servicio (retirado, depurado, inactivo) el
+    // vínculo es un resto: la ONU volvió a bodega y el alta vieja se borra más
+    // abajo, al desautenticarla para autenticarla aquí (2026-10-05, ONU
+    // 444338306A3C92F4 que seguía a nombre de un retirado).
     const vinculada = await this.prisma.oltOnu.findFirst({
       where: { sn, subscriberId: { not: null } },
       select: { subscriberId: true, clientName: true },
     });
     if (vinculada?.subscriberId && vinculada.subscriberId !== sub.id) {
-      throw new BadRequestException(
-        `La ONU ${sn} ya figura instalada en el abonado ${vinculada.clientName ?? vinculada.subscriberId}. `
-        + 'No se puede montar en otro cliente: primero hay que liberarla desde Red › OLT.',
-      );
+      const dueno = await this.prisma.subscriber.findUnique({
+        where: { id: vinculada.subscriberId },
+        select: { abonado: true, status: true },
+      });
+      if (dueno && !ESTADOS_SIN_SERVICIO.has(String(dueno.status ?? ''))) {
+        throw new BadRequestException(
+          `La ONU ${sn} ya figura instalada en el abonado ${vinculada.clientName ?? dueno.abonado}, que sigue con servicio (${dueno.status}). `
+          + 'No se le quita la ONU a un cliente vigente: compruebe el serial o retire primero el equipo de esa cuenta.',
+        );
+      }
     }
     // Equipo del inventario al que el técnico dice que corresponde esta ONU
     // (solo cuando el SN no estaba registrado). Se valida aquí y se usa al final.
@@ -1397,20 +1540,47 @@ export class OnuProvisionService {
     // VTY de estos equipos son contados.
     const af = afReciente ?? await this.olt.autofind(olt!.id);
     if (!af.ok) throw new BadRequestException(`No se pudo leer el autofind de la OLT: ${af.error}`);
-    const encontrada = (Array.isArray(af.onus) ? af.onus : []).find((o: any) => String(o.sn ?? '').toUpperCase() === sn);
+    let encontrada = (Array.isArray(af.onus) ? af.onus : []).find((o: any) => String(o.sn ?? '').toUpperCase() === sn);
+    /** Dónde estaba autenticada la ONU antes de esta orden, si se la desautenticó. */
+    let liberacion: Liberacion | null = null;
     if (!encontrada) {
       // Una ONU deja el autofind por dos motivos opuestos: se apagó, o YA está
       // autenticada. Antes se daban los dos por perdidos con el mismo mensaje y
       // el técnico se quedaba sin salida ante una ONU que ya estaba dada de alta
       // desde SmartOLT (la planta vieja está llena de ellas). Se comprueba.
       const yaEsta = await this.olt.findBySn(olt!.id, sn);
-      if (yaEsta.ok && yaEsta.onu && (yaEsta.onu as any).fsp) {
-        return { ...(await this.adoptarExistente({ t, sub, olt: olt!, sn, plan, mapeo, equipo, equipoAVincular, user })), altaMikrotik };
+      if (!(yaEsta.ok && yaEsta.onu && (yaEsta.onu as any).fsp)) {
+        throw new BadRequestException(
+          `La ONU ${sn} ya no se está anunciando en la OLT ${olt!.name} y tampoco está autenticada en ella. `
+          + 'Puede que se haya apagado o que perdiera la fibra. Refresque la lista.',
+        );
       }
-      throw new BadRequestException(
-        `La ONU ${sn} ya no se está anunciando en la OLT ${olt!.name} y tampoco está autenticada en ella. `
-        + 'Puede que se haya apagado o que perdiera la fibra. Refresque la lista.',
-      );
+      /**
+       * Ya autenticada: se DESAUTENTICA y se vuelve a autenticar (regla del
+       * usuario, 2026-10-05). Adoptar el alta vieja dejaba al cliente con lo que
+       * hubiera configurado quien la montó —otro abonado, otro plan, a veces sin
+       * service-port—. Borrada, la ONU vuelve a anunciarse en el puerto donde está
+       * enchufada ahora y se da de alta ahí como una nueva. Solo si la OLT no deja
+       * borrarla se cae en adoptar, para no dejar al técnico sin salida.
+       */
+      liberacion = await this.liberarAltaAnterior({
+        t, sub, olt: olt!, sn, user, existente: yaEsta.onu, motivo: traslado ? 'TRASLADO' : 'YA_AUTENTICADA',
+      });
+      if (!liberacion.borrado || liberacion.dryRun) {
+        return {
+          ...(await this.adoptarExistente({ t, sub, olt: olt!, sn, plan, mapeo, equipo, equipoAVincular, user, forzarSenal })),
+          liberacion, altaMikrotik,
+        };
+      }
+      encontrada = await this.esperarEnAutofind(olt!.id, sn);
+      if (!encontrada) {
+        return {
+          ok: false, dryRun: false, codigo: 'NO_REAPARECE', liberacion, altaMikrotik,
+          error: `La ONU ${sn} estaba autenticada en ${olt!.name} ${liberacion.anterior} y ya se desautenticó, `
+            + `pero no ha vuelto a anunciarse en la OLT en ${Math.round((this.esperaAutofindMs * this.intentosAutofind) / 1000)} s. `
+            + 'Compruebe que esté encendida y con la fibra conectada y vuelva a pulsar Autenticar.',
+        };
+      }
     }
     const m = String(encontrada.fsp ?? '').match(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)/);
     if (!m) throw new BadRequestException(`La OLT reporta la ONU ${sn} sin puerto legible (F/S/P "${encontrada.fsp}").`);
@@ -1447,28 +1617,58 @@ export class OnuProvisionService {
     // En un traslado, el alta vieja se quita ANTES de hacer la nueva: si no, el
     // `ont add` choca con "SN already exists" y lo que hay en la OLT sigue apuntando
     // al PON de la dirección anterior.
-    let liberacion = traslado ? await this.liberarAltaAnterior({ t, sub, olt: olt!, sn, fspNuevo: `${frame}/${slot}/${port}`, user }) : null;
+    const fspNuevo = `${frame}/${slot}/${port}`;
+    if (traslado && !liberacion) liberacion = await this.liberarAltaAnterior({ t, sub, olt: olt!, sn, fspNuevo, user, motivo: 'TRASLADO' });
 
     let res: any = await this.olt.provision(olt!.id, params, user);
-    // Carrera: estaba en el autofind al listar y para cuando se pulsó el botón ya
-    // la había autenticado otro (o la OLT la tenía de antes en otro puerto).
+    // "Ya existe": la ONU se anuncia en este puerto pero sigue dada de alta en
+    // otro (la casa anterior, el cliente anterior) o se la autenticaron entre que
+    // se listó y se pulsó. Se borra donde la OLT dice que está y se reintenta una
+    // sola vez. Adoptarla dejaría al cliente con el service-port del sitio viejo.
     if (!res.ok && res.codigo === 'SN_YA_EXISTE') {
-      // En un traslado, "ya existe" es el alta anterior que hay que quitar, no una
-      // ONU ajena que adoptar: la OLT dice dónde está, se borra ahí y se reintenta
-      // una sola vez. Adoptarla dejaría al cliente con el service-port de la casa
-      // vieja —que es justo lo que la orden viene a corregir—.
-      if (traslado && !liberacion?.borrado && res.existente) {
-        liberacion = await this.liberarAltaAnterior({ t, sub, olt: olt!, sn, fspNuevo: `${frame}/${slot}/${port}`, user, existente: res.existente });
+      if (!liberacion?.borrado && res.existente) {
+        liberacion = await this.liberarAltaAnterior({
+          t, sub, olt: olt!, sn, fspNuevo, user, existente: res.existente, motivo: traslado ? 'TRASLADO' : 'YA_AUTENTICADA',
+        });
         if (liberacion.borrado) res = await this.olt.provision(olt!.id, params, user);
       }
       if (!res.ok && res.codigo === 'SN_YA_EXISTE') {
         return {
-          ...(await this.adoptarExistente({ t, sub, olt: olt!, sn, plan, mapeo, equipo, equipoAVincular, user })),
+          ...(await this.adoptarExistente({ t, sub, olt: olt!, sn, plan, mapeo, equipo, equipoAVincular, user, forzarSenal })),
           auto: resumenAuto, liberacion, altaMikrotik,
         };
       }
     }
     if (!res.ok) return { ...res, liberacion, altaMikrotik };
+
+    /**
+     * PRUEBA DE SEÑAL (protocolo 4.5, ver `senal-optica-aceptacion.ts`). La OLT no
+     * da la potencia de una ONU que solo está en el autofind: hay que darla de alta
+     * para poder medirla. Si no es Óptima, el alta se DESHACE en el acto y la orden
+     * no queda autenticada; el técnico corrige la fibra y vuelve a pulsar.
+     */
+    let senal: SenalDeLaOrden | null = null;
+    if (!res.dryRun) {
+      const ontId = Number(res.ontId);
+      const pos = Number.isFinite(ontId) ? { frame, slot, port, ontId } : null;
+      senal = await this.medirSenal(olt!.id, pos, res.verificacion?.run_state);
+      if (!senal.aprobada) {
+        if (!forzarSenal) {
+          const baja: any = pos
+            ? await this.olt.remove(olt!.id, { frame, slot, port, ont_id: ontId, sn }, user)
+                .catch((e: any) => ({ ok: false, error: e?.message }))
+            : { ok: false, error: 'la OLT no devolvió el ONT-ID' };
+          await this.anotarSenal(t, sub, sn, `${frame}/${slot}/${port}`, senal, { deshecha: !!baja.ok, errorBaja: baja.error });
+          return {
+            ok: false, codigo: 'SENAL_RECHAZADA',
+            error: this.mensajeDeRechazo(senal, baja.ok ? 'DESHECHA' : 'SIN_DESHACER'),
+            senal, altaDeshecha: !!baja.ok, fsp: `${frame}/${slot}/${port}`, liberacion, altaMikrotik,
+          };
+        }
+        senal = { ...senal, forzada: { por: user?.name ?? null, motivo: forzarSenal } };
+      }
+      await this.anotarSenal(t, sub, sn, `${frame}/${slot}/${port}`, senal);
+    }
 
     let equipoRegistrado: EquipoRegistrado = null;
     let conciliacion: { liberados: number[]; devuelto: number | null } | null = null;
@@ -1504,7 +1704,81 @@ export class OnuProvisionService {
       auto: resumenAuto,
       /** El alta en la Mikrotik que se le dejó hecha (null = esta orden no la toca). */
       altaMikrotik,
+      /** La potencia que recibe la ONU y cómo quedó frente al protocolo. */
+      senal,
     };
+  }
+
+  /** Espera entre lecturas de la señal mientras la ONU recién dada de alta levanta. */
+  esperaSenalMs = 5_000;
+  /** Lecturas como mucho (≈30 s): lo que tarda una ONU en quedar online tras el `ont add`. */
+  intentosSenal = 6;
+
+  /**
+   * Motivo con el que se fuerza el criterio de señal, o null si no se fuerza.
+   * Solo el superadministrador, y con un motivo que diga algo.
+   */
+  private motivoParaForzarSenal(v: unknown, user?: AuthUser): string | null {
+    const motivo = String(v ?? '').trim();
+    if (!motivo) return null;
+    if (!user || !esSuperusuario(user)) {
+      throw new BadRequestException('Solo el superadministrador puede autenticar una ONU con la señal fuera del rango del protocolo.');
+    }
+    if (motivo.length < 10) {
+      throw new BadRequestException('Para forzar la señal escriba un motivo de al menos 10 caracteres: queda en las notas de la orden.');
+    }
+    return motivo;
+  }
+
+  /**
+   * Lee la potencia que recibe la ONU (`display ont optical-info`) y la evalúa.
+   * Recién dada de alta la ONU puede tardar en quedar online y la OLT responde
+   * "Failure" mientras tanto: se reintenta unos segundos antes de rendirse.
+   */
+  private async medirSenal(
+    oltId: string,
+    pos: { frame: number; slot: number; port: number; ontId: number } | null,
+    runState?: string | null,
+  ): Promise<SenalDeLaOrden> {
+    if (!pos) return { ...evaluarSenalRx(null), oltRx: null };
+    const online = String(runState ?? '').toLowerCase() === 'online';
+    for (let i = 0; i < this.intentosSenal; i++) {
+      if (i > 0 || !online) await new Promise((r) => setTimeout(r, this.esperaSenalMs));
+      const r: any = await this.olt.ontOptical(oltId, pos.frame, pos.slot, pos.port, pos.ontId).catch(() => null);
+      const rx = numeroDbm(r?.optical?.rx);
+      if (r?.ok && rx !== null) return { ...evaluarSenalRx(rx), oltRx: numeroDbm(r.optical.olt_rx) };
+    }
+    return { ...evaluarSenalRx(null), oltRx: null };
+  }
+
+  private mensajeDeRechazo(senal: SenalDeLaOrden, quedo: 'DESHECHA' | 'SIN_DESHACER' | 'SIN_ADOPTAR'): string {
+    const medida = senal.rx === null ? 'No se pudo medir la señal de la ONU' : `Señal RX ${dbmTexto(senal.rx)}: ${senal.etiqueta}`;
+    const cola = {
+      DESHECHA: 'La ONU NO quedó autenticada (se deshizo el alta): corrija y vuelva a autenticar.',
+      SIN_ADOPTAR: 'La ONU ya estaba en la OLT y no se tocó: corrija y vuelva a autenticar.',
+      SIN_DESHACER: 'OJO: no se pudo deshacer el alta en la OLT; quítela desde Red › OLT antes de reintentar.',
+    }[quedo];
+    return `${medida}. El protocolo exige ${RANGO_OPTIMO_TEXTO} para autenticar. ${senal.accion} ${cola}`;
+  }
+
+  /** Deja la medición en el hilo de la orden: aprobada, rechazada o forzada. */
+  private async anotarSenal(
+    t: any, sub: any, sn: string, fsp: string, senal: SenalDeLaOrden,
+    rechazo?: { deshecha: boolean; errorBaja?: string; adopcion?: boolean },
+  ) {
+    if (t.code == null) return;
+    const medida = `Señal RX ${dbmTexto(senal.rx)}` + (senal.oltRx !== null ? ` · OLT RX ${dbmTexto(senal.oltRx)}` : '');
+    const msg = rechazo
+      ? `ONU NO AUTENTICADA por señal · SN ${sn} · puerto ${fsp}\n${medida} → ${senal.etiqueta}. ${senal.accion}`
+        + `\nProtocolo 4.5: solo se autentica con ${RANGO_OPTIMO_TEXTO}.`
+        + (rechazo.adopcion ? '\nLa ONU ya estaba en la OLT: no se adoptó ni se cambió nada.'
+          : rechazo.deshecha ? '\nSe deshizo el alta en la OLT.' : `\nNo se pudo deshacer el alta en la OLT: ${rechazo.errorBaja ?? 'error desconocido'}.`)
+      : senal.forzada
+        ? `SEÑAL FORZADA · SN ${sn} · ${medida} → ${senal.etiqueta}\nAutenticada fuera del protocolo por ${senal.forzada.por ?? 'superadministrador'}. Motivo: ${senal.forzada.motivo}`
+        : `Prueba de señal · SN ${sn} · ${medida} → ${senal.etiqueta}`;
+    await this.prisma.ticketThread
+      .create({ data: { ticketCode: t.code, message: msg, subscriberId: sub.id, employeeId: 0, date: new Date() } })
+      .catch((e) => this.logger.warn(`No se pudo anotar la señal en la orden ${t.code}: ${e.message}`));
   }
 
   /** F/S/P + ont-id de un bloque de la OLT (el de `findBySn` o el `existente` de un alta). */
@@ -1539,14 +1813,21 @@ export class OnuProvisionService {
    * NUNCA lanza: un traslado no se puede quedar a medias por no haber podido limpiar
    * lo de antes. Lo que no se pudo borrar viaja en `avisos` y queda anotado en la
    * orden, para que alguien lo mire desde Red › OLT.
+   *
+   * Desde 2026-10-05 sirve igual a cualquier orden que autentica (`YA_AUTENTICADA`):
+   * una ONU que llega a la casa ya dada de alta —de un cliente retirado, de SmartOLT,
+   * de una prueba en bodega— se desautentica y se vuelve a autenticar, no se adopta.
    */
   private async liberarAltaAnterior(x: {
-    t: any; sub: any; olt: { id: string; name: string }; sn: string; fspNuevo: string;
+    t: any; sub: any; olt: { id: string; name: string }; sn: string;
+    /** Puerto donde se va a dar de alta, si ya se sabe (no se sabe hasta que vuelva al autofind). */
+    fspNuevo?: string;
     user?: AuthUser;
-    /** El bloque `existente` que devuelve un alta rechazada con SN_YA_EXISTE, si lo hubo. */
+    /** El bloque `existente` que devuelve un alta rechazada con SN_YA_EXISTE, o el de `findBySn`. */
     existente?: any;
-  }) {
-    const out = {
+    motivo: 'TRASLADO' | 'YA_AUTENTICADA';
+  }): Promise<Liberacion> {
+    const out: Liberacion = {
       borrado: false,
       dryRun: false,
       /** Dónde estaba autenticada en la OLT de destino (F/S/P:ont-id). */
@@ -1601,12 +1882,17 @@ export class OnuProvisionService {
       }
 
       if (x.t?.code != null && (out.anterior || out.tambienEn.length || out.avisos.length)) {
+        const destino = x.fspNuevo ? ` en ${x.fspNuevo}` : '';
+        const nombreViejo = String(x.existente?.description ?? x.existente?.desc ?? '').trim();
         const msg =
-          `TRASLADO · ONU ${x.sn} desautenticada de su sitio anterior para volver a autenticarla en ${x.fspNuevo}`
+          (x.motivo === 'TRASLADO'
+            ? `TRASLADO · ONU ${x.sn} desautenticada de su sitio anterior para volver a autenticarla${destino}`
+            : `ONU YA AUTENTICADA · ${x.sn} estaba dada de alta${nombreViejo ? ` con el nombre «${nombreViejo}»` : ''}: `
+              + `se desautenticó para volver a autenticarla en este cliente${destino}`)
           + (out.dryRun ? ' (DRY-RUN: la OLT no se tocó)' : '')
           + (out.anterior ? `\nEstaba en ${x.olt.name} ${out.anterior}${out.borrado ? ' — borrada con sus service-ports.' : ' — NO se pudo borrar.'}` : '')
           + (out.tambienEn.length ? `\nTambién se quitó el alta que había quedado en: ${out.tambienEn.join(' · ')}` : '')
-          + '\nNo se descuenta ningún equipo de la bodega: es el mismo aparato que el cliente ya tenía.'
+          + (x.motivo === 'TRASLADO' ? '\nNo se descuenta ningún equipo de la bodega: es el mismo aparato que el cliente ya tenía.' : '')
           + (out.avisos.length ? `\nAvisos: ${out.avisos.join(' | ')}` : '');
         await this.prisma.ticketThread
           .create({ data: { ticketCode: x.t.code, message: msg, subscriberId: x.sub.id, employeeId: 0, date: new Date() } })
@@ -1614,9 +1900,31 @@ export class OnuProvisionService {
       }
     } catch (e) {
       out.avisos.push(`No se pudo revisar el alta anterior de la ONU ${x.sn}: ${(e as Error).message}`);
-      this.logger.warn(`Traslado: liberar alta anterior de ${x.sn} — ${(e as Error).message}`);
+      this.logger.warn(`${x.motivo}: liberar alta anterior de ${x.sn} — ${(e as Error).message}`);
     }
     return out;
+  }
+
+  /** Espera entre lecturas del autofind tras desautenticar una ONU. */
+  esperaAutofindMs = 10_000;
+  /** Lecturas como mucho (≈90 s): lo que tarda una ONU recién borrada en volver a anunciarse. */
+  intentosAutofind = 9;
+
+  /**
+   * Tras desautenticar una ONU que estaba enchufada, la OLT tarda unos segundos en
+   * verla otra vez en el autofind, ahora en el puerto donde esté conectada. Se lee
+   * el autofind cada `esperaAutofindMs` hasta que aparezca (null si no aparece).
+   */
+  private async esperarEnAutofind(oltId: string, sn: string): Promise<any | null> {
+    for (let i = 0; i < this.intentosAutofind; i++) {
+      await new Promise((r) => setTimeout(r, this.esperaAutofindMs));
+      const af = await this.olt.autofind(oltId).catch(() => null);
+      const hallada = af?.ok && Array.isArray(af.onus)
+        ? af.onus.find((o: any) => String(o.sn ?? '').toUpperCase() === sn)
+        : null;
+      if (hallada) return hallada;
+    }
+    return null;
   }
 
   /**
@@ -1636,8 +1944,32 @@ export class OnuProvisionService {
     equipo: { id: string; code: number } | null;
     equipoAVincular: { id: string; code: number } | null;
     user?: AuthUser;
+    forzarSenal?: string | null;
   }) {
     const { t, sub, olt, sn, plan, mapeo, user } = x;
+    /**
+     * Prueba de señal ANTES de adoptar: la ONU ya está dada de alta, así que se
+     * puede medir sin tocar nada, y si no pasa se sale sin haber cambiado la OLT.
+     */
+    let senal: SenalDeLaOrden | null = null;
+    if ((await this.olt.mode()).live) {
+      const donde = await this.olt.findBySn(olt.id, sn).catch(() => null);
+      const pos = donde?.ok ? this.posicionDeOnu(donde.onu) : null;
+      const fsp = pos ? `${pos.frame}/${pos.slot}/${pos.port}` : '—';
+      senal = await this.medirSenal(olt.id, pos, (donde?.onu as any)?.run_state ?? 'online');
+      if (!senal.aprobada) {
+        if (!x.forzarSenal) {
+          await this.anotarSenal(t, sub, sn, fsp, senal, { deshecha: false, adopcion: true });
+          return {
+            ok: false, codigo: 'SENAL_RECHAZADA',
+            error: this.mensajeDeRechazo(senal, 'SIN_ADOPTAR'),
+            senal, altaDeshecha: false, fsp,
+          };
+        }
+        senal = { ...senal, forzada: { por: user?.name ?? null, motivo: x.forzarSenal } };
+      }
+      await this.anotarSenal(t, sub, sn, fsp, senal);
+    }
     const res: any = await this.olt.adoptar(
       olt.id,
       {
@@ -1688,6 +2020,7 @@ export class OnuProvisionService {
       velocidad: { trafficIn: mapeo?.trafficIn ?? null, trafficOut: mapeo?.trafficOut ?? null },
       equipo: equipoRegistrado,
       conciliacion,
+      senal,
     };
   }
 
@@ -1880,7 +2213,7 @@ export class OnuProvisionService {
    * - «Bajar megas» / «Cambio de plan»: se reapuntan las traffic-tables del
    *   service-port sin tocar el alta.
    */
-  async aplicarVelocidad(ticketId: string, user?: AuthUser) {
+  async aplicarVelocidad(ticketId: string, user?: AuthUser, snElegido?: string) {
     const { t, sub } = await this.cargarOrden(ticketId, user);
     // Sin OLT, «aplicar la velocidad» y «autenticar» son literalmente la misma
     // escritura: el perfil del plan en el secret. Las dos puertas van al mismo sitio.
@@ -1894,11 +2227,7 @@ export class OnuProvisionService {
     const bloqueo = this.motivoDeBloqueo({ modo: 'VELOCIDAD', olt, plan, mapeo, tipo: t.type });
     if (bloqueo) throw new BadRequestException(bloqueo.message);
 
-    const onu = await this.prisma.oltOnu.findFirst({
-      where: { subscriberId: sub.id },
-      orderBy: { lastSync: 'desc' },
-      select: { sn: true, oltId: true },
-    });
+    const { onu } = await this.onuVigenteDelAbonado(sub.id, olt!.id, snElegido);
     if (!onu?.sn) {
       throw new BadRequestException('Este abonado no tiene ninguna ONU vinculada: no hay velocidad que cambiar.');
     }
@@ -1925,6 +2254,52 @@ export class OnuProvisionService {
         .catch(() => undefined);
     }
     return { ...res, plan: { id: plan!.planId, name: plan!.planName } };
+  }
+
+  /**
+   * La ONU del abonado sobre la que se cambia la velocidad.
+   *
+   * `OltOnu` guarda TODAS las que alguna vez se le vincularon y puede llevar meses
+   * sin sincronizar: la orden 509094 (2026-09-24) apuntaba a una ONU que ya no
+   * existía en la OLT mientras el equipo que el cliente usa seguía online en el
+   * mismo ONT-ID. Con más de una vinculada (o con un SN pedido) se le pregunta a la
+   * OLT por cada una y manda la que está dada de alta, online primero; su posición
+   * se corrige en el inventario local.
+   *
+   * `snElegido` solo puede ser una de las vinculadas al abonado: el botón no
+   * desautentica ONUs de otros clientes.
+   */
+  private async onuVigenteDelAbonado(subscriberId: string, oltDefault: string, snElegido?: string) {
+    const vinculadas = await this.prisma.oltOnu.findMany({
+      where: { subscriberId },
+      orderBy: { lastSync: 'desc' },
+      select: { id: true, sn: true, oltId: true, frame: true, slot: true, port: true, ontId: true, runState: true, description: true },
+    });
+    const pedido = String(snElegido ?? '').trim().toUpperCase();
+    let lista = vinculadas.filter((o: any) => o.sn);
+    if (pedido) {
+      lista = lista.filter((o: any) => String(o.sn).toUpperCase() === pedido);
+      if (!lista.length) throw new BadRequestException(`La ONU ${pedido} no está vinculada a este abonado.`);
+    }
+    const revisadas: any[] = [];
+    for (const o of lista.slice(0, 4)) {
+      let r: Awaited<ReturnType<OltService['estadoPorSn']>> | null = null;
+      try { r = await this.olt.estadoPorSn(o.oltId ?? oltDefault, o.sn!); } catch { r = null; }
+      const e: any = r?.ok ? r.estado : null;
+      revisadas.push({
+        ...o,
+        enOlt: r ? !!e : null,
+        ...(e ? { frame: e.frame, slot: e.slot, port: e.port, ontId: Number(e.ont_id), runState: e.run_state ?? o.runState, description: e.description ?? o.description } : {}),
+      });
+      if (e && (e.frame !== o.frame || e.slot !== o.slot || e.port !== o.port || Number(e.ont_id) !== o.ontId)) {
+        await this.prisma.oltOnu
+          .update({ where: { id: o.id }, data: { frame: e.frame, slot: e.slot, port: e.port, ontId: Number(e.ont_id), runState: e.run_state ?? o.runState } })
+          .catch(() => undefined);
+      }
+    }
+    const rank = (o: any) => (o.enOlt ? (String(o.runState).toLowerCase() === 'online' ? 0 : 1) : o.enOlt === null ? 2 : 3);
+    const onu = [...revisadas].sort((a, b) => rank(a) - rank(b))[0] ?? null;
+    return { onu, revisadas };
   }
 
   /**
@@ -2047,4 +2422,20 @@ export class OnuProvisionService {
       plan: { id: plan?.planId ?? null, name: plan?.planName ?? null },
     };
   }
+}
+
+/** La prueba de señal de una orden: la evaluación del protocolo + lo que ve la OLT. */
+type SenalDeLaOrden = EvaluacionSenal & {
+  /** Lo que la OLT recibe de vuelta de la ONU, en dBm (informativo). */
+  oltRx: number | null;
+  /** Autenticada fuera del protocolo por el superadministrador. */
+  forzada?: { por: string | null; motivo: string };
+};
+
+/** "-21.50" → -21.5; lo que no sea número (vacío, "-", "Failure") → null. */
+function numeroDbm(v: unknown): number | null {
+  const txt = String(v ?? '').trim().replace(',', '.');
+  if (!/^-?\d+(\.\d+)?$/.test(txt)) return null;
+  const n = Number(txt);
+  return Number.isFinite(n) ? n : null;
 }

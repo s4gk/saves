@@ -40,7 +40,7 @@ describe('GenieacsService · TV sólo en el sistema', () => {
     return { svc, prisma, olt, ordenes, devicesOf };
   };
 
-  it('el corte marca la ficha y deja la orden PENDIENTE sin tocar el ACS ni la OLT — EOC incluidos', async () => {
+  it('el corte marca la ficha y deja la orden ya RESUELTA sin tocar el ACS ni la OLT — EOC incluidos', async () => {
     const { svc, prisma, olt, ordenes, devicesOf } = armar();
     const r: any = await svc.tvBatchBySubscribers(['sub-1', 'sub-eoc'], false, { name: 'Op' } as any);
 
@@ -52,9 +52,9 @@ describe('GenieacsService · TV sólo en el sistema', () => {
     expect(prisma.subscriberService.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ subscriberId: { in: ['sub-1', 'sub-eoc'] } }), data: { status: 'CORTADO' } }),
     );
-    // A mano: la orden queda pendiente y la cierra quien corta en sitio (2026-09-23).
-    expect(ordenes.abrirSiNoHay).toHaveBeenCalledTimes(2);
-    expect(ordenes.registrarResuelta).not.toHaveBeenCalled();
+    // El corte masivo no deja órdenes abiertas: nacen cerradas (2026-10-01).
+    expect(ordenes.registrarResuelta).toHaveBeenCalledTimes(2);
+    expect(ordenes.abrirSiNoHay).not.toHaveBeenCalled();
   });
 
   it('el alta automática (pago) NO se da por hecha: queda para un técnico', async () => {

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '../core/http/errores';
-import { InvoiceRon, Prisma } from '@prisma/client';
+import { InvoiceRon, Prisma, ServiceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { orden } from '../common/pagination-params';
 import { AuthUser } from '../auth/current-user.decorator';
@@ -12,6 +12,7 @@ import {
 import type { SubscribersService } from '../subscribers/subscribers.service';
 import { ivaDe, num, round2 } from '../common/money';
 import { aplicarAnticipos } from './anticipos';
+import { aplicarNotasPendientes } from './notas-pendientes';
 import { aplicarNotaEnTx } from './nota-en-tx';
 import { exigirEmisorDeNotas } from './emisor-de-notas';
 import { copHistorial, movimientoDeAuditoria, movimientoDeNota, type Movimiento } from './historial-factura';
@@ -19,6 +20,7 @@ import { nextTid, TID_SEQ } from '../common/tid';
 import { subName } from '../common/subscriber-name';
 import { exigirSedeSuscriptor, sedesDe } from '../common/sede-scope';
 import { planDeUltimaFactura } from './plan-facturable';
+import { cortesVigentes, quitarCortados, serviciosCaidos } from './servicios-cortados';
 import { motivoPorClave, type MotivoFactura } from './motivos-factura';
 import { armarTraslado, type TrasladoArmado } from '../common/traslado';
 
@@ -49,6 +51,7 @@ export type GenerateSkipReason =
   | 'ALREADY_BILLED'  // ya tenía factura en el mes
   | 'REACTIVATED'     // volvió de RETIRADO dentro del mes (lo cubre la reconexión)
   | 'NO_SERVICES'     // sin SubscriberService activo con precio
+  | 'SERVICES_CUT'    // todo lo que tiene está cortado: no se factura lo que no se presta
   | 'PROMO'           // mes de promoción gratis (contador promo)
   | 'PROMO2'          // mes de promoción gratis (contador promo2)
   | 'ERROR';          // la escritura falló
@@ -67,6 +70,8 @@ export type GeneratePlanRow = {
   serviceTv?: string | null;
   /** true = el plan no salió de SubscriberService sino de su última factura. */
   planDeUltimaFactura?: boolean;
+  /** Servicios que tiene pero NO se le cobraron por estar cortados. */
+  sinCobrarPorCorte?: string[];
   /** Saldo a favor del cliente imputado a esta factura al nacer (pago adelantado). */
   anticipo?: number;
   items?: { productName: string | null; qty: number; price: number; taxRate: number; taxTotal: number }[];
@@ -261,7 +266,9 @@ export class FacturasService {
       });
       // Igual que en la corrida: si el cliente traía saldo a favor, se imputa a esta
       // factura en el mismo commit. Cubre la factura que se emite a mano (ventanilla,
-      // plantilla recurrente) además de la del día 1.
+      // plantilla recurrente) además de la del día 1. Antes, las notas que se dejaron
+      // pendientes: el anticipo paga el total ya rebajado (o recargado).
+      const notasPendientes = await aplicarNotasPendientes(tx, subscriber.id, inv.id);
       const anticipo = await aplicarAnticipos(tx, subscriber.id, { fecha: invoiceDate });
       // EL TRABAJO QUEDA PROGRAMADO, no hecho: la orden nace cuando la factura se
       // pague (`OrdenAlPagarService`). Va en la misma transacción que la factura —una
@@ -279,7 +286,10 @@ export class FacturasService {
           },
         });
       }
-      return { id: inv.id, tid: inv.tid, total, subtotal, tax, anticipo: anticipo.total };
+      return {
+        id: inv.id, tid: inv.tid, total, subtotal, tax, anticipo: anticipo.total,
+        notasPendientes: notasPendientes.length ? notasPendientes : undefined,
+      };
     });
     // Contabilización automática (DR cartera, CR ingreso + IVA). Idempotente; no rompe el flujo.
     await this.posting.postSalesInvoice({
@@ -637,6 +647,12 @@ export class FacturasService {
       .map((s) => s.id);
     const planFactura = await this.planDeUltimaFactura(necesitaRespaldo, monthStart, asIfUnbilled ? monthStart : undefined);
 
+    // Lo que está CORTADO no se factura (ver `servicios-cortados.ts`). Lo dice la
+    // última recurrente anterior al mes, igual que en el legacy y que en la ficha.
+    const cortes = await cortesVigentes(
+      this.prisma, subs.filter((s) => !alreadyBilled.has(s.id)).map((s) => s.id), monthStart,
+    );
+
     // ¿Quién trae saldo a favor sin imputar? Una sola consulta para todo el lote: son
     // ~5.000 abonados y preguntarlo uno a uno metía otros 5.000 viajes a la BD en la
     // corrida del día 1. Los que estén aquí verán su factura recién nacida pagada (del
@@ -644,6 +660,13 @@ export class FacturasService {
     const conAnticipo = subs.length ? new Set(
       (await this.prisma.customerAdvance.findMany({
         where: { status: 'ABIERTO', subscriberId: { in: subs.map((s) => s.id) } },
+        select: { subscriberId: true },
+      })).map((r) => r.subscriberId),
+    ) : new Set<string>();
+    // Igual con las notas que se dejaron pendientes para la próxima factura.
+    const conNotaPendiente = subs.length ? new Set(
+      (await this.prisma.pendingNote.findMany({
+        where: { status: 'PENDIENTE', subscriberId: { in: subs.map((s) => s.id) } },
         select: { subscriberId: true },
       })).map((r) => r.subscriberId),
     ) : new Set<string>();
@@ -686,10 +709,15 @@ export class FacturasService {
         return true;
       });
       const base = [...conPlan, ...derivados];
-      const servicios: { kind: string; planName: string | null; price: Prisma.Decimal | number | null; taxRate: Prisma.Decimal | number | null; qty?: number }[] =
+      const contratados: { kind: string; planName: string | null; price: Prisma.Decimal | number | null; taxRate: Prisma.Decimal | number | null; qty?: number }[] =
         [...base, ...puntos];
-      const deUltimaFactura = derivados.length > 0;
-      if (!servicios.length) { skip(s.id, 'NO_SERVICES'); continue; }
+      if (!contratados.length) { skip(s.id, 'NO_SERVICES'); continue; }
+      // Fuera lo cortado. Si no queda nada, el mes no se factura: cuando pague y se
+      // reconecte, el prorrateo de reconexión le cobra los días que sí tenga servicio.
+      const corte = cortes.get(s.id);
+      const { cobrables: servicios, cortados } = quitarCortados(contratados, corte);
+      if (!servicios.length) { skip(s.id, 'SERVICES_CUT'); continue; }
+      const deUltimaFactura = derivados.some((d) => (servicios as unknown[]).includes(d));
 
       // ¿Mes de promoción gratis? → no se factura; se descuenta el contador una vez/mes.
       const promo = promoBySub.get(s.id);
@@ -711,18 +739,28 @@ export class FacturasService {
       let serviceCombo: string | null = null;
       let serviceTv: string | null = null;
       // `invoices.puntos` del legacy: la ficha y el recibo lo leen de la cabecera.
-      const nPuntos = puntos.reduce((n, x) => n + (x.qty ?? 1), 0) || null;
+      const nPuntos = servicios.filter((x) => x.kind === 'PUNTOS').reduce((n, x) => n + (x.qty ?? 1), 0) || null;
+      // El servicio cortado NO se cobra pero SIGUE EN LA CABECERA con su corte, como
+      // hace el legacy al copiar `estado_tv`/`estado_combo` a la factura nueva: ésta
+      // pasa a ser la vigente, y de ella leen la ficha y la reconexión qué está caído.
+      // Sin esto el corte se "levantaba" solo el día 1 sin que nadie reconectara.
+      const k = cortados.length ? serviciosCaidos(corte) : { INTERNET: false, TV: false };
+      const estadoCombo = k.INTERNET ? (corte!.estadoCombo as ServiceStatus) : null;
+      const estadoTv = k.TV ? (corte!.estadoTv as ServiceStatus) : null;
       const items: InvoiceItemDto[] = servicios.map((svc) => {
         const name = svc.planName || svc.kind;
         if (svc.kind === 'INTERNET') serviceCombo = svc.planName ?? serviceCombo;
         if (svc.kind === 'TV') serviceTv = svc.planName ?? serviceTv;
         return { productName: name, description: name, qty: svc.qty ?? 1, price: num(svc.price), taxRate: num(svc.taxRate) };
       });
+      if (k.INTERNET) serviceCombo = serviceCombo ?? corte!.serviceCombo;
+      if (k.TV) serviceTv = serviceTv ?? corte!.serviceTv;
       const { rows, subtotal, tax, total } = this.computeTotals(items);
       const shape = {
         subscriberId: s.id, action: 'BILL' as const,
         subtotal, tax, total, serviceCombo, serviceTv,
         ...(deUltimaFactura ? { planDeUltimaFactura: true } : {}),
+        ...(cortados.length ? { sinCobrarPorCorte: cortados.map((c) => c.kind) } : {}),
         items: rows.map((r) => ({ productName: r.productName ?? null, qty: r.qty, price: r.price, taxRate: r.taxRate, taxTotal: r.taxTotal })),
       };
 
@@ -742,6 +780,9 @@ export class FacturasService {
               ron: s.status === 'COMPROMISO' ? 'COMPROMISO' : 'ACTIVO',
               itemsCount: rows.length,
               serviceCombo, serviceTv, puntos: nPuntos,
+              // `serviceStatusAt`: el corte heredado es de AQUÍ hasta que el writeback lo
+              // deje igual en el legacy; sin la marca la ida lo borraría a los 15 min.
+              ...(cortados.length ? { estadoCombo, estadoTv, serviceStatusAt: new Date(), serviceStatusBy: 'Corrida mensual' } : {}),
               // Alimenta la cola de timbrado DIAN si el abonado factura electrónicamente.
               eInvoiceFlag: s.eInvoice ? 'Crear Factura Electronica' : null,
               items: { create: rows.map((r) => ({
@@ -754,7 +795,9 @@ export class FacturasService {
           // Saldo a favor → a esta factura, en el mismo commit que la crea: si el cliente
           // ya pagó este mes por adelantado en ventanilla, nace pagada y no aparece
           // debiendo. Es el `procesar_pagos_adelantados` que el legacy corre al final de
-          // su corrida (`Invoices_model.php:1439`).
+          // su corrida (`Invoices_model.php:1439`). Las notas pendientes van ANTES: el
+          // anticipo paga el total ya rebajado o recargado.
+          if (conNotaPendiente.has(s.id)) await aplicarNotasPendientes(tx, s.id, creada.id);
           const anticipo = conAnticipo.has(s.id)
             ? await aplicarAnticipos(tx, s.id, { fecha: invoiceDate })
             : null;
@@ -1224,6 +1267,102 @@ export class FacturasService {
       type: dto.type,
       subscriberId,
       results,
+    };
+  }
+
+  /**
+   * Deja una nota crédito/débito PENDIENTE: se aplica sola a la próxima factura que
+   * nazca para el cliente (ver `notas-pendientes.ts`). Mismo candado nominal y mismas
+   * validaciones que la nota directa; NO mueve cartera hasta que la factura exista.
+   */
+  async createPendingNote(subscriberId: string, dto: CreateNoteDto, user: AuthUser) {
+    exigirEmisorDeNotas(user);
+    const amount = round2(dto.amount);
+    if (!(amount > 0)) throw new BadRequestException('El monto debe ser mayor a cero');
+    await exigirSedeSuscriptor(this.prisma, user, subscriberId);
+    const sub = await this.prisma.subscriber.findUnique({ where: { id: subscriberId }, select: { id: true } });
+    if (!sub) throw new NotFoundException('Cliente no encontrado');
+
+    const nota = await this.prisma.pendingNote.create({
+      data: {
+        subscriberId, type: dto.type, amount,
+        description: dto.description.trim(),
+        retentionType: dto.retentionType ?? null,
+        authorLegacyId: await this.autorDeNota(user),
+        createdByName: user?.name ?? user?.email ?? 'Sistema',
+      },
+    });
+    return this.notaPendienteDto(nota);
+  }
+
+  /**
+   * Notas pendientes. Con `subscriberId`, las de ese cliente (todas, para ver también
+   * en qué factura cayeron); sin él, las que siguen PENDIENTES en el alcance de sede.
+   */
+  async listPendingNotes(subscriberId: string | undefined, user?: AuthUser) {
+    let where: Prisma.PendingNoteWhereInput;
+    if (subscriberId) {
+      await exigirSedeSuscriptor(this.prisma, user, subscriberId);
+      where = { subscriberId };
+    } else {
+      const sedes = await sedesDe(this.prisma, user);
+      where = { status: 'PENDIENTE', ...(sedes ? { subscriber: { branch: { legacyId: { in: sedes } } } } : {}) };
+    }
+    const rows = await this.prisma.pendingNote.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      include: {
+        applications: { orderBy: { createdAt: 'asc' }, include: { invoice: { select: { id: true, tid: true } } } },
+        subscriber: {
+          select: {
+            id: true, abonado: true, firstName: true, secondName: true, lastName1: true, lastName2: true,
+            companyName: true, fullName: true,
+          },
+        },
+      },
+    });
+    return {
+      items: rows.map((n) => ({
+        ...this.notaPendienteDto(n),
+        subscriber: { id: n.subscriber.id, abonado: n.subscriber.abonado, name: subName(n.subscriber) ?? 'Sin nombre' },
+        applications: n.applications.map((a) => ({
+          invoiceId: a.invoice.id, tid: a.invoice.tid, amount: num(a.amount), date: a.createdAt,
+        })),
+      })),
+    };
+  }
+
+  /** Anula lo que quede sin aplicar de una nota pendiente. Lo ya aplicado se queda. */
+  async cancelPendingNote(id: string, dto: { reason?: string }, user: AuthUser) {
+    exigirEmisorDeNotas(user);
+    const nota = await this.prisma.pendingNote.findUnique({ where: { id } });
+    if (!nota) throw new NotFoundException('Nota pendiente no encontrada');
+    await exigirSedeSuscriptor(this.prisma, user, nota.subscriberId);
+    if (nota.status !== 'PENDIENTE') throw new BadRequestException('La nota ya no está pendiente.');
+    const reason = (dto.reason ?? '').trim();
+    if (reason.length < 3) throw new BadRequestException('Escribe por qué se anula la nota.');
+    // `updateMany` con el estado en el filtro: si la corrida la aplicó mientras tanto,
+    // no se marca anulada una nota que ya cayó en una factura.
+    const r = await this.prisma.pendingNote.updateMany({
+      where: { id, status: 'PENDIENTE' },
+      data: { status: 'ANULADA', canceledAt: new Date(), canceledBy: user?.name ?? user?.email ?? null, cancelReason: reason },
+    });
+    if (!r.count) throw new ConflictException('La nota se acaba de aplicar a una factura; recarga.');
+    return { ok: true };
+  }
+
+  private notaPendienteDto(n: {
+    id: string; subscriberId: string; type: string; amount: Prisma.Decimal; applied: Prisma.Decimal;
+    description: string; retentionType: string | null; status: string; createdByName: string;
+    createdAt: Date; canceledAt: Date | null; canceledBy: string | null; cancelReason: string | null;
+  }) {
+    return {
+      id: n.id, subscriberId: n.subscriberId, type: n.type,
+      amount: num(n.amount), applied: num(n.applied), pending: round2(num(n.amount) - num(n.applied)),
+      description: n.description, retentionType: n.retentionType, status: n.status,
+      createdByName: n.createdByName, createdAt: n.createdAt,
+      canceledAt: n.canceledAt, canceledBy: n.canceledBy, cancelReason: n.cancelReason,
     };
   }
 

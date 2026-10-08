@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../auth/current-user.decorator';
 import { ReconexionService } from '../network/reconexion.service';
 import { Prisma } from '@prisma/client';
+import { marcaTardio } from '../portal-pagos/aprobados-tardios';
 import { paginacion } from '../common/pagination-params';
 import { subName } from '../common/subscriber-name';
 import { BadRequestException, NotFoundException, ServiceUnavailableException } from '../core/http/errores';
@@ -360,9 +361,13 @@ export class OnlinePaymentsService {
 
     // Solo se reescribe lo que de verdad cambió: la inmensa mayoría de las relecturas
     // son intentos que siguen exactamente igual.
+    // Un APROBADO no se baja nunca: en Wompi es un estado final, y si aquí figura
+    // aprobado con el portal diciendo otra cosa es porque Wompi lo aprobó en un
+    // reintento que el portal no atendió (ver `PortalPagosService.recogerAprobadosTardios`).
     const cambiadas = preparadas.filter((p) => {
       const e = existentes.get(p.reference);
-      return e && (e.status !== p.status || (p.gatewayTxId && e.gatewayTxId !== p.gatewayTxId));
+      if (!e || e.status === 'APPROVED') return false;
+      return e.status !== p.status || (p.gatewayTxId && e.gatewayTxId !== p.gatewayTxId);
     });
     for (const c of cambiadas) {
       const { reference, createdAt, ...datos } = c;
@@ -627,7 +632,7 @@ export class OnlinePaymentsService {
         subscriberName: subName(f.subscriber),
         // La plata: si el movimiento no está por ningún lado, el cliente pagó y sigue
         // debiendo. Es LA alarma de esta pantalla.
-        aplicado: !!r || porParecido.has(f.reference),
+        aplicado: !!r || porParecido.has(f.reference) || aMano(f),
         // Si casó por referencia (lo normal) o si hubo que emparejarlo por valor y
         // fecha, que es más flojo y la pantalla lo dice.
         porReferencia: !!r,
@@ -639,7 +644,7 @@ export class OnlinePaymentsService {
         // writeback adopta el gemelo del legacy y le pone su `legacyId`, así que un
         // recaudo nacido aquí acabaría pareciendo de allá. Lo aplicado antes de que
         // existiera la columna es LEGACY por definición (lo puso la migración).
-        origen: f.appliedBy ? (f.appliedBy === 'NEXUS' ? 'nexus' : 'legacy') : (r ? 'legacy' : null),
+        origen: origenDe(f.appliedBy, !!r),
         // El servicio. Antes esto era `appliedAt` a secas, que sólo decía que el puente
         // había pasado por la orden; desde que el pago se aplica aquí, `appliedAt` lo
         // lleva TODO pago, reconecte o no, y esa columna daba por reconectado a todo el
@@ -827,8 +832,8 @@ export class OnlinePaymentsService {
     // si algún día deja de ser ~0, hay plata cobrada que nadie está viendo.
     const aprobadas = await this.prisma.paymentOrder.findMany({
       where: { ...where, status: 'APPROVED' },
-      select: { reference: true, amount: true, subscriberId: true, createdAt: true },
-    });
+      select: { reference: true, amount: true, subscriberId: true, createdAt: true, appliedBy: true, transactionId: true },
+    }).then((filas) => filas.filter((a) => !aMano(a)));
     const conPlata = await this.aplicadasEnCartera(aprobadas.map((a) => a.reference));
     // Mismo criterio que el listado: sin esto el contador acusaba de "sin aplicar" a
     // pagos que el legacy sí imputó, sólo que sin escribir la referencia.
@@ -878,14 +883,17 @@ export class OnlinePaymentsService {
       select: {
         id: true, reference: true, amount: true, status: true, method: true,
         gatewayTxId: true, appliedAt: true, appliedBy: true, transactionId: true, createdAt: true,
-        rawInit: true, subscriberId: true,
+        rawInit: true, rawWebhook: true, subscriberId: true,
         subscriber: { select: { ...SELECT_NOMBRE, status: true } },
       },
     });
     if (!o) throw new NotFoundException('No existe ese pago en línea.');
+    const { rawWebhook, ...orden } = o;
+    const tardio = marcaTardio(rawWebhook);
 
     const movimiento = await this.prisma.transaction.findFirst({
-      where: { payuOrderId: o.reference },
+      // El cargue a mano no lleva la referencia: se llega por el enlace que dejó el rescate.
+      where: aMano(o) ? { id: o.transactionId! } : { payuOrderId: o.reference },
       select: { id: true, credit: true, date: true, note: true, invoiceId: true, method: true },
     });
     // Las órdenes de reconexión que salieron de este pago: se buscan por abonado y
@@ -911,16 +919,21 @@ export class OnlinePaymentsService {
       : null;
 
     return {
-      ...o,
+      ...orden,
+      // Aprobado por Wompi en un reintento que el portal no atendió: si no se aplicó
+      // solo, aquí va el porqué (ver `PortalPagosService.recogerAprobadosTardios`).
+      reintento: tardio
+        ? { dia: tardio.dia ?? null, revisar: tardio.revisar ?? null, descartado: tardio.descartado ?? null }
+        : null,
       amount: Number(o.amount),
       subscriberName: subName(o.subscriber),
       abonado: o.subscriber?.abonado ?? null,
       subscriberStatus: o.subscriber?.status ?? null,
       movimiento: movimiento ? { ...movimiento, credit: Number(movimiento.credit) } : null,
-      aplicado: !!recaudo,
+      aplicado: !!recaudo || aMano(o),
       facturas: recaudo?.facturas ?? [],
       recibo: recaudo?.recibo ?? null,
-      origen: o.appliedBy ? (o.appliedBy === 'NEXUS' ? 'nexus' : 'legacy') : (recaudo ? 'legacy' : null),
+      origen: origenDe(o.appliedBy, !!recaudo),
       // Lo que se le rebajó por una promoción vigente al pagar: el cliente ve un valor
       // más bajo que su deuda y alguien tiene que poder explicar por qué.
       descuento,
@@ -1171,4 +1184,20 @@ export class OnlinePaymentsService {
       activa: ahora.status === 'active' && String(ahora.is_deleted ?? '0') === '0',
     };
   }
+}
+
+/**
+ * Aprobado en un reintento que alguien ya había cargado a mano por el mismo valor: el
+ * rescate lo enlazó a ese movimiento (`appliedBy: 'MANUAL'`). Ver `recogerAprobadosTardios`.
+ */
+function aMano(o: { appliedBy: string | null; transactionId: string | null }) {
+  return o.appliedBy === 'MANUAL' && !!o.transactionId;
+}
+
+/** Quién imputó la plata, para la pantalla. */
+function origenDe(appliedBy: string | null, conRecaudo: boolean): 'nexus' | 'legacy' | 'manual' | null {
+  if (appliedBy === 'NEXUS') return 'nexus';
+  if (appliedBy === 'MANUAL') return 'manual';
+  if (appliedBy) return 'legacy';
+  return conRecaudo ? 'legacy' : null;
 }

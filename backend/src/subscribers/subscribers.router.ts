@@ -5,7 +5,7 @@
  * controlador. Cablea HTTP -> método: extrae los argumentos de `req` y llama.
  * La lógica sigue viviendo en SubscribersController, que ya no lleva decoradores.
  *
- * Endpoints: 52
+ * Endpoints: 54
  */
 import { crearRouter, manejar } from '../core/http/ruta';
 import { validar } from '../core/http/validar';
@@ -29,7 +29,7 @@ import { AltaClienteService } from './alta.service';
 import { APP_PERMISSIONS } from '../auth/permissions.catalog';
 import { esTecnicoDeCampo } from '../common/tecnico-scope';
 import { ForbiddenException } from '../core/http/errores';
-import { UpdateSubscriberDto, AddNoteDto, UpdateInvoiceDto, CreateSubscriberDto, CheckDuplicatesDto, ChangeStatusDto, ChangeServiceStatusDto, ReturnEquipmentDto } from './dto/update-subscriber.dto';
+import { UpdateSubscriberDto, AddNoteDto, UpdateInvoiceDto, CreateSubscriberDto, CheckDuplicatesDto, ChangeStatusDto, ChangeServiceStatusDto, ReturnEquipmentDto, MotivoBorradoDto } from './dto/update-subscriber.dto';
 import { AssignPlanDto, AssignPlansDto, SetPuntosDto } from '../plans/dto/plan.dto';
 import { ApplyBundleDto } from '../plans/dto/bundle.dto';
 import { BulkFilterDto, BulkMessageDto } from './dto/bulk.dto';
@@ -55,6 +55,13 @@ subscribersRouter.post(
   autenticar,
   exigirArea('administracion', 'contabilidad', 'tecnicos', 'caja'),
   manejar((req) => subscribers.create(validar(CreateSubscriberDto, req.body), usuarioDe(req))),
+);
+
+subscribersRouter.get(
+  '/activos-por-mes',
+  autenticar,
+  exigirArea('administracion', 'contabilidad', 'tecnicos', 'caja'),
+  manejar((req) => subscribers.activosPorMes(req.query.branchId as string, req.query.status as string, usuarioDe(req))),
 );
 
 subscribersRouter.get(
@@ -289,7 +296,7 @@ subscribersRouter.delete(
   '/:id/files/:fileId',
   autenticar,
   exigirArea('administracion', 'contabilidad', 'tecnicos', 'caja'),
-  manejar((req) => subscribers.deleteFile(req.params.id, req.params.fileId, usuarioDe(req))),
+  manejar((req) => subscribers.deleteFile(req.params.id, req.params.fileId, validar(MotivoBorradoDto, req.body), usuarioDe(req))),
 );
 
 subscribersRouter.get(
@@ -401,7 +408,7 @@ subscribersRouter.delete(
   '/:id/invoices/:invoiceId',
   autenticar,
   exigirArea('contabilidad'),
-  manejar((req) => subscribers.deleteInvoice(req.params.id, req.params.invoiceId, usuarioDe(req))),
+  manejar((req) => subscribers.deleteInvoice(req.params.id, req.params.invoiceId, validar(MotivoBorradoDto, req.body), usuarioDe(req))),
 );
 
 subscribersRouter.patch(
@@ -422,7 +429,7 @@ subscribersRouter.delete(
   '/:id/notes/:noteId',
   autenticar,
   exigirArea('administracion', 'contabilidad', 'tecnicos', 'caja'),
-  manejar((req) => subscribers.deleteNote(req.params.id, req.params.noteId, usuarioDe(req))),
+  manejar((req) => subscribers.deleteNote(req.params.id, req.params.noteId, validar(MotivoBorradoDto, req.body), usuarioDe(req))),
 );
 
 subscribersRouter.get(

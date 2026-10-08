@@ -44,6 +44,8 @@ import { esLineaTv, serviciosContratados, type ServiciosContratados } from '../c
  *  EXONERADO / EVENTO / INSTALAR (no están cortados por plata).
  */
 const ESTADOS_RECONECTABLES: SubscriberStatus[] = ['CORTADO', 'CARTERA', 'REPORTADO', 'COMPROMISO'];
+/** Sin COMPROMISO: ése no es un corte, y darle orden "al aire" fue la queja del 14-09. */
+const ESTADOS_DE_CORTE_AL_AIRE: SubscriberStatus[] = ['CORTADO', 'CARTERA', 'REPORTADO'];
 
 /**
  * Estados a los que un pago NO les devuelve el servicio, venga la prueba de donde venga.
@@ -446,7 +448,7 @@ export class ReconexionService {
   private async cortadoAunqueDigaActivo(
     sub: SubParaReconectar,
     opts: { router: boolean },
-  ): Promise<{ internet: boolean; tv: boolean; motivo: string | null }> {
+  ): Promise<{ internet: boolean; tv: boolean; motivo: string | null; routerAlAire?: boolean; corteSinCerrar?: boolean }> {
     const nada = { internet: false, tv: false, motivo: null };
     // Ni el router ni el rastro de órdenes son prueba de "cortado por plata" cuando el
     // cliente ya no es cliente: al retirado se le deja el secret deshabilitado y su
@@ -470,7 +472,10 @@ export class ReconexionService {
         // El router contestó y lo tiene bien: no hay corte de internet que levantar,
         // por mucho que quede una orden vieja sin cerrar.
         if (live && Object.keys(live).length) {
-          return { internet: false, tv: (await this.cortesSegunOrdenes(sub)).tv, motivo: null };
+          const rastro = await this.cortesSegunOrdenes(sub);
+          // `corteSinCerrar`: no hay nada que levantar en el router, pero su última orden
+          // de internet es un corte. Quien llama cierra ese rastro (ver `cerrarCorteAlAire`).
+          return { internet: false, tv: rastro.tv, motivo: null, routerAlAire: true, corteSinCerrar: rastro.internet };
         }
       }
 
@@ -664,7 +669,7 @@ export class ReconexionService {
 
   /** El cuerpo de `porPago`, sin tope de espera. */
   private async reconectarPorPago(subscriberId: string, user?: AuthUser, ctx?: string): Promise<ResultadoReconexion> {
-    const base: ResultadoReconexion = {
+    let base: ResultadoReconexion = {
       subscriberId, aplica: false, ok: true, enCurso: false, dryRun: false,
       servicios: [], ordenes: [], registros: [], mensaje: 'El cliente no estaba cortado: no había nada que reconectar.',
     };
@@ -690,6 +695,14 @@ export class ReconexionService {
           );
         }
         if (real.tv && !necesitaTv && !this.tvDadaDeBaja(sub)) necesitaTv = true;
+        // El router lo tiene navegando pero la factura vigente puede seguir diciendo
+        // 'Cortado' (lo levantaron en el legacy o a mano en el router, sin limpiarla):
+        // la ficha lo pintaba cortado aunque pagó y navega. Abonado 15296, 25-sep.
+        if (real.routerAlAire) await this.levantarCorteDeFactura([sub.id], ['INTERNET']);
+        if (real.routerAlAire && real.corteSinCerrar && !haceInternet) {
+          const registro = await this.cerrarCorteAlAire(sub, sub.status, user, ctx);
+          if (registro) base = { ...base, aplica: true, registros: [registro], mensaje: `El cliente ya navegaba: se cerró su corte pendiente (orden #${registro.code}).` };
+        }
       }
 
       const haceTv = necesitaTv && this.hayEquipoTv(sub);
@@ -742,12 +755,17 @@ export class ReconexionService {
     ]);
 
     const servicios = [internet, tv].filter((s): s is ServicioReconectado => !!s);
-    // Lo que el equipo encontró ya al aire no es una reconexión: ni orden ni cobro.
+    // El router ya lo tenía al aire: no hay reconexión que COBRAR, pero si la ficha o
+    // el rastro de órdenes lo daban por cortado, ese corte se cierra (orden resuelta,
+    // sin prorrateo) y la ficha vuelve a ACTIVO para que la corrida lo facture.
+    const alAire = internet?.sinCorte ? await this.cerrarCorteAlAire(sub, estadoAntes, user, ctx) : null;
     if (servicios.length && servicios.every((s) => s.sinCorte)) {
       return {
-        subscriberId: sub.id, aplica: false, ok: true, enCurso: false, dryRun: false,
-        servicios, ordenes: [], registros: [],
-        mensaje: 'El cliente no estaba cortado: no había nada que reconectar.',
+        subscriberId: sub.id, aplica: !!alAire, ok: true, enCurso: false, dryRun: false,
+        servicios, ordenes: [], registros: alAire ? [alAire] : [],
+        mensaje: alAire
+          ? `El cliente ya navegaba: se cerró su corte pendiente (orden #${alAire.code}).`
+          : 'El cliente no estaba cortado: no había nada que reconectar.',
       };
     }
     const ok = servicios.every((s) => s.ok);
@@ -817,6 +835,8 @@ export class ReconexionService {
       if (r) registros.push(r);
     }
 
+    if (alAire) registros.push(alAire);
+
     const pendientes = ordenes.map((o) => `${NOMBRE_SERVICIO[o.servicio]} → orden #${o.code}`).join(', ');
     // El cobro se le dice a quien recaudó, no se le esconde: el cliente que acaba de
     // pagar tiene delante a la cajera y va a preguntar por ese renglón nuevo.
@@ -841,6 +861,8 @@ export class ReconexionService {
       // 54205 el 12-09) y con fichas en CORTADO que el router tenía al aire: se les
       // dejaba una "Reconexion Internet" y hasta el prorrateo "…2" sin haber corte.
       if (r.ok && !r.dryRun && r.wasCut === false) {
+        // Sin corte que levantar en el router, pero sí la marca de la factura si quedó.
+        await this.levantarCorteDeFactura([sub.id], ['INTERNET']);
         return {
           servicio: 'INTERNET', ok: true, dryRun: false, via: 'MIKROTIK', sinCorte: true,
           detalle: 'El router ya lo tenía al aire: no estaba cortado.',
@@ -973,7 +995,7 @@ export class ReconexionService {
     if (!conInternet.length && !conTv.length && !tvSinEquipo.length) return vacío;
 
     const estadosAntes = new Map(subs.map((s) => [s.id, s.status]));
-    let internet = 0, tv = 0, fallidos = 0, dryRun = false;
+    let internet = 0, tv = 0, fallidos = 0, dryRun = false, registrosAlAire = 0;
     const reconectados = new Set<string>();
     // Lo que quede sin restablecer se apunta aquí y sale como orden al final: dentro
     // del bucle de equipos abriríamos una transacción por fila.
@@ -991,8 +1013,18 @@ export class ReconexionService {
     if (conInternet.length) {
       try {
         const r = await this.mikrotik.reconnectBatch(conInternet.map((s) => s.id), user);
+        // El router lo encontró ya al aire: no estaba cortado, no cuenta ni deja orden,
+        // pero la factura vigente no debe seguir diciendo 'Cortado'.
+        const alAire = r.results.filter((f) => f.ok && !f.dryRun && f.wasCut === false && f.subscriberId).map((f) => f.subscriberId!);
+        if (alAire.length) await this.levantarCorteDeFactura(alAire, ['INTERNET']);
+        const rastro = await this.cortesSegunOrdenesLote(alAire.map((id) => porId.get(id)!).filter(Boolean));
+        for (const id of alAire) {
+          const sub = porId.get(id);
+          if (!sub) continue;
+          const reg = await this.cerrarCorteAlAire(sub, estadosAntes.get(id) ?? null, user, 'cargue de pagos', rastro.get(id)?.internet ?? false);
+          if (reg) registrosAlAire++;
+        }
         for (const fila of r.results) {
-          // El router lo encontró ya al aire: no estaba cortado, no cuenta ni deja orden.
           if (fila.ok && !fila.dryRun && fila.wasCut === false) continue;
           if (fila.ok) {
             internet++;
@@ -1080,7 +1112,7 @@ export class ReconexionService {
       lista.push(h);
       porAbonado.set(h.sub.id, lista);
     }
-    let registros = 0, cobros = 0, cobrado = 0;
+    let registros = registrosAlAire, cobros = 0, cobrado = 0;
     for (const [, lista] of porAbonado) {
       const sub = lista[0].sub;
       const devueltos = [...new Set(lista.map((h) => h.servicio))];
@@ -1114,6 +1146,38 @@ export class ReconexionService {
    * que tienen el historial descuadrado (ver el cron de Cartera), y sin historial
    * no se puede responder cuántos activos había en una fecha.
    */
+  /**
+   * Pagó y el router ya lo tenía navegando, pero el sistema lo seguía dando por cortado:
+   * la ficha en un estado de corte o su última orden de internet un `Corte` sin
+   * reconexión (lo devolvió el legacy, un técnico a mano o la activación masiva del
+   * 15-09). Novedad de Cartera 30-09: "pagan, no se genera la reconexión y el servicio
+   * sí está activo" — y sin ACTIVO la corrida del legacy no les factura el mes.
+   *
+   * Se cierra el corte: ficha a ACTIVO (el COMPROMISO se respeta en `marcarActivo`) y
+   * "Reconexion Internet" RESUELTA. SIN prorrateo: no estuvo sin servicio. Sin esas dos
+   * pruebas no se hace nada — la orden a quien nunca estuvo cortado fue la queja del 14-09.
+   */
+  private async cerrarCorteAlAire(
+    sub: SubParaReconectar, estadoAntes: SubscriberStatus | null, user?: AuthUser, ctx?: string, rastroInternet?: boolean,
+  ): Promise<(OrdenAbierta & { servicio: 'INTERNET' | 'TV' }) | null> {
+    try {
+      const fichaCortada = !!estadoAntes && ESTADOS_DE_CORTE_AL_AIRE.includes(estadoAntes);
+      const rastro = rastroInternet ?? (await this.cortesSegunOrdenes(sub)).internet;
+      if (!fichaCortada && !rastro) return null;
+      await this.marcarActivo(sub, estadoAntes);
+      await this.marcarServicios(sub, ['INTERNET'], 'ACTIVO');
+      this.avisarReconexion([sub.id], ['INTERNET']);
+      return await this.registrarReconexion(
+        sub, 'INTERNET',
+        'El router ya lo tenía navegando: se cierra el corte pendiente, sin cobro de días.',
+        user, ctx, false,
+      );
+    } catch (e) {
+      this.logger.warn(`Abonado ${sub.abonado}: no se pudo cerrar el corte pendiente: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
   private async marcarActivo(sub: { id: string; abonado: number }, estadoAntes: SubscriberStatus | null) {
     if (estadoAntes === 'ACTIVO') return;
     // El acuerdo de pago sobrevive a la reconexión: se le devuelve el servicio, pero
@@ -1242,8 +1306,9 @@ export class ReconexionService {
    * El cliente pagó ANTES de que fueran a cortarle la TV: se anula la orden de corte
    * que seguía PENDIENTE y la TV vuelve a quedar activa en el sistema.
    *
-   * Con el TR-069 en pausa el corte masivo de TV deja una orden PENDIENTE que cierra
-   * quien corta en sitio (ver `GenieacsService.registrarCorteDeTv`). Mientras nadie la
+   * Desde el 01-10-2026 el corte masivo de TV ya nace RESUELTO (ver
+   * `GenieacsService.registrarCorteDeTv`), así que esto sólo alcanza a las órdenes de
+   * corte abiertas a mano o anteriores a esa fecha. Mientras nadie la
    * haya hecho, la señal nunca se cortó: mandar además una «Reconexion Television»
    * sería una visita para devolver algo que no se quitó, y dejar la de corte abierta
    * mandaría a alguien a cortarle a un cliente que ya pagó. Sólo las PENDIENTES: una en

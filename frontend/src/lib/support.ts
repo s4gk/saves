@@ -141,11 +141,26 @@ export const SERVICIOS_CONTRATADOS: readonly ServicioContratado[] = ["TV", "INTE
 
 // Tipos de orden válidos (detalle). Fuente única: usada por Nueva orden y el filtro.
 export const TICKET_TYPES = [
-  "Instalacion", "Reconexion Internet", "Reconexion Television", "Reconexion Combo",
+  "Instalacion", "Reconexion Internet", "Reconexion Internet2", "Reconexion Television",
+  "Reconexion Television2", "Reconexion Combo",
   "Corte Internet", "Corte Television", "Revision de Internet", "Revision de television",
-  "Revision tv e internet", "Traslado", "Retiro voluntario", "Cambio de equipo", "Cambio de titular",
+  "Revision tv e internet", "Traslado", "Retiro voluntario",
+  "Suspension Combo", "Suspension Internet", "Suspension Television", "Cambio de equipo", "Cambio de titular",
   "Migracion", "Subir megas", "Bajar megas", "Cambio de clave", "Servicio Adicional",
+  // 'Punto nuevo' va así, en minúscula: es como está escrito en las órdenes y el filtro es exacto.
+  "Punto nuevo", "Punto Adicional",
+  // Escritos como en las órdenes (el filtro es exacto): con tilde y, los de agregar,
+  // pegados como los guarda el legacy. La etiqueta los separa.
+  "Reinstalación", "AgregarInternet", "AgregarTelevision", "Toma Adicional",
 ];
+
+/**
+ * Cómo se lee un detalle en el filtro. El legacy pega el "2" de la segunda
+ * reconexión ('Reconexion Internet2'); el valor viaja tal cual (el filtro es
+ * exacto), sólo la etiqueta lo separa: "Reconexion Internet 2".
+ */
+export const ticketTypeLabel = (t: string) =>
+  t.replace(/([^\d\s])(\d+)$/, "$1 $2").replace(/([a-záéíóúñ])([A-ZÁÉÍÓÚÑ])/g, "$1 $2");
 
 // Prioridad de la orden (mayor → menor). Un color por nivel para leerla de un vistazo.
 export const TICKET_PRIORITIES = ["Urgente", "Alta", "Media", "Baja"] as const;

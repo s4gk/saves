@@ -38,6 +38,8 @@ export type OrdenEnCurso = {
 export type MiAgenda = {
   resolved: boolean; fecha: string; hoy: string; tecnico?: string;
   ordenes: OrdenAgendada[]; proximas: number;
+  /** Una a una (2026-10-01): sólo viaja la orden que le toca y lo ya hecho; lo que viene después no. */
+  unaAUna?: boolean;
   /**
    * La visita EMPEZADA, si está en el día que se mira (2026-09-02). La decide el
    * backend con la misma regla que aplica su candado (`support/turno.ts`) y no la

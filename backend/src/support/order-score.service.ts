@@ -1,6 +1,8 @@
 import { BadRequestException } from '../core/http/errores';
 import { PrismaService } from '../prisma/prisma.service';
-import { PUNTAJE_MAX, PUNTAJE_MIN, esPuntajeValido, puntajeSugerido } from './order-score.policy';
+import {
+  BONO_TEMPRANO, MINUTOS_MAX, PUNTAJE_MAX, PUNTAJE_MIN, esPuntajeValido, minutosSugeridos, puntajeSugerido, sonMinutosValidos,
+} from './order-score.policy';
 import { esTrabajoDeCampo, tiposDeCampo } from './field-work.policy';
 import { DETALLES_POR_CLASE } from './order-types';
 
@@ -16,12 +18,19 @@ export type PuntajeDeTipo = {
   campo: boolean;
   /** Órdenes de este tipo en el último año. Sin esto no se sabe qué vale la pena afinar. */
   usos: number;
+  /** Tiempo estándar de la visita, en minutos. 0 = este tipo no da bono por terminar temprano. */
+  minutos: number;
+  minutosOrigen: 'definido' | 'sugerido';
+  minutosSugeridos: number;
   updatedBy: string | null;
   updatedAt: Date | null;
 };
 
-/** Un cambio pedido desde la pantalla. `puntos: null` = volver al sugerido. */
-export type CambioPuntaje = { tipo: string; puntos: number | null };
+/**
+ * Un cambio pedido desde la pantalla. `null` = volver al sugerido; un campo que no
+ * viene (`undefined`) no se toca.
+ */
+export type CambioPuntaje = { tipo: string; puntos?: number | null; minutos?: number | null };
 
 /**
  * El puntaje de las órdenes: qué vale cada tipo y cuánto se le sella a una orden
@@ -46,6 +55,13 @@ export class OrderScoreService {
     return fila ? fila.points : puntajeSugerido(tipo);
   }
 
+  /** El tiempo estándar de este tipo HOY, en minutos (0 = sin bono). Como `puntajeDe`. */
+  async minutosDe(tipo: string | null | undefined): Promise<number> {
+    if (!tipo) return minutosSugeridos(tipo);
+    const fila = await this.prisma.ticketTypeTime.findUnique({ where: { type: tipo } });
+    return fila ? fila.minutes : minutosSugeridos(tipo);
+  }
+
   /**
    * Catálogo completo para la pantalla de configuración.
    *
@@ -56,7 +72,7 @@ export class OrderScoreService {
    */
   async catalogo() {
     const desde = new Date(Date.now() - 365 * 86400_000);
-    const [usados, definidos, todosLosTipos] = await Promise.all([
+    const [usados, definidos, todosLosTipos, tiempos] = await Promise.all([
       this.prisma.ticket.groupBy({
         by: ['type'],
         where: { created: { gte: desde } },
@@ -64,15 +80,18 @@ export class OrderScoreService {
       }),
       this.prisma.ticketTypeScore.findMany(),
       this.prisma.ticket.findMany({ distinct: ['type'], select: { type: true } }),
+      this.prisma.ticketTypeTime.findMany(),
     ]);
 
     const usoPorTipo = new Map(usados.map((u) => [u.type, u._count._all]));
     const definidoPorTipo = new Map(definidos.map((d) => [d.type, d]));
+    const tiempoPorTipo = new Map(tiempos.map((d) => [d.type, d.minutes]));
 
     const tipos = new Set<string>();
     for (const t of todosLosTipos) if (t.type) tipos.add(t.type);
     for (const lista of Object.values(DETALLES_POR_CLASE)) for (const t of lista) tipos.add(t);
     for (const d of definidos) tipos.add(d.type);
+    for (const d of tiempos) tipos.add(d.type);
 
     // El "es de campo" se calcula con la MISMA lista que usa el tablero (incluido
     // el ajuste manual `tickets.fieldTypes`), no con el patrón suelto: si alguien
@@ -92,6 +111,9 @@ export class OrderScoreService {
         sugerido,
         campo: campo.has(tipo),
         usos: usoPorTipo.get(tipo) ?? 0,
+        minutos: tiempoPorTipo.get(tipo) ?? minutosSugeridos(tipo),
+        minutosOrigen: tiempoPorTipo.has(tipo) ? 'definido' : 'sugerido',
+        minutosSugeridos: minutosSugeridos(tipo),
         updatedBy: def?.updatedBy ?? null,
         updatedAt: def?.updatedAt ?? null,
       };
@@ -105,7 +127,7 @@ export class OrderScoreService {
       return a.tipo.localeCompare(b.tipo, 'es');
     });
 
-    return { min: PUNTAJE_MIN, max: PUNTAJE_MAX, tipos: filas };
+    return { min: PUNTAJE_MIN, max: PUNTAJE_MAX, bono: BONO_TEMPRANO, minutosMax: MINUTOS_MAX, tipos: filas };
   }
 
   /**
@@ -124,26 +146,40 @@ export class OrderScoreService {
       if (!c?.tipo || typeof c.tipo !== 'string') {
         throw new BadRequestException('Falta el tipo de orden en uno de los puntajes.');
       }
-      if (c.puntos !== null && !esPuntajeValido(c.puntos)) {
+      if (c.minutos != null && !sonMinutosValidos(c.minutos)) {
+        throw new BadRequestException(
+          `El tiempo de "${c.tipo}" tiene que ser un número entero de minutos, de 0 a ${MINUTOS_MAX}.`,
+        );
+      }
+      if (c.puntos != null && !esPuntajeValido(c.puntos)) {
         throw new BadRequestException(
           `El puntaje de "${c.tipo}" tiene que ser un número entero de ${PUNTAJE_MIN} a ${PUNTAJE_MAX}.`,
         );
       }
     }
 
-    await this.prisma.$transaction(
-      cambios.map((c) =>
+    await this.prisma.$transaction([
+      ...cambios.filter((c) => c.minutos !== undefined).map((c) =>
+        c.minutos === null
+          ? this.prisma.ticketTypeTime.deleteMany({ where: { type: c.tipo } })
+          : this.prisma.ticketTypeTime.upsert({
+              where: { type: c.tipo },
+              create: { type: c.tipo, minutes: c.minutos!, updatedBy: actor ?? null },
+              update: { minutes: c.minutos!, updatedBy: actor ?? null },
+            }),
+      ),
+      ...cambios.filter((c) => c.puntos !== undefined).map((c) =>
         c.puntos === null
           ? // Volver al sugerido = borrar la fila, no escribir el sugerido. Así, si
             // mañana se afina la escala del sistema, este tipo la sigue.
             this.prisma.ticketTypeScore.deleteMany({ where: { type: c.tipo } })
           : this.prisma.ticketTypeScore.upsert({
               where: { type: c.tipo },
-              create: { type: c.tipo, points: c.puntos, updatedBy: actor ?? null },
-              update: { points: c.puntos, updatedBy: actor ?? null },
+              create: { type: c.tipo, points: c.puntos!, updatedBy: actor ?? null },
+              update: { points: c.puntos!, updatedBy: actor ?? null },
             }),
       ),
-    );
+    ]);
 
     return { guardados: cambios.length };
   }

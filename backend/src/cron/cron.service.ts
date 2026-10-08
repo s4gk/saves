@@ -661,6 +661,17 @@ export class CronService {
       const rescate = this.portalPagos.habilitado
         ? await this.portalPagos.recogerPagosCaidos({ dryRun: opts.dryRun })
         : { revisadas: 0, aplicadas: 0, fallidas: 0, detalle: [] as string[] };
+      // Y los que Wompi aprobó en un REINTENTO después de un rechazo: el portal los deja
+      // por rechazados. Ver `PortalPagosService.recogerAprobadosTardios`.
+      const tardios = this.portalPagos.habilitado
+        ? await this.portalPagos.recogerAprobadosTardios({ dryRun: opts.dryRun })
+        : { revisadas: 0, aplicadas: 0, porRevisar: 0, fallidas: 0, detalle: [] as string[] };
+      rescate.aplicadas += tardios.aplicadas;
+      rescate.fallidas += tardios.fallidas;
+      rescate.detalle.push(...tardios.detalle.map((d) => `reintento: ${d}`));
+      if (tardios.porRevisar) {
+        this.logger.warn(`[pagos-en-linea] ${tardios.porRevisar} pago(s) aprobados en un reintento quedan POR REVISAR`);
+      }
       if (rescate.aplicadas || rescate.fallidas) {
         this.logger.warn(
           `[pagos-en-linea] rescate: ${rescate.aplicadas} pago(s) aplicados`
@@ -671,7 +682,7 @@ export class CronService {
       const r = await this.pagosEnLinea.sincronizar({ dryRun: opts.dryRun });
       // Igual que el barrido de instalaciones: a 288 pasadas al día, anotar cada
       // pasada vacía enterraría el histórico de `CronRun` bajo filas sin noticia.
-      const huboAlgo = r.ingestadas > 0 || r.actualizadas > 0 || r.reconectados > 0 || rescate.aplicadas > 0 || rescate.fallidas > 0;
+      const huboAlgo = r.ingestadas > 0 || r.actualizadas > 0 || r.reconectados > 0 || rescate.aplicadas > 0 || rescate.fallidas > 0 || tardios.porRevisar > 0;
       if (huboAlgo || opts.manual) {
         await this.prisma.cronRun.create({
           data: {
@@ -679,6 +690,7 @@ export class CronService {
             userName: opts.user?.name ?? 'Cron', count: r.reconectados,
             detail: (rescate.aplicadas || rescate.fallidas
               ? `rescate ${rescate.aplicadas} ok/${rescate.fallidas} fallo · ` : '')
+              .concat(tardios.porRevisar ? `${tardios.porRevisar} aprobado(s) en reintento por revisar · ` : '')
               .concat(r.detalle).slice(0, 1900), finishedAt: new Date(),
           },
         });

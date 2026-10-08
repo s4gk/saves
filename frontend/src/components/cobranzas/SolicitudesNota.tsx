@@ -193,7 +193,6 @@ export function SolicitudesNota({ subscriberId }: { subscriberId: string }) {
           <Field label="Motivo" required>
             <Textarea
               rows={3}
-              maxLength={500}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="Ej.: se le cobró la reconexión dos veces en la factura de agosto."
@@ -210,7 +209,7 @@ export function SolicitudesNota({ subscriberId }: { subscriberId: string }) {
       <Modal open={!!rechazar} onClose={() => setRechazar(null)} title="La nota no procede" maxWidth="max-w-md">
         <div className="flex flex-col gap-2.5">
           <Field label="¿Por qué?" required hint="Le llega a quien la pidió">
-            <Textarea rows={3} maxLength={500} value={respuesta} onChange={(e) => setRespuesta(e.target.value)} />
+            <Textarea rows={3} value={respuesta} onChange={(e) => setRespuesta(e.target.value)} />
           </Field>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setRechazar(null)} disabled={cerrando}>Volver</Button>
@@ -229,10 +228,12 @@ export function SolicitudesNota({ subscriberId }: { subscriberId: string }) {
           open
           onClose={() => setAplicar(null)}
           inicial={{ sub: cliente, type: aplicar.type, amount: aplicar.amount, description: aplicar.reason }}
-          onDone={() => {
+          onDone={(r) => {
             const s = aplicar;
             setAplicar(null);
-            void cerrar(s, "APLICADA", "Nota aplicada desde la solicitud.");
+            void cerrar(s, "APLICADA", r?.pendiente
+              ? "Nota dejada pendiente: se aplica sola a la próxima factura."
+              : "Nota aplicada desde la solicitud.");
           }}
         />
       )}

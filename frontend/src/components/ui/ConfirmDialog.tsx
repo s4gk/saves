@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Modal } from "@/components/Modal";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Field";
+import { Input, Textarea } from "@/components/ui/Field";
 import { Icon } from "@/components/Icon";
 
 /**
@@ -13,6 +13,10 @@ import { Icon } from "@/components/Icon";
  * Para acciones que tocan producción de verdad, `requireText` obliga a teclear
  * un texto exacto (normalmente el serial o el nombre del recurso). Pulsar
  * "Aceptar" por inercia es justo como se borra lo que no se quería borrar.
+ *
+ * `requireReason` pide además el PORQUÉ (mínimo 3 caracteres) y se lo pasa a
+ * `onConfirm`: en un borrado la fila desaparece y el motivo es lo único que queda
+ * para responder después "¿quién borró esto y por qué?".
  */
 export function ConfirmDialog({
   open,
@@ -26,6 +30,9 @@ export function ConfirmDialog({
   requireText,
   requireHint,
   detail,
+  requireReason = false,
+  reasonLabel = "Motivo",
+  reasonPlaceholder = "¿Por qué se elimina?",
   onConfirm,
   onClose,
 }: {
@@ -43,17 +50,24 @@ export function ConfirmDialog({
   requireHint?: React.ReactNode;
   /** Bloque secundario (comandos, consecuencias) bajo el mensaje principal. */
   detail?: React.ReactNode;
-  onConfirm: () => void;
+  /** Exige escribir el motivo; llega a `onConfirm` ya recortado. */
+  requireReason?: boolean;
+  reasonLabel?: React.ReactNode;
+  reasonPlaceholder?: string;
+  onConfirm: (reason: string) => void;
   onClose: () => void;
 }) {
   const danger = tone === "danger";
   const [tecleado, setTecleado] = useState("");
+  const [motivo, setMotivo] = useState("");
 
   // Limpiar al abrir: si no, se arrastra lo escrito en la confirmación anterior
   // y el botón aparecería ya habilitado para OTRO recurso.
-  useEffect(() => { if (open) setTecleado(""); }, [open]);
+  useEffect(() => { if (open) { setTecleado(""); setMotivo(""); } }, [open]);
 
-  const bloqueado = !!requireText && tecleado.trim() !== requireText.trim();
+  const faltaMotivo = requireReason && motivo.trim().length < 3;
+  const bloqueado = (!!requireText && tecleado.trim() !== requireText.trim()) || faltaMotivo;
+  const confirmar = () => onConfirm(motivo.trim());
 
   return (
     <Modal open={open} onClose={onClose} title={title} maxWidth="max-w-md">
@@ -68,14 +82,29 @@ export function ConfirmDialog({
 
       {detail && <div className="mt-3">{detail}</div>}
 
+      {requireReason && (
+        <label className="mt-4 block text-[12px] text-text-secondary">
+          {reasonLabel} <span className="text-error-text">*</span>
+          <Textarea
+            autoFocus
+            value={motivo}
+            onChange={(e) => setMotivo(e.target.value)}
+            placeholder={reasonPlaceholder}
+            maxLength={500}
+            rows={3}
+            className="mt-1"
+          />
+        </label>
+      )}
+
       {requireText && (
         <label className="mt-4 block text-[12px] text-text-secondary">
           {requireHint ?? <>Escriba <span className="font-mono font-semibold text-text-primary">{requireText}</span> para confirmar</>}
           <Input
-            autoFocus
+            autoFocus={!requireReason}
             value={tecleado}
             onChange={(e) => setTecleado(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !bloqueado && !busy) onConfirm(); }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !bloqueado && !busy) confirmar(); }}
             placeholder={requireText}
             className="mt-1 font-mono"
           />
@@ -91,7 +120,7 @@ export function ConfirmDialog({
         </Button>
         <Button
           variant={danger ? "danger" : "primary"}
-          onClick={onConfirm}
+          onClick={confirmar}
           disabled={busy || bloqueado}
           className="w-full sm:w-auto"
         >

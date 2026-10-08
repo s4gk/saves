@@ -16,6 +16,7 @@ type Warehouse = { id: string; name: string; description?: string | null; equipm
 type EquipItem = {
   id: string; code: number; mac: string | null; serial: string | null; brand: string | null;
   status: string | null; observation?: string | null; warehouse: string | null; client: string | null; subscriberId: string | null; genieacs: boolean;
+  category?: string | null; equipmentType?: string | null;
 };
 type EquipResp = { items: EquipItem[]; total: number; page: number; pageSize: number; pages: number };
 

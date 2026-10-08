@@ -10,6 +10,7 @@ import { BillingService } from '../../billing/billing.service';
 import { DashboardService } from '../../dashboard/dashboard.service';
 import { ChatbotDocsService, enviarDoc, esReportePdf, REPORTES_PDF } from '../chatbot-docs.service';
 import { canAny, cop, fecha, gated, REPORTES_PERMISOS, safe } from './toolset.util';
+import { SEDE_ACTIVA } from '../../common/sedes-activas';
 
 /** Reportes y dashboard son de gerencia, igual que en la web. */
 const GERENCIA = REPORTES_PERMISOS;
@@ -57,12 +58,12 @@ export class InternoReportesToolset implements Toolset {
       {
         name: 'resumen_negocio',
         description:
-          'Resumen general del negocio (dashboard): abonados, cartera, recaudo y tickets. Úsala para "cómo vamos", "resumen", "indicadores".',
-        input_schema: { type: 'object', properties: {} },
+          'Resumen general del negocio: las MISMAS cifras del Tablero de SAVES (facturado, recaudo, egresos, órdenes, abonados nuevos, retiros, cartera y base de abonados), para el periodo pedido (por defecto el mes en curso). Úsala para "cómo vamos", "resumen", "indicadores". Se puede acotar a una SEDE.',
+        input_schema: { type: 'object', properties: { ...periodo, ...sedeProp } },
       },
       {
         name: 'reporte_recaudo',
-        description: 'Recaudo del periodo indicado, por caja y por método de pago. Se puede acotar a una SEDE.',
+        description: 'Recaudo (plata que entró) del periodo, igual que la tarjeta Recaudo del Tablero de SAVES: total en pesos, número de pagos, por canal (ventanilla, Wompi, bancos) y por cuenta. Se puede acotar a una SEDE.',
         input_schema: { type: 'object', properties: { ...periodo, ...sedeProp } },
       },
       {
@@ -80,7 +81,7 @@ export class InternoReportesToolset implements Toolset {
       },
       {
         name: 'reporte_cortes',
-        description: 'Cortes, activaciones, suspensiones y retiros del periodo. Se puede acotar a una SEDE.',
+        description: 'Cortes, reconexiones, suspensiones, retiros e instalaciones del periodo, contados desde las órdenes resueltas, por servicio (Internet/TV/Combo) y con confirmación del router. Se puede acotar a una SEDE.',
         input_schema: { type: 'object', properties: { ...periodo, ...sedeProp } },
       },
       {
@@ -103,8 +104,9 @@ export class InternoReportesToolset implements Toolset {
         name: 'reporte_ordenes',
         description:
           'ÓRDENES DE SERVICIO / de soporte técnico: cuántas hubo EN TOTAL y cuántas de CADA TIPO ' +
-          '(instalación, reconexión, cambio de clave, revisión, corte, traslado…), más el reparto por estado ' +
-          'y por técnico asignado. Se puede acotar A UNA SEDE con el parámetro sede (Villanueva, Yopal, ' +
+          '(instalación, cambio de clave, revisión, traslado…), más el reparto por estado, por técnico asignado ' +
+          'y la evolución MES A MES (creadas, reclamos, días para resolver). NO incluye cortes ni reconexiones: ' +
+          'para esos usa reporte_cortes. Se puede acotar A UNA SEDE con el parámetro sede (Villanueva, Yopal, ' +
           'Aguazul, Monterrey, Tauramena, Mocoa, Villavicencio). ' +
           'Es CANTIDAD de trabajo, no rendimiento (para eso usa reporte_tecnicos).',
         input_schema: {
@@ -323,23 +325,37 @@ export class InternoReportesToolset implements Toolset {
     // nada — un reporte de la sede equivocada tiene cifras verosímiles y no hay
     // forma de notarlo desde el chat.
     let sedeId: string | undefined;
+    // El Tablero filtra por el número de sede del legacy, no por el id.
+    let sedeTablero: string | undefined;
     if (input.sede && name !== 'enviar_pdf_reporte') {
       const hallada = await this.resolverSede(String(input.sede));
       if (typeof hallada === 'string') return hallada;
       sedeId = hallada.id;
+      sedeTablero = hallada.legacyId != null ? String(hallada.legacyId) : undefined;
     }
 
     switch (name) {
+      // Recaudo y resumen salen del TABLERO (`DashboardService.summary`), la misma
+      // función que pinta la pantalla principal de SAVES: lo que dice el bot por
+      // WhatsApp tiene que ser lo que el usuario ve en el sistema, al peso. Antes el
+      // recaudo salía de `reports.recaudo`, que suma el arrastre de caja y las
+      // consignaciones entre cuentas: sept-2026 daba 745 M contra 304 M del Tablero.
       case 'resumen_negocio':
-        return safe(async () => this.compacto(await this.dashboard.summary()));
+        return safe(async () => this.resumen(await this.dashboard.summary(desde, hasta, sedeTablero)));
       case 'reporte_recaudo':
-        return safe(async () => this.compacto(await this.reports.recaudo(desde, hasta, sedeId)));
+        return safe(async () => this.recaudo(await this.dashboard.summary(desde, hasta, sedeTablero), input.sede ? String(input.sede) : null));
       case 'top_deudores':
         return safe(async () => this.deudores(await this.reports.topDeudores(sedeId)));
       case 'reporte_servicios':
         return safe(async () => this.estadoClientes(await this.reports.estadisticasServicios()));
       case 'reporte_cortes':
-        return safe(async () => this.compacto(await this.reports.cortesActivaciones(desde, hasta, sedeId)));
+        return safe(async () => {
+          // Sin el detalle cliente a cliente (miles de filas): el bot necesita las cifras y
+          // las notas. Sin pasar por `compacto`, que lo cortaría a la mitad de las notas:
+          // lo que queda tiene tamaño fijo (≤ 11 filas).
+          const { detalle, porDia, opciones, ...r } = await this.reports.cortesActivaciones(desde, hasta, sedeId);
+          return JSON.stringify({ ...r, routerSinOrden: { cortes: r.routerSinOrden.cortes, reconexiones: r.routerSinOrden.reconexiones } });
+        });
       case 'reporte_tecnicos':
         return safe(async () => this.tecnicos(await this.performance.tecnicos(desde, hasta)));
       case 'reporte_ordenes':
@@ -349,7 +365,12 @@ export class InternoReportesToolset implements Toolset {
       case 'reporte_ingresos_egresos':
         return safe(async () => this.compacto(await this.reports.ingresosEgresos()));
       case 'reporte_movimientos_clientes':
-        return safe(async () => this.compacto(await this.reports.movimientos(desde, hasta, sedeId)));
+        return safe(async () => {
+          // Sin `opciones` (la lista de sedes no le aporta nada y ocupa): sí con `porSede`,
+          // para que "¿de qué sede?" se conteste sin volver a preguntar.
+          const { opciones, ...r } = await this.reports.movimientos(desde, hasta, sedeId);
+          return this.compacto(r);
+        });
       case 'reporte_facturacion':
         return safe(async () => this.compacto(await this.billing.stats({ from: desde, to: hasta })));
       case 'reporte_iva':
@@ -501,6 +522,10 @@ export class InternoReportesToolset implements Toolset {
     return [
       `Órdenes de servicio${d.sede ? ` · sede ${d.sede}` : ' · todas las sedes'} · ${fecha(desde)} a ${fecha(hasta)}`,
       `TOTAL: ${d.total} orden(es), de ${tipos.length} tipo(s) distintos.`,
+      `No incluye cortes ni reconexiones (${d.excluidas ?? 0} en el periodo): para esos está reporte_cortes.`,
+      (d.mesAMes ?? []).length
+        ? `Mes a mes (creadas · reclamos · días promedio para resolver · % resueltas en ≤2 días):\n${d.mesAMes.map((m: any) => `• ${m.mes}${m.enCurso ? ' (en curso)' : ''}: ${m.creadas} · ${m.reclamos} · ${m.diasPromedio ?? '—'} · ${m.pctEnDosDias ?? '—'}%`).join('\n')}`
+        : '',
       `Por estado: ${estados}`,
       `Por tipo (todos):\n${tipos.join('\n')}`,
       d.sinAbonado
@@ -517,9 +542,9 @@ export class InternoReportesToolset implements Toolset {
    * de la sede equivocada es un error que no se ve —las cifras parecen razonables— y
    * es justo lo que pasó cuando se pidió "las órdenes de Villanueva" y llegó otra cosa.
    */
-  private async resolverSede(nombre: string): Promise<{ id: string; nombre: string } | string> {
+  private async resolverSede(nombre: string): Promise<{ id: string; nombre: string; legacyId: number | null } | string> {
     const q = this.normalizar(nombre);
-    const sedes = await this.prisma.branch.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } });
+    const sedes = await this.prisma.branch.findMany({ where: SEDE_ACTIVA, select: { id: true, name: true, legacyId: true }, orderBy: { name: 'asc' } });
     const calzan = sedes.filter((b) => this.normalizar(b.name).includes(q));
 
     if (!calzan.length) {
@@ -528,7 +553,7 @@ export class InternoReportesToolset implements Toolset {
     if (calzan.length > 1) {
       return `"${nombre}" calza con varias sedes: ${calzan.map((b) => b.name).join(', ')}. Pregúntale a cuál se refiere.`;
     }
-    return { id: calzan[0].id, nombre: calzan[0].name };
+    return { id: calzan[0].id, nombre: calzan[0].name, legacyId: calzan[0].legacyId };
   }
 
   /** Sin tildes, sin mayúsculas y sin espacios de más: los nombres llegan como sea. */
@@ -833,6 +858,43 @@ export class InternoReportesToolset implements Toolset {
    * se entrega el JSON compacto y el modelo lo redacta. Se recorta para no reventar
    * el contexto con series largas.
    */
+  /**
+   * El recaudo del Tablero, con nombres que no se presten a confusión: con `total`/`count`
+   * el modelo contestó "se registraron 2.010 ingresos" (el número de pagos) cuando le
+   * preguntaron por la plata. El desglose es el de la tarjeta «Recaudo por canal».
+   */
+  private recaudo(t: Awaited<ReturnType<DashboardService['summary']>>, sede: string | null): string {
+    const canales = t.tesoreria.canales;
+    return this.compacto({
+      periodo: `${t.rango.desde} a ${t.rango.hasta}`,
+      sede: sede ?? 'todas',
+      recaudoPesos: t.tesoreria.ingresos,
+      numeroDePagos: canales.reduce((a, c) => a + c.n, 0),
+      porCanal: canales.map((c) => ({ canal: c.canal, pesos: c.total, pagos: c.n })),
+      porCuenta: canales.flatMap((c) => c.cuentas).sort((a, b) => b.total - a.total).slice(0, 12)
+        .map((c) => ({ cuenta: c.nombre, pesos: c.total, pagos: c.n })),
+      periodoAnteriorPesos: t.comparacion.ingresos,
+      nota: 'Mismo número que la tarjeta Recaudo del Tablero de SAVES (sin arrastre de caja ni consignaciones entre cuentas).',
+    });
+  }
+
+  /** Las tarjetas del Tablero para el periodo: las mismas cifras que ve el usuario. */
+  private resumen(t: Awaited<ReturnType<DashboardService['summary']>>): string {
+    return this.compacto({
+      periodo: `${t.rango.desde} a ${t.rango.hasta}`,
+      facturadoPesos: t.facturacion.total,
+      recaudoPesos: t.tesoreria.ingresos,
+      egresosPesos: t.tesoreria.egresos,
+      ordenesCreadas: t.soporte.total,
+      abonadosNuevos: t.nuevosAbonados,
+      retiros: t.retirosAbonados,
+      periodoAnterior: t.comparacion,
+      stock: Object.fromEntries(Object.entries(t).filter(([k]) =>
+        !['rango', 'comparacion', 'calculadoEn', 'sede', 'sedes', 'serieMensual', 'ventasPorSede', 'ordenesPorTipo',
+          'facturacion', 'tesoreria', 'soporte', 'compras', 'nuevosAbonados', 'retirosAbonados'].includes(k))),
+    });
+  }
+
   private compacto(data: unknown): string {
     const json = JSON.stringify(data, (_k, v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v));
     const max = 2500;

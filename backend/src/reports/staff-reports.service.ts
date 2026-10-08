@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { moduloDe, normalizarRuta } from './audit-normalize';
 import { describir, fraseSinNombres } from '../common/audit/bitacora-descripcion';
 import { afiliadoresDisponibles } from '../staff/afiliadores';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Reportes de personal: qué hizo cada funcionario con la plata y con el sistema.
@@ -227,7 +228,7 @@ export class StaffReportsService {
       notaSede: sede
         ? 'Filtrado por sede: una anulación hereda la sede del ABONADO de su movimiento, así que las anulaciones de ingresos o egresos sueltos (sin abonado) NO aparecen aquí.'
         : null,
-      opciones: { sedes: (await this.prisma.branch.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })).map((b) => ({ id: b.id, nombre: b.name })) },
+      opciones: { sedes: (await this.prisma.branch.findMany({ where: SEDE_ACTIVA, select: { id: true, name: true }, orderBy: { name: 'asc' } })).map((b) => ({ id: b.id, nombre: b.name })) },
       total: casos.length,
       monto,
       /** Anulaciones sobre el total de movimientos del periodo. Contexto: sin esto, "62" no dice nada. */
@@ -361,7 +362,7 @@ export class StaffReportsService {
         },
       }),
       afiliadoresDisponibles(this.prisma),
-      this.prisma.branch.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      this.prisma.branch.findMany({ where: SEDE_ACTIVA, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
 
     const clientes = filas.map((c) => ({

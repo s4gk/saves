@@ -325,14 +325,29 @@ describe('el estado de la ficha no es prueba de que tenga servicio', () => {
     expect(mikrotik.reconnect).toHaveBeenCalled();
   });
 
-  it('si el router contesta que está bien, no inventa una reconexión', async () => {
-    const { srv, mikrotik } = armar(
+  it('si el router contesta que está bien, no reconecta; el corte pendiente se cierra sin cobro', async () => {
+    // 53574 y 2942 (sep-2026): cortados por el legacy, devueltos por la activación masiva
+    // del 15-09; pagaron y no quedó ninguna reconexión — "el servicio sí está activo".
+    const { srv, mikrotik, ordenes } = armar(
       abonado({ status: 'ACTIVO', services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
       { live: { inMorosos: false, secretDisabled: false }, ordenes: [{ type: 'Corte Internet' }] },
     );
     const r = await srv.porPago('sub-1');
     expect(mikrotik.reconnect).not.toHaveBeenCalled();
+    expect(r.aplica).toBe(true);
+    expect(r.cobro).toBeUndefined();
+    expect(ordenes.registrarResuelta).toHaveBeenCalledTimes(1);
+    expect(ordenes.registrarResuelta.mock.calls[0][0].type).toBe('Reconexion Internet');
+  });
+
+  it('router bien y sin corte en el rastro: nada', async () => {
+    const { srv, ordenes } = armar(
+      abonado({ status: 'ACTIVO', services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
+      { live: { inMorosos: false, secretDisabled: false }, ordenes: [{ type: 'Reconexion Internet' }, { type: 'Corte Internet' }] },
+    );
+    const r = await srv.porPago('sub-1');
     expect(r.aplica).toBe(false);
+    expect(ordenes.registrarResuelta).not.toHaveBeenCalled();
   });
 
   it('sin respuesta del router, una orden de corte sin reconexión posterior basta', async () => {
@@ -683,9 +698,35 @@ describe('si el router ya lo tenía al aire, no es una reconexión', () => {
     expect(ordenes.registrarResuelta).toHaveBeenCalledTimes(1);
   });
 
-  it('en lote tampoco registra al que ya estaba al aire', async () => {
+  it('ficha CORTADO que el router ya tenía al aire: ACTIVO + orden resuelta, sin prorrateo', async () => {
+    const { srv, mikrotik, ordenes, escrituras } = armar(
+      abonado({ status: 'CORTADO', services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
+    );
+    alAire(mikrotik);
+    const r = await srv.porPago('sub-1');
+    expect(r.aplica).toBe(true);
+    expect(r.registros).toHaveLength(1);
+    expect(ordenes.registrarResuelta.mock.calls[0][0].type).toBe('Reconexion Internet');
+    expect(escrituras.estado.some((e) => e.status === 'ACTIVO')).toBe(true);
+    expect(r.cobro).toBeUndefined();
+  });
+
+  it('en lote, la ficha CORTADO al aire también cierra su corte', async () => {
     const { srv, mikrotik, ordenes } = armar(
-      abonado({ services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
+      abonado({ status: 'CORTADO', services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
+    );
+    mikrotik.reconnectBatch.mockResolvedValue({
+      total: 1, ok: 1, results: [{ ok: true, dryRun: false, subscriberId: 'sub-1', steps: [], message: '', wasCut: false }],
+    });
+    const r = await srv.porPagoLote(['sub-1']);
+    expect(r).toMatchObject({ internet: 0, registros: 1, cobros: 0 });
+    expect(ordenes.registrarResuelta).toHaveBeenCalledTimes(1);
+  });
+
+  it('en lote no registra al que ya estaba al aire sin ficha ni rastro de corte', async () => {
+    const { srv, mikrotik, ordenes } = armar(
+      abonado({ status: 'ACTIVO', services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
+      { ordenes: [{ type: 'Corte Internet', subscriberId: 'otro' }] },
     );
     mikrotik.reconnectBatch.mockResolvedValue({
       total: 1, ok: 1, results: [{ ok: true, dryRun: false, subscriberId: 'sub-1', steps: [], message: '', wasCut: false }],
@@ -770,6 +811,28 @@ describe('el corte se levanta también en la factura', () => {
     expect(limpieza).toBeTruthy();
     expect(limpieza.data.estadoTv).toBeNull();
     expect(limpieza.data).not.toHaveProperty('estadoCombo');
+  });
+
+  // Abonado 15296 (25-sep): cortado en el masivo del 22, alguien lo devolvió a ACTIVOS
+  // sin limpiar la factura; pagó, el router dijo "al aire" y la ficha lo siguió
+  // pintando cortado.
+  it('si el router ya lo tiene navegando, limpia la marca de corte de la factura', async () => {
+    const { srv, mikrotik, escrituras } = armar(
+      abonado({ status: 'ACTIVO', services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }),
+      { live: { inMorosos: false, secretDisabled: false } },
+    );
+    const r = await srv.porPago('sub-1');
+    expect(mikrotik.reconnect).not.toHaveBeenCalled();
+    expect(r.aplica).toBe(false);
+    const limpieza = escrituras.facturas.find((f) => 'estadoCombo' in (f.data ?? {}));
+    expect(limpieza?.data.estadoCombo).toBeNull();
+  });
+
+  it('también cuando la reconexión encuentra que el router ya lo tenía al aire', async () => {
+    const { srv, mikrotik, escrituras } = armar(abonado({ services: [{ id: 'sv-1', kind: 'INTERNET', status: 'ACTIVO' }] }));
+    mikrotik.reconnect.mockResolvedValue({ ok: true, dryRun: false, action: 'RECONNECT', subscriberId: 'sub-1', steps: [], message: 'ok', wasCut: false });
+    await srv.porPago('sub-1');
+    expect(escrituras.facturas.find((f) => 'estadoCombo' in (f.data ?? {}))?.data.estadoCombo).toBeNull();
   });
 
   it('en dry-run NO toca la factura: no se tocó ningún equipo', async () => {

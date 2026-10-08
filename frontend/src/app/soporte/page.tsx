@@ -20,7 +20,7 @@ import { ChipServicio } from "@/components/soporte/ChipServicio";
 import { MisOrdenes } from "@/components/soporte/MisOrdenes";
 import { AvisoTurno } from "@/components/soporte/AvisoTurno";
 import { useAuth } from "@/context/AuthProvider";
-import { esTecnico, puedeEditarOrdenes, type Paged, type TicketRow, type SupportStats, SERVICIO_CONTRATADO, SERVICIOS_CONTRATADOS, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, TICKET_TYPES, TICKET_PRIORITIES, TICKET_PRIORITY_TONE } from "@/lib/support";
+import { esTecnico, puedeEditarOrdenes, type Paged, type TicketRow, type SupportStats, SERVICIO_CONTRATADO, SERVICIOS_CONTRATADOS, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, TICKET_TYPES, ticketTypeLabel, TICKET_PRIORITIES, TICKET_PRIORITY_TONE } from "@/lib/support";
 import { useRequest } from "@/lib/useRequest";
 import { useOrden } from "@/lib/useOrden";
 import { ordenDeTexto, useFiltrosEnUrl, useFiltrosRecordados } from "@/lib/useFiltrosUrl";
@@ -78,7 +78,7 @@ function SoporteGeneral() {
 }
 
 function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, string>; recordado: boolean }) {
-  const { loading: authLoading, authFetch, user, sedeScoped } = useAuth();
+  const { loading: authLoading, authFetch, user } = useAuth();
   const [stats, setStats] = useState<SupportStats | null>(null);
   const [search, setSearch] = useState(urlInicial.q ?? "");
   // Los filtros de la barra son de selección MÚLTIPLE: son listas, y en la URL (y
@@ -92,7 +92,8 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
   const [tec, setTec] = useState(listaDeUrl(urlInicial.tec));
   const [priority, setPriority] = useState(listaDeUrl(urlInicial.prioridad));
   const [sede, setSede] = useState(listaDeUrl(urlInicial.sede));
-  const [options, setOptions] = useState<{ sedes: { id: string; name: string }[]; types: string[] }>({ sedes: [], types: [] });
+  const [barrio, setBarrio] = useState(listaDeUrl(urlInicial.barrio));
+  const [options, setOptions] = useState<{ sedes: { id: string; name: string }[]; types: string[]; barrios?: { value: string; name: string; sedeId: string | null; sede: string | null }[] }>({ sedes: [], types: [] });
   const [from, setFrom] = useState(urlInicial.desde ?? "");
   const [to, setTo] = useState(urlInicial.hasta ?? "");
   const [all, setAll] = useState(urlInicial.todo === "1");
@@ -107,7 +108,7 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
   // usan tanto en la petición como en las dependencias: un array es nuevo en cada
   // render y compararlo por referencia dispararía la carga sin parar.
   const kStatus = status.join(","), kType = type.join(","), kTec = tec.join(",");
-  const kPriority = priority.join(","), kSede = sede.join(","), kServicio = servicio.join(",");
+  const kPriority = priority.join(","), kSede = sede.join(","), kServicio = servicio.join(","), kBarrio = barrio.join(",");
 
   const reloadStats = useCallback(() => { void authFetch("/support/stats").then(objetoJson).then(setStats).catch(() => {}); }, [authFetch]);
   useEffect(() => { if (!authLoading) reloadStats(); }, [authLoading, reloadStats]);
@@ -128,11 +129,12 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
       if (kTec) qs.set("tec", kTec);
       if (kPriority) qs.set("priority", kPriority);
       if (kSede) qs.set("sede", kSede);
+      if (kBarrio) qs.set("barrio", kBarrio);
       if (all) qs.set("all", "1");
       else { if (from) qs.set("from", from); if (to) qs.set("to", to); }
       return `/support/tickets?${qs}`;
     },
-    [page, pageSize, search, kStatus, kType, kServicio, kTec, kPriority, kSede, from, to, all, orden.clave],
+    [page, pageSize, search, kStatus, kType, kServicio, kTec, kPriority, kSede, kBarrio, from, to, all, orden.clave],
     { debounceMs: search ? 350 : 0, saltar: authLoading },
   );
 
@@ -142,11 +144,11 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
   useEffect(() => {
     if (primerRender.current) { primerRender.current = false; return; }
     setPage(1);
-  }, [search, kStatus, kType, kServicio, kTec, kPriority, kSede, from, to, all, pageSize, orden.clave]);
+  }, [search, kStatus, kType, kServicio, kTec, kPriority, kSede, kBarrio, from, to, all, pageSize, orden.clave]);
 
   // Y de vuelta: lo que está puesto en pantalla se refleja en la dirección.
   useFiltrosEnUrl({
-    q: search.trim(), estado: kStatus, detalle: kType, servicio: kServicio, tec: kTec, prioridad: kPriority, sede: kSede,
+    q: search.trim(), estado: kStatus, detalle: kType, servicio: kServicio, tec: kTec, prioridad: kPriority, sede: kSede, barrio: kBarrio,
     desde: all ? "" : from, hasta: all ? "" : to, todo: all ? "1" : "",
     pag: page > 1 ? page : "", tam: pageSize !== 25 ? pageSize : "", ord: orden.clave,
   });
@@ -155,16 +157,16 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
   // filtro de estado, y "Limpiar (7)" no querría decir nada.
   const activeFilters = useMemo(
     () => [search.trim(), from, to].filter(Boolean).length
-      + [status, type, servicio, tec, priority, sede].filter((f) => f.length > 0).length
+      + [status, type, servicio, tec, priority, sede, barrio].filter((f) => f.length > 0).length
       + (all ? 1 : 0),
-    [search, status, type, servicio, tec, priority, sede, from, to, all],
+    [search, status, type, servicio, tec, priority, sede, barrio, from, to, all],
   );
   // El botón "Filtros" abre el modal de fechas → su badge cuenta el periodo.
   const dateFilters = useMemo(
     () => [from, to].filter(Boolean).length + (all ? 1 : 0),
     [from, to, all],
   );
-  const clearAll = () => { setSearch(""); setStatus([]); setType([]); setServicio([]); setTec([]); setPriority([]); setSede([]); setFrom(""); setTo(""); setAll(false); };
+  const clearAll = () => { setSearch(""); setStatus([]); setType([]); setServicio([]); setTec([]); setPriority([]); setSede([]); setBarrio([]); setFrom(""); setTo(""); setAll(false); };
 
   /** Descarga el Excel con los MISMOS filtros que están puestos en pantalla. */
   const exportar = async () => {
@@ -178,6 +180,7 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
       if (kTec) qs.set("tec", kTec);
       if (kPriority) qs.set("priority", kPriority);
       if (kSede) qs.set("sede", kSede);
+      if (kBarrio) qs.set("barrio", kBarrio);
       if (all) qs.set("all", "1");
       else { if (from) qs.set("from", from); if (to) qs.set("to", to); }
       const res = await authFetch(`/support/tickets/export.xlsx?${qs.toString()}`);
@@ -236,15 +239,22 @@ function ListaDeOrdenes({ urlInicial, recordado }: { urlInicial: Record<string, 
         />
         <MultiSelect
           label="Detalles" todos="Todos los detalles" value={type} onChange={setType} width={280}
-          options={TICKET_TYPES.map((t) => ({ value: t, label: t }))}
+          options={TICKET_TYPES.map((t) => ({ value: t, label: ticketTypeLabel(t) }))}
         />
-        {/* Quien está acotado a su sede no elige sede: sus órdenes ya vienen filtradas. */}
-        {!sedeScoped && (
-          <MultiSelect
-            label="Sedes" todos="Todas las sedes" value={sede} onChange={setSede}
-            options={options.sedes.map((s) => ({ value: s.id, label: s.name }))}
-          />
-        )}
+        {/* Para todos, también la cajera (2026-09-24): la lista trae todas las sedes. */}
+        <MultiSelect
+          label="Sedes" todos="Todas las sedes" value={sede} onChange={setSede}
+          options={options.sedes.map((s) => ({ value: s.id, label: s.name }))}
+        />
+        {/* Con sede elegida, sólo sus barrios; sin sede, todos con su sede al lado
+            (hay nombres repetidos entre ciudades). Los ya marcados se quedan
+            aunque cambie la sede, para que no desaparezca un filtro puesto. */}
+        <MultiSelect
+          label="Barrios" todos="Todos los barrios" value={barrio} onChange={setBarrio} width={300}
+          options={(options.barrios ?? [])
+            .filter((b) => sede.length === 0 || (b.sedeId != null && sede.includes(b.sedeId)) || barrio.includes(b.value))
+            .map((b) => ({ value: b.value, label: b.sede ? `${b.name} · ${b.sede}` : b.name }))}
+        />
         <MultiSelect
           label="Prioridad" todos="Toda prioridad" value={priority} onChange={setPriority}
           options={TICKET_PRIORITIES.map((p) => ({ value: p, label: p }))}

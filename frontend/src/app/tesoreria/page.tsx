@@ -241,7 +241,9 @@ function Movimientos({ urlInicial, recordado }: { urlInicial: Record<string, str
         <Select value={cashAccountId} onChange={(e) => setCashAccountId(e.target.value)} className="w-auto">
           <option value="">Todas las cajas</option>
           {accounts
-            .filter((a) => sede === "" || String(a.branchLegacy) === sede)
+            // Con sede elegida también los bancos: el filtro de sede trae los pagos por
+            // banco de sus clientes, y desde el tablero se llega con `sede` + `caja=Wompi`.
+            .filter((a) => sede === "" || String(a.branchLegacy) === sede || a.branchLegacy === 0)
             .map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </Select>
         {hayFiltros && (

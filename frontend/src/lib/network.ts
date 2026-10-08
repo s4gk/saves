@@ -9,7 +9,16 @@ export type Olt = { id: string; name: string; brand: string; ip: string; tech: s
 // Ocupados. No son lo mismo: una NAP recién creada tiene 16 registrados y 0 usados.
 export type Nap = { id: string; name: string; branchId: string | null; branch: string | null; vlanId: string | null; vlan: number | null; portCount: number; portsRegistered: number; portsUsed?: number; address: string; gps: { lat: string; lng: string } | null };
 export type NapPort = { id: string; port: number; status: string; nap: string | null; client: string | null; subscriberId: string | null; abonado: number | null; detail: string };
-export type BranchOpt = { id: string; name: string; naps: number; vlans: number };
+export type BranchOpt = {
+  id: string;
+  /** gid del legacy: es lo que trae el token en `user.sedes`. */
+  legacyId: number;
+  name: string;
+  naps: number;
+  vlans: number;
+  /** Oficina de la sede; el mapa vuela aquí al elegirla. */
+  office: { lat: number; lng: number } | null;
+};
 export type VlanOpt = { id: string; vlan: number; detail: string };
 // La misma respuesta de /network/vlans, con lo que sólo mira la pantalla de administración.
 export type Vlan = VlanOpt & { olt: string | null; oltId: string | null; tray: number | null; oltPort: number | null; branchId: string | null; branch: string | null; naps: number };
@@ -52,7 +61,7 @@ export type ConfigurarVlanRes = {
   despues?: SaludVlan | null;
 };
 export type Onu = { id: string; olt: string | null; sn: string | null; slot: number | null; port: number | null; ontId: number | null; runState: string | null; rxPower: string | null; syncState: string; client: string | null; subscriberId: string | null; lastSync: string | null };
-export type Equip = { id: string; code: number; mac: string | null; serial: string | null; brand: string | null; status: string | null; observation?: string | null; warehouse: string | null; client: string | null; subscriberId: string | null; installType: string | null; genieacs: boolean; /** Día en que se recogió del cliente; null si nunca volvió de una devolución. */ returnedAt: string | null };
+export type Equip = { id: string; code: number; mac: string | null; serial: string | null; brand: string | null; status: string | null; observation?: string | null; warehouse: string | null; client: string | null; subscriberId: string | null; installType: string | null; category?: string | null; equipmentType?: string | null; genieacs: boolean; /** Día en que se recogió del cliente; null si nunca volvió de una devolución. */ returnedAt: string | null };
 export type Paged<T> = { items: T[]; total: number; page: number; pageSize: number; pages: number };
 
 // --- Corte / reconexión Mikrotik ---
@@ -71,6 +80,7 @@ export type MikrotikActionResult = {
     ip?: string;
     inActivos?: boolean;
     inMorosos?: boolean;
+    morososEn?: string[];
   };
   message: string;
   error?: string;

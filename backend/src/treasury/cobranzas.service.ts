@@ -26,7 +26,7 @@ import { centroActivo } from '../common/centro-costo';
 import { conceptoMesAdelantado, periodoDeFactura } from '../common/concepto-factura';
 import { revertirDescuentosVencidos } from '../promotions/revertir-descuentos-vencidos';
 import {
-  aplicarPromocionesAlCobrar, descuentosDePromocionPendientes,
+  aplicarPromocionesAlCobrar, descuentosDePromocionPendientes, finMinimoConGracia,
 } from '../promotions/descuento-al-cobrar';
 import {
   aplicarAnticipos, mesesCubiertos, propuestaAdelanto, registrarAnticipo,
@@ -454,7 +454,14 @@ export class CobranzasService {
    */
   async collect(
     dto: CollectDto, user: AuthUser,
-    opts?: { reconectar?: boolean; cajaPropiaSiFalta?: boolean; fechaDeVentanilla?: boolean; esperaReconexionMs?: number },
+    opts?: {
+      reconectar?: boolean; cajaPropiaSiFalta?: boolean; fechaDeVentanilla?: boolean; esperaReconexionMs?: number;
+      /**
+       * Días hábiles que una promoción sigue valiendo después de terminar. Sólo el
+       * cargue por convenio lo pone (`DIAS_GRACIA_CONVENIO`): el banco reporta tarde.
+       */
+      graciaPromoDiasHabiles?: number;
+    },
   ) {
     const montoPedido = round2(Number(dto.amount));
     if (!(montoPedido > 0)) throw new BadRequestException('El monto debe ser mayor a cero');
@@ -479,6 +486,11 @@ export class CobranzasService {
       : null);
     const payDate = dto.date ? dateOnly(dto.date) : dateOnly(hoyColombia());
     if (opts?.fechaDeVentanilla && dto.date) await this.exigirFechaDeVentanilla(payDate, cashAccountId, esCajera(user) ? 'Cash' : dto.method);
+    // Gracia de las promociones (convenio): lo que terminó desde esta fecha sigue
+    // valiendo, para conceder y para no retirar. Sin gracia, la regla de siempre.
+    const finMinimoPromo = opts?.graciaPromoDiasHabiles
+      ? finMinimoConGracia(payDate, opts.graciaPromoDiasHabiles)
+      : undefined;
 
     const result = await this.prisma.$transaction(async (tx) => {
       // Todo lo que sigue —leer saldos, repartir y escribir— va DENTRO de la
@@ -503,6 +515,7 @@ export class CobranzasService {
       // dejaría un saldo fantasma.
       const descuentosRetirados = await revertirDescuentosVencidos(tx, dto.subscriberId, {
         editedBy: user?.name ?? user?.email ?? null,
+        finMinimo: finMinimoPromo,
       });
 
       let amount = montoPedido;
@@ -551,7 +564,7 @@ export class CobranzasService {
       const promo = soloAnticipo
         ? { facturas: [] as { tid: number; descuento: number; promocion: string }[], total: 0 }
         : await aplicarPromocionesAlCobrar(tx, dto.subscriberId, invoices, {
-            payDate, monto: amount, editedBy: user?.name ?? user?.email ?? null,
+            payDate, monto: amount, editedBy: user?.name ?? user?.email ?? null, finMinimo: finMinimoPromo,
           });
       if (promo.facturas.length) {
         // Las notas cambiaron los totales: se releen para que el reparto no trabaje

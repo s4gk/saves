@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../auth/current-user.decorator';
 import { RouterosClient, RouterosError, RosRow } from './routeros/routeros-client';
 import { decryptSecret, encryptSecret } from '../common/secret-box';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * MikrotikAdminService — clon de `application/controllers/Mikrotiks.php` del legacy.
@@ -124,6 +125,7 @@ export class MikrotikAdminService {
   /** Sedes disponibles para el select del formulario (id + gid legacy). */
   async branches() {
     const rows = await this.prisma.branch.findMany({
+      where: SEDE_ACTIVA,
       orderBy: { name: 'asc' },
       select: { id: true, name: true, legacyId: true },
     });

@@ -6,13 +6,12 @@ import { Button } from "@/components/ui/Button";
 import { Input, Select, Textarea, Field } from "@/components/ui/Field";
 import { Icon } from "@/components/Icon";
 import { Badge } from "@/components/ui/Badge";
-import { Segmented } from "@/components/ui/Segmented";
 import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
 import { mensajeDeError } from "@/lib/errores";
 import { useValidacion, requerido, cuando } from "@/lib/useValidacion";
 import { fullCurrency } from "@/lib/format";
-import { type Bundle, type Plan, type ServiceKind, SERVICE_KIND_LABEL } from "@/lib/plans";
+import { type Bundle, type Plan, SERVICE_KIND_LABEL } from "@/lib/plans";
 // Las casillas de la dirección (y sus catálogos encadenados) viven aparte: las
 // comparte con la orden de traslado, que captura a dónde se muda el cliente.
 import { DireccionFields, NOM_KEYS, direccionArmada } from "@/components/subscribers/DireccionFields";
@@ -57,8 +56,6 @@ const clavePppDe = (doc: any) => String(doc ?? "").replace(/[^A-Za-z0-9]/g, "");
 /** Etiqueta comercial de la única tecnología que se vende hoy (backend: GPON). */
 const ETIQUETA_FTTH = "FTTH (fibra óptica)";
 
-/** Orden en que se ofrecen los servicios del catálogo (igual que CambiarPlanModal). */
-const KIND_ORDER: ServiceKind[] = ["INTERNET", "TV", "PUNTOS", "STREAMING"];
 
 const EMPTY: Record<string, any> = {
   abonado: "", firstName: "", secondName: "", lastName1: "", lastName2: "", companyName: "",
@@ -132,12 +129,9 @@ export function ClienteWizardModal({
   const [dup, setDup] = useState<DupCheck>({});
   const [checkingPpp, setCheckingPpp] = useState(false);
   const [plans, setPlans] = useState<Plan[] | null>(null);
-  /** Plan elegido por tipo de servicio: kind → planId ("" = ninguno). */
-  const [planSel, setPlanSel] = useState<Record<string, string>>({});
   /** Combos que se pueden vender hoy (vacío = no hay ninguno armado). */
   const [bundles, setBundles] = useState<Bundle[]>([]);
-  /** Se contrata plan a plan o un combo cerrado. Arranca en "sueltos". */
-  const [modoVenta, setModoVenta] = useState<"sueltos" | "combo">("sueltos");
+  /** En la venta solo se contratan combos: el plan suelto ya no se ofrece. */
   const [comboSel, setComboSel] = useState("");
   /** Catálogo de afiliaciones (lo que se cobra al entrar). */
   const [afiliaciones, setAfiliaciones] = useState<Afiliacion[]>([]);
@@ -199,8 +193,6 @@ export function ClienteWizardModal({
     if (!open) return;
     setStep(0);
     setAlta(null);
-    setPlanSel({});
-    setModoVenta("sueltos");
     setComboSel("");
     // Las afiliaciones no cuelgan de /billing/catalog a propósito: el alta también la
     // hacen administración y técnicos, que no tienen el área de facturación.
@@ -227,6 +219,17 @@ export function ClienteWizardModal({
         .then((r) => (r.ok ? r.json() : Promise.reject()))
         .then((d) => {
           const nom = (d.nomenclature ?? {}) as Record<string, any>;
+          // Su sede puede estar DESACTIVADA (Mocoa, Villavicencio): entonces no viene en
+          // `/subscribers/branches` y el selector la mostraría vacía, como si el cliente
+          // no tuviera sede. Se añade su opción, marcada, para que se vea lo que es y
+          // siga guardándose igual al editar cualquier otro campo.
+          if (d.branchId && d.branchName) {
+            setBranches((prev) =>
+              prev.some((b) => b.id === d.branchId)
+                ? prev
+                : [...prev, { id: d.branchId, name: d.branchInactive ? `${d.branchName} (desactivada)` : d.branchName }],
+            );
+          }
           setF({
             ...EMPTY,
             abonado: str(d.abonado), firstName: str(d.firstName), secondName: str(d.secondName),
@@ -258,31 +261,17 @@ export function ClienteWizardModal({
   // La razón social solo aplica a empresas/entidades (o si ya trae valor guardado).
   const showCompany = ["Juridico", "Gubernamental", "Militar"].includes(f.customerType) || !!f.companyName?.trim();
 
-  // Planes agrupados por tipo de servicio, en el orden en que se ofrecen.
-  const byKind = useMemo(() => {
-    const map = new Map<string, Plan[]>();
-    for (const p of plans ?? []) {
-      if (!map.has(p.kind)) map.set(p.kind, []);
-      map.get(p.kind)!.push(p);
-    }
-    return KIND_ORDER.filter((k) => map.has(k)).map((k) => ({ kind: k, plans: map.get(k)! }));
-  }, [plans]);
-
-  const planIds = useMemo(() => Object.values(planSel).filter(Boolean), [planSel]);
   const comboElegido = useMemo(() => bundles.find((b) => b.id === comboSel) ?? null, [bundles, comboSel]);
-  const usaCombo = modoVenta === "combo" && comboElegido !== null;
   /**
-   * Los planes que se van a contratar, vengan de los desplegables o de dentro
-   * de un combo. De aquí sale el perfil que se le escribe al router, que es el
-   * mismo mande quien mande.
+   * Los planes que trae el combo elegido. De aquí sale el perfil que se le
+   * escribe al router.
    */
   const planesElegidos = useMemo(() => {
-    const ids = usaCombo ? comboElegido!.items.map((it) => it.planId) : planIds;
+    const ids = comboElegido ? comboElegido.items.map((it) => it.planId) : [];
     return ids.map((id) => (plans ?? []).find((p) => p.id === id)).filter(Boolean) as Plan[];
-  }, [usaCombo, comboElegido, planIds, plans]);
-  // En un combo la mensualidad NO es la suma de los planes de lista: es lo que
-  // cobra el paquete.
-  const mensualidad = usaCombo ? comboElegido!.total : planesElegidos.reduce((s, p) => s + p.price, 0);
+  }, [comboElegido, plans]);
+  // La mensualidad NO es la suma de los planes de lista: es lo que cobra el combo.
+  const mensualidad = comboElegido?.total ?? 0;
   const cargoInstalacion = Number(f.installCharge || 0);
 
   /**
@@ -401,7 +390,7 @@ export function ClienteWizardModal({
       ...(mode === "create"
         ? {
             // El combo manda: el backend saca sus planes y sus precios de ahí.
-            ...(usaCombo ? { bundleId: comboSel } : { planIds: planIds.length ? planIds : undefined }),
+            ...(comboElegido ? { bundleId: comboSel } : {}),
             provision: !!f.provision,
             firstInvoice: !!f.firstInvoice,
             // La afiliación es lo que se cobra al entrar (la mensualidad la cobra la
@@ -643,34 +632,21 @@ export function ClienteWizardModal({
       {step === 2 && (
         <div className="flex flex-col gap-2">
           {mode === "create" && (
-            <Section title="Plan contratado">
+            <Section title="Combo contratado">
               <p className="mb-2 text-[12px] text-text-tertiary">
-                El plan decide tres cosas a la vez: la <b>velocidad</b> (es el perfil que se
-                escribe en el Mikrotik), el <b>precio</b> que se le factura cada mes y lo que
-                lleva la primera factura. Sin plan el cliente nace sin servicio y la corrida
-                mensual no lo factura.
+                En la venta solo se ofrecen combos. El combo decide tres cosas a la vez: la
+                <b> velocidad</b> (el perfil de su plan de internet, que se escribe en el
+                Mikrotik), el <b>precio</b> que se le factura cada mes y lo que lleva la primera
+                factura. Sin combo el cliente nace sin servicio y la corrida mensual no lo factura.
               </p>
-              {!plans && <p className="text-[12px] text-text-tertiary">Cargando planes…</p>}
-              {plans && byKind.length === 0 && (
+              {!plans && <p className="text-[12px] text-text-tertiary">Cargando combos…</p>}
+              {plans && bundles.length === 0 && (
                 <p className="text-[12px] text-text-tertiary">
-                  No hay planes en el catálogo. Créalos en Configuración → Planes.
+                  No hay combos a la venta. Créalos en Configuración → Planes → Combos.
                 </p>
               )}
 
               {bundles.length > 0 && (
-                <Segmented
-                  className="mb-2"
-                  ariaLabel="Forma de contratación"
-                  value={modoVenta}
-                  onChange={setModoVenta}
-                  options={[
-                    { value: "sueltos", label: "Planes sueltos" },
-                    { value: "combo", label: `Combos (${bundles.length})` },
-                  ]}
-                />
-              )}
-
-              {modoVenta === "combo" && (
                 <div className="mb-2 flex flex-col gap-2">
                   <Select value={comboSel} onChange={(e) => setComboSel(e.target.value)}>
                     <option value="">— Elige un combo —</option>
@@ -701,31 +677,6 @@ export function ClienteWizardModal({
                 </div>
               )}
 
-              <div className={`grid grid-cols-1 gap-2 sm:grid-cols-2 ${modoVenta === "combo" ? "hidden" : ""}`}>
-                {byKind.map(({ kind, plans: kindPlans }) => {
-                  const elegido = kindPlans.find((p) => p.id === planSel[kind]) ?? null;
-                  return (
-                    <Field key={kind} label={SERVICE_KIND_LABEL[kind]}>
-                      <Select
-                        value={planSel[kind] ?? ""}
-                        onChange={(e) => setPlanSel((s) => ({ ...s, [kind]: e.target.value }))}
-                      >
-                        <option value="">— Sin {SERVICE_KIND_LABEL[kind].toLowerCase()} —</option>
-                        {kindPlans.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name} — {fullCurrency(p.price)}/mes{p.pppProfile ? ` · ${p.pppProfile}` : ""}
-                          </option>
-                        ))}
-                      </Select>
-                      {elegido && !elegido.pppProfile && (
-                        <p className="mt-1 text-[11px] text-text-tertiary">
-                          Este plan no trae perfil de router: sólo fija la mensualidad.
-                        </p>
-                      )}
-                    </Field>
-                  );
-                })}
-              </div>
               {planesElegidos.length > 0 && (
                 <p className="mt-2 rounded-lg bg-surface-2 px-3 py-2 text-[12px] text-text-secondary">
                   Mensualidad: <b className="text-text-primary">{fullCurrency(mensualidad)}</b>
@@ -751,7 +702,7 @@ export function ClienteWizardModal({
                     onBlur={() => {
                       if (!f.pppUsername?.trim()) { setDup((p) => ({ ...p, pppUsername: null })); return; }
                       setCheckingPpp(true);
-                      void checkDup({ pppUsername: f.pppUsername, branchId: f.branchId || undefined, installTech: f.installTech || undefined })
+                      void checkDup({ pppUsername: f.pppUsername, branchId: f.branchId || undefined, installTech: f.installTech || undefined, excludeId: subscriberId })
                         .finally(() => setCheckingPpp(false));
                     }}
                   />

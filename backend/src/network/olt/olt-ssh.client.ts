@@ -38,6 +38,13 @@ export abstract class OltDriver {
   /** Último mensaje de error legible. */
   protected error = '';
 
+  /**
+   * El último sendCommand se quedó sin respuesta antes de ver el prompt
+   * (timeout o sesión caída): su salida puede venir TRUNCADA. Quien arme
+   * inventarios con ella (sync de slot) debe tratarla como lectura fallida.
+   */
+  public cortado = false;
+
   /** Log crudo de la sesión interactiva (para depurar/calibrar). */
   protected rawLog = '';
 
@@ -561,7 +568,7 @@ export abstract class OltDriver {
    * @param autoConfirm true → responde "y" (escritura); false → "n" (lectura).
    */
   protected async sendCommand(cmd: string, autoConfirm = false, maxLoops = 200): Promise<string> {
-    if (!this.stream) return '';
+    if (!this.stream) { this.cortado = true; return ''; }
     // Descartar salida residual (alarmas asíncronas que el equipo imprime en la
     // VTY entre comandos): si se dejara, se colaría como respuesta del comando
     // que vamos a enviar. Ya quedó copiada en rawLog al llegar.
@@ -571,6 +578,7 @@ export abstract class OltDriver {
     }
     this.stream.write(cmd + '\n');
     this.rawLog += `\n>>> ${cmd}\n`;
+    this.cortado = false;
 
     let buf = '';
     let loops = 0;
@@ -605,7 +613,7 @@ export abstract class OltDriver {
     while (true) {
       if (++loops > maxLoops) break;
       const chunk = await this.readUntil(stop, this.timeout);
-      if (chunk === '') break;
+      if (chunk === '') { this.cortado = true; this.rawLog += '\n[sin respuesta: salida posiblemente truncada]\n'; break; }
       buf += chunk;
 
       // El equipo ya agotó sus reintentos: no sirve seguir escribiendo.

@@ -4,7 +4,7 @@ import { hoyEnColombia } from '../common/fecha-colombia';
 import { subName } from '../common/subscriber-name';
 import { AuthUser } from '../auth/current-user.decorator';
 import { esTecnicoDeCampo } from '../common/tecnico-scope';
-import { DIAS_REZAGO, ORDEN_AGENDA } from './agenda-dia';
+import { ABIERTA, DIAS_REZAGO, ORDEN_AGENDA, whereTrabajoDelDia } from './agenda-dia';
 
 /**
  * Una orden a la vez — **la regla del legacy, tal cual** (2026-09-10).
@@ -222,6 +222,56 @@ async function ordenEnCursoDe(
     agendadaPara: t.scheduledFor ? t.scheduledFor.toISOString().slice(0, 10) : null,
   };
 }
+
+/**
+ * **UNA A UNA: la única orden abierta que el técnico de campo ve** (2026-10-01, a
+ * pedido del dueño: «que a ningún equipo le salgan las órdenes que tiene después,
+ * sólo una a una»).
+ *
+ * Hasta hoy el candado sólo impedía EMPEZAR la segunda; la cola del día, el calendario
+ * y «lo que viene» se le enseñaban enteros. Ahora de lo abierto ve UNA: la que tiene
+ * empezada o, si no tiene ninguna, la primera pendiente de su trabajo de hoy en el
+ * orden que puso quien agenda (`ORDEN_AGENDA`). Lo que ya cerró se sigue viendo —es
+ * su historial—; lo que se esconde es lo que viene DESPUÉS.
+ *
+ * `aplica` es falso para quien no es técnico de campo, para quien no tiene ficha y
+ * para el exento (`Staff.agendaLibre`): ellos siguen viendo todo como antes. Vive
+ * aquí, junto al candado, para que las cinco puertas (lista, detalle, agenda,
+ * calendario y próximas) respondan lo mismo.
+ */
+export type UnaAUna = { aplica: boolean; id: string | null };
+
+export async function ordenQueLeToca(
+  prisma: PrismaService,
+  staffId: string | null | undefined,
+  user?: AuthUser | null,
+): Promise<UnaAUna> {
+  if (!esTecnicoDeCampo(user) || !staffId) return { aplica: false, id: null };
+  const ficha = await fichaTurno(prisma, staffId);
+  if (!ficha || ficha.agendaLibre) return { aplica: false, id: null };
+  const enCurso = await ordenEnCursoDe(prisma, staffId, ficha);
+  if (enCurso) return { aplica: true, id: enCurso.id };
+  const siguiente = await prisma.ticket.findFirst({
+    where: { AND: [suyas(staffId, ficha), { status: 'PENDIENTE' }, whereTrabajoDelDia(hoyEnColombia())] },
+    select: { id: true },
+    orderBy: ORDEN_AGENDA,
+  });
+  return { aplica: true, id: siguiente?.id ?? null };
+}
+
+/** ¿Esta orden se le esconde? Abierta y no es la que le toca. */
+export function esOrdenPosterior(u: UnaAUna, t: { id: string; status: string }): boolean {
+  return u.aplica && (ABIERTA as readonly string[]).includes(t.status) && t.id !== u.id;
+}
+
+/** El mismo criterio como filtro de consulta: fuera lo abierto que no sea la que toca. */
+export function whereUnaAUna(u: UnaAUna): Prisma.TicketWhereInput {
+  if (!u.aplica) return {};
+  return { NOT: { status: { in: [...ABIERTA] }, ...(u.id ? { id: { not: u.id } } : {}) } };
+}
+
+export const MOTIVO_AUN_NO_TOCA =
+  'Esta orden todavía no te toca: las órdenes salen una a una. Termina la que tienes y aparecerá la siguiente.';
 
 export type VeredictoTurno =
   | { permitido: true }

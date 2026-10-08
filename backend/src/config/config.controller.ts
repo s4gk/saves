@@ -1,4 +1,5 @@
 import { CategoryDto, ConfigDataService, UpdateBranchDto, UpdateCompanyDto } from './config.service';
+import { CreateBranchDto, CreateDireccionDto, RenameDireccionDto } from './catalogo-direcciones';
 
 /** Configuración: cajas, sedes y empresa. */
 export class ConfigController {
@@ -7,6 +8,14 @@ export class ConfigController {
   cashAccounts() { return this.config.cashAccounts(); }
   branches() { return this.config.branches(); }
   updateBranch(id: string, dto: UpdateBranchDto) { return this.config.updateBranch(id, dto); }
+  createBranch(dto: CreateBranchDto) { return this.config.createBranch(dto); }
+  deleteBranch(id: string) { return this.config.deleteBranch(id); }
+
+  // --- Direcciones: departamento → ciudad → localidad → barrio ---
+  addresses() { return this.config.addresses(); }
+  createAddress(nivel: string, dto: CreateDireccionDto) { return this.config.createAddress(nivel, dto); }
+  renameAddress(nivel: string, id: string, dto: RenameDireccionDto) { return this.config.renameAddress(nivel, id, dto); }
+  deleteAddress(nivel: string, id: string) { return this.config.deleteAddress(nivel, id); }
   // La geografía salió de /configuracion (2026-08-05): la pestaña "Geografía" era un
   // resumen de solo lectura (conteo de departamentos/ciudades/localidades/barrios) y se
   // retiró a pedido del usuario. Con ella se fueron sus dos endpoints. El catálogo

@@ -7,6 +7,7 @@ import { INV_PERMISSIONS, APP_PERMISSIONS } from '../auth/permissions.catalog';
 import { AuthUser } from '../auth/current-user.decorator';
 import { ListNapsQueryDto } from './dto/naps.dto';
 import { actaPdf } from '../common/pdf/pdf-docs';
+import { BadRequestException } from '../core/http/errores';
 
 export class BatchIdsDto {
   @IsArray() @ArrayNotEmpty() @IsString({ each: true }) ids!: string[];
@@ -175,6 +176,13 @@ export class NetworkController {
   createNap(dto: CreateNapDto) { return this.write.createNap(dto); }
   updateNap(id: string, dto: UpdateNapDto) { return this.write.updateNap(id, dto); }
   deleteNap(id: string) { return this.write.deleteNap(id); }
+  /** Ubicaciones de las cajas de una sede desde el KMZ de Google Earth. Sin `aplicar=1` sólo revisa. */
+  importarNapsKmz(file: any, branchId?: string, aplicar?: string, sobrescribir?: string, parecidas?: string, user?: AuthUser) {
+    if (!file?.buffer) throw new BadRequestException('Sube el archivo .kmz o .kml en el campo "file".');
+    if (!branchId) throw new BadRequestException('Falta la sede (branchId).');
+    const si = (v?: string) => v === '1' || v === 'true';
+    return this.write.importarUbicacionesKmz(file.buffer, branchId, { aplicar: si(aplicar), sobrescribir: si(sobrescribir), parecidas: si(parecidas) }, user);
+  }
 
   // --- VLANs (CRUD) ---
   createVlan(dto: CreateVlanDto) { return this.write.createVlan(dto); }

@@ -19,11 +19,13 @@ import type { Response } from 'express';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { MIMES_DOCUMENTO, enviarAdjuntoSeguro, mimeAceptado, nombreEnDisco } from '../common/uploads';
+import { MIMES_DOCUMENTO, MIMES_IMAGEN, enviarAdjuntoSeguro, mimeAceptado, nombreEnDisco } from '../common/uploads';
 import { StaffDocumentsService, type ArchivoSubido } from './staff-documents.service';
 import { StaffService, CreateStaffDto, UpdateStaffDto, SetStaffPermissionsDto, SetStaffRolesDto, CreateStaffAccountDto, SetStaffAccountActiveDto, SetStaffBannedDto, ResetStaffPasswordDto } from './staff.service';
 import { PerformanceService } from '../reports/performance.service';
 import { APP_PERMISSIONS } from '../auth/permissions.catalog';
+import { FOTOS_ROOT } from '../auth/profile.service';
+import { MAX_FOTO_BYTES } from '../auth/profile.controller';
 
 /** Instancia única del controlador. Las dependencias salen del contenedor. */
 const staff = new StaffController(staffService, staffDocumentsService, performanceService);
@@ -194,6 +196,44 @@ staffRouter.get(
   exigirArea('administracion', 'gerencia'),
   exigirPermisos(APP_PERMISSIONS.HR_EMPLOYEES_READ),
   manejar((req, res) => staff.downloadDocument(req.params.id, req.params.docId, res)),
+);
+
+staffRouter.get(
+  '/:id/photo',
+  autenticar,
+  exigirArea('administracion', 'gerencia'),
+  manejar((req, res) => staff.photo(req.params.id, res)),
+);
+
+staffRouter.post(
+  '/:id/photo',
+  autenticar,
+  exigirArea('administracion', 'gerencia'),
+  exigirPermisos(APP_PERMISSIONS.SYSTEM_ADMIN),
+  subirUno('file', {
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          mkdirSync(FOTOS_ROOT, { recursive: true });
+          cb(null, FOTOS_ROOT);
+        },
+        // La extensión sale del MIME ya validado, nunca del `originalname`.
+        filename: (_req, file, cb) => cb(null, nombreEnDisco(randomUUID(), file.mimetype)),
+      }),
+      limits: { fileSize: MAX_FOTO_BYTES },
+      fileFilter: (_req, file, cb) => {
+        const ok = mimeAceptado(file.mimetype, MIMES_IMAGEN);
+        cb(ok ? null : new BadRequestException('La foto debe ser una imagen (JPG, PNG, WEBP…)'), ok);
+      },
+    }),
+  manejar((req) => staff.uploadPhoto(req.params.id, ficheroDe(req), usuarioDe(req))),
+);
+
+staffRouter.delete(
+  '/:id/photo',
+  autenticar,
+  exigirArea('administracion', 'gerencia'),
+  exigirPermisos(APP_PERMISSIONS.SYSTEM_ADMIN),
+  manejar((req) => staff.deletePhoto(req.params.id, usuarioDe(req))),
 );
 
 staffRouter.get(

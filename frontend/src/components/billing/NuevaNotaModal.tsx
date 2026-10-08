@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Modal } from "@/components/Modal";
 import { Icon } from "@/components/Icon";
 import { Badge } from "@/components/ui/Badge";
@@ -23,6 +23,15 @@ type Deuda = {
 
 /** Cómo se reparte el dinero entre las facturas marcadas. */
 type Modo = "CADA" | "SALDO" | "REPARTIR";
+
+/** Dónde cae la nota: sobre facturas que ya existen o sobre la próxima que nazca. */
+type Destino = "FACTURAS" | "PROXIMA";
+
+/** Nota dejada para la próxima factura (`/billing/pending-notes`). */
+type Pendiente = {
+  id: string; type: "CREDITO" | "DEBITO"; amount: number; applied: number; pending: number;
+  description: string; status: string; createdByName: string; createdAt: string;
+};
 
 /** Lo que le toca a una factura del lote. */
 type Reparto = { invoiceId: string; tid: number; amount: number };
@@ -122,8 +131,11 @@ export function NuevaNotaModal({
 }: {
   open: boolean;
   onClose: () => void;
-  /** Se llama tras aplicar con éxito para refrescar el listado. */
-  onDone?: () => void;
+  /**
+   * Se llama tras aplicar con éxito para refrescar el listado. `pendiente` = la nota
+   * no cayó en ninguna factura: quedó esperando la próxima.
+   */
+  onDone?: (r?: { pendiente: boolean }) => void;
   /**
    * Arranque ya lleno: lo usa la solicitud de nota de la pestaña Cobranza, que ya
    * sabe el cliente, el tipo, el monto sugerido y el porqué.
@@ -138,6 +150,9 @@ export function NuevaNotaModal({
   const [invoiceIds, setInvoiceIds] = useState<string[]>([]);
   const [type, setType] = useState<"CREDITO" | "DEBITO">("CREDITO");
   const [modo, setModo] = useState<Modo>("CADA");
+  const [destino, setDestino] = useState<Destino>("FACTURAS");
+  const [pendientes, setPendientes] = useState<Pendiente[]>([]);
+  const [anulando, setAnulando] = useState<{ id: string; reason: string } | null>(null);
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [retentionType, setRetentionType] = useState("");
@@ -155,6 +170,7 @@ export function NuevaNotaModal({
     }
     setSub(null); setDeuda(null); setTodas(false); setInvoiceIds([]);
     setType("CREDITO"); setModo("CADA"); setAmount(""); setDescription(""); setRetentionType("");
+    setDestino("FACTURAS"); setPendientes([]); setAnulando(null);
     setErr(null); setSaving(false);
     // `inicial` sólo cuenta al abrir: re-rellenar mientras se edita borraría lo tecleado.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -177,6 +193,33 @@ export function NuevaNotaModal({
       .finally(() => { if (vivo) setCargando(false); });
     return () => { vivo = false; };
   }, [sub, todas, authFetch]);
+
+  // Las que el cliente ya tiene esperando la próxima factura: se muestran para no
+  // dejar dos veces la misma, y se pueden anular desde aquí.
+  const cargarPendientes = useCallback(() => {
+    if (!sub) { setPendientes([]); return; }
+    authFetch(`/billing/pending-notes?subscriberId=${sub.id}`)
+      .then((r) => r.json())
+      .then((d: { items?: Pendiente[] }) => setPendientes((d.items ?? []).filter((n) => n.status === "PENDIENTE")))
+      .catch(() => setPendientes([]));
+  }, [sub, authFetch]);
+  useEffect(() => { cargarPendientes(); }, [cargarPendientes]);
+
+  async function anularPendiente() {
+    if (!anulando) return;
+    if (anulando.reason.trim().length < 3) { setErr("Escribe por qué se anula la nota pendiente."); return; }
+    setErr(null);
+    try {
+      const res = await authFetch(`/billing/pending-notes/${anulando.id}/cancel`, {
+        method: "POST", body: JSON.stringify({ reason: anulando.reason.trim() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d?.message || "No se pudo anular la nota pendiente");
+      toast("Nota pendiente anulada");
+      setAnulando(null);
+      cargarPendientes();
+    } catch (e) { setErr(mensajeDeError(e)); }
+  }
 
   const elegidas = useMemo(
     () => (deuda?.items ?? []).filter((i) => invoiceIds.includes(i.id)),
@@ -208,8 +251,30 @@ export function NuevaNotaModal({
     setInvoiceIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
+  async function dejarPendiente() {
+    if (!sub) { setErr("Busca y elige el cliente."); return; }
+    if ((Number(amount) || 0) <= 0) { setErr("Ingresa un monto válido."); return; }
+    if (description.trim().length < 5) { setErr("Escribe la observación: por qué se aplica esta nota."); return; }
+    setSaving(true);
+    try {
+      const res = await authFetch(`/billing/subscribers/${sub.id}/pending-notes`, {
+        method: "POST",
+        body: JSON.stringify({
+          type, amount: r2(Number(amount)), description: description.trim(),
+          retentionType: retentionType || undefined,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d?.message || "No se pudo dejar la nota pendiente");
+      toast(`Nota ${type === "CREDITO" ? "crédito" : "débito"} pendiente · se aplicará a la próxima factura`);
+      onClose();
+      onDone?.({ pendiente: true });
+    } catch (e) { setErr(mensajeDeError(e)); } finally { setSaving(false); }
+  }
+
   async function submit() {
     setErr(null);
+    if (destino === "PROXIMA") { await dejarPendiente(); return; }
     if (!sub) { setErr("Busca y elige el cliente."); return; }
     if (!elegidas.length) { setErr("Marca al menos una factura."); return; }
     if (modo !== "SALDO" && (Number(amount) || 0) <= 0) { setErr("Ingresa un monto válido."); return; }
@@ -246,7 +311,7 @@ export function NuevaNotaModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Aplicar nota crédito / débito" maxWidth="max-w-2xl">
+    <Modal open={open} onClose={onClose} title="Nota crédito / débito" maxWidth="max-w-2xl">
       <div className="flex flex-col gap-2.5">
         <Field label="Cliente" required>
           <SubscriberPicker
@@ -257,6 +322,72 @@ export function NuevaNotaModal({
         </Field>
 
         {sub && (
+          <Field label="¿Dónde se aplica?">
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-border-subtle bg-surface-subtle p-1">
+              {([
+                ["FACTURAS", "A facturas que ya tiene"],
+                ["PROXIMA", "A la próxima factura"],
+              ] as const).map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => { setDestino(v); setErr(null); }}
+                  className={`rounded-md px-2 py-1.5 text-[12px] font-medium ${destino === v ? "bg-surface text-text-primary shadow-sm" : "text-text-tertiary hover:text-text-secondary"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+        )}
+
+        {sub && pendientes.length > 0 && (
+          <div className="rounded-lg border border-warning-border bg-warning-soft px-3 py-2 text-[12px]">
+            <p className="mb-1 flex items-center gap-1.5 font-semibold text-warning-text">
+              <Icon name="clock" size={13} />
+              Ya tiene {pendientes.length === 1 ? "una nota esperando" : `${pendientes.length} notas esperando`} la próxima factura
+            </p>
+            {pendientes.map((n) => (
+              <div key={n.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-warning-border/50 py-1 first:border-0">
+                <span className={`font-semibold ${n.type === "CREDITO" ? "text-success-text" : "text-warning-text"}`}>
+                  {n.type === "CREDITO" ? "-" : "+"}{cop(n.pending)}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-text-secondary" title={n.description}>{n.description}</span>
+                <span className="text-[11px] text-text-tertiary">{n.createdByName} · {fecha(n.createdAt)}</span>
+                {anulando?.id === n.id ? (
+                  <span className="flex w-full items-center gap-1.5">
+                    <Input
+                      value={anulando.reason}
+                      onChange={(e) => setAnulando({ id: n.id, reason: e.target.value })}
+                      placeholder="Por qué se anula"
+                    />
+                    <Button size="sm" variant="secondary" onClick={anularPendiente}>Anular</Button>
+                    <Button size="sm" variant="ghost" onClick={() => setAnulando(null)}>No</Button>
+                  </span>
+                ) : (
+                  <button type="button" onClick={() => setAnulando({ id: n.id, reason: "" })} className="text-[11px] font-medium text-error-text hover:underline">
+                    Anular
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {sub && destino === "PROXIMA" && (
+          <div className="rounded-lg border border-border-subtle bg-surface-subtle px-3 py-2 text-[12px] text-text-secondary">
+            <p className="flex items-start gap-1.5">
+              <Icon name="info" size={13} className="mt-0.5 shrink-0" />
+              <span>
+                La nota queda <span className="font-semibold text-text-primary">pendiente</span> y se aplica sola a la próxima
+                factura que se le emita al cliente (la corrida del día 1 o una factura manual). No mueve su cartera hasta entonces.
+                {type === "CREDITO" && " Si la rebaja es mayor que esa factura, la deja en cero y el resto pasa a la siguiente."}
+              </span>
+            </p>
+          </div>
+        )}
+
+        {sub && destino === "FACTURAS" && (
           <div className="rounded-lg border border-border-subtle bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-subtle px-3 py-2">
               <span className="flex items-center gap-1.5 text-[12px] font-semibold text-text-secondary">
@@ -315,6 +446,13 @@ export function NuevaNotaModal({
             ) : !deuda?.items.length ? (
               <div className="px-3 py-6 text-center text-[12px] text-text-tertiary">
                 {todas ? "El cliente no tiene facturas." : "El cliente no tiene facturas pendientes."}
+                <button
+                  type="button"
+                  onClick={() => { setDestino("PROXIMA"); setErr(null); }}
+                  className="mt-1 block w-full font-medium text-brand hover:underline"
+                >
+                  Dejar la nota para la próxima factura
+                </button>
               </div>
             ) : (
               <div className="max-h-56 overflow-y-auto">
@@ -388,7 +526,7 @@ export function NuevaNotaModal({
         {/* Con una sola factura marcada el reparto no tiene sentido: se pide el monto
             y ya. El selector aparece cuando hay varias, que es cuando hay algo que
             decidir. */}
-        {varias && (
+        {destino === "FACTURAS" && varias && (
           <Field label="Monto de cada nota" required>
             <Select value={modo} onChange={(e) => { setModo(e.target.value as Modo); setErr(null); }}>
               <option value="CADA">El mismo monto en cada factura</option>
@@ -402,14 +540,14 @@ export function NuevaNotaModal({
           </Field>
         )}
 
-        {modo !== "SALDO" && (
-          <Field label={varias && modo === "REPARTIR" ? "Monto total a repartir" : "Monto"} required>
+        {(destino === "PROXIMA" || modo !== "SALDO") && (
+          <Field label={destino === "FACTURAS" && varias && modo === "REPARTIR" ? "Monto total a repartir" : "Monto"} required>
             <div className="flex items-center gap-2">
               <Input type="number" min={1} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" />
               {/* El atajo del saldo sólo se ofrece cuando hay UN saldo que copiar: con
                   varias marcadas y "el mismo monto en cada una" no significa nada
                   (para saldarlas está su propio modo). */}
-              {type === "CREDITO" && saldoElegido > 0 && (!varias || modo === "REPARTIR") && (
+              {destino === "FACTURAS" && type === "CREDITO" && saldoElegido > 0 && (!varias || modo === "REPARTIR") && (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -425,7 +563,7 @@ export function NuevaNotaModal({
 
         {/* Resumen de lo que se va a escribir: cuántas notas, por cuánto y qué queda
             fuera. Es lo último que se ve antes de aplicar, y aplicar mueve plata. */}
-        {elegidas.length > 0 && (
+        {destino === "FACTURAS" && elegidas.length > 0 && (
           <div className="rounded-lg border border-border-subtle bg-surface-subtle px-3 py-2 text-[12px]">
             {reparto.length > 0 ? (
               <p className="text-text-secondary">
@@ -467,16 +605,20 @@ export function NuevaNotaModal({
             rows={3}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            maxLength={500}
             placeholder="Ej.: depuración de cartera, número apagado sin contrato. Autoriza Ing. Paula Niño."
           />
         </Field>
         {err && <p className="text-[12px] text-error-text">{err}</p>}
         <div className="mt-1 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose} disabled={saving}>Cancelar</Button>
-          <Button onClick={submit} disabled={saving || !reparto.length || description.trim().length < 5}>
+          <Button
+            onClick={submit}
+            disabled={saving || description.trim().length < 5
+              || (destino === "PROXIMA" ? !sub || !((Number(amount) || 0) > 0) : !reparto.length)}
+          >
             {saving
-              ? "Aplicando…"
+              ? "Guardando…"
+              : destino === "PROXIMA" ? "Dejar para la próxima factura"
               : reparto.length > 1 ? `Aplicar ${reparto.length} notas` : "Aplicar nota"}
           </Button>
         </div>

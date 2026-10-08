@@ -86,6 +86,8 @@ export type WaFiltroCampana = {
   deudaMin?: number;
   soloMoviles: boolean;
   omitirEnAtencion: boolean;
+  /** Lista a mano (abonados, cédulas o celulares). Si viene, manda sobre estado, sede y plan. */
+  identificadores?: string[];
 };
 
 /** GET /admin/whatsapp/campaigns/options */
@@ -101,6 +103,8 @@ export type WaPreviewCampana = {
   destinatarios: number;
   descartes: { fueraPorDeuda: number; sinTelefono: number; enAtencion: number; telefonoRepetido: number };
   deudaTotal: number;
+  /** De la lista a mano, lo que no corresponde a ningún cliente. */
+  noEncontrados: string[];
   muestra: { subscriberId: string; nombre: string; abonado: number | null; telefono: string; deuda: number }[];
   plantilla: { name: string; category: string | null; metaStatus: string | null } | null;
   ejemplo: { subscriberId: string; nombre: string; cabecera: string | null; cuerpo: string } | null;

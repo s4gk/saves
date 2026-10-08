@@ -65,9 +65,9 @@ export class InventoryController {
   createMaterial(dto: CreateMaterialDto, user?: AuthUser) { return this.inv.createMaterial(dto, user); }
 
   /** Importa materiales desde un Excel (.xlsx). Campo "file". */
-  importMaterials(file?: { buffer: Buffer }) {
+  importMaterials(file?: { buffer: Buffer }, user?: AuthUser) {
     if (!file) throw new BadRequestException('Sube un archivo .xlsx en el campo "file".');
-    return this.inv.importMaterials(file.buffer);
+    return this.inv.importMaterials(file.buffer, user);
   }
   updateMaterial(id: string, dto: UpdateMaterialDto, user?: AuthUser) { return this.inv.updateMaterial(id, dto, user); }
   deleteMaterial(id: string, user?: AuthUser) { return this.inv.deleteMaterial(id, user); }

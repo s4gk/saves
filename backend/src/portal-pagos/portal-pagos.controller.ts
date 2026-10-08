@@ -24,6 +24,11 @@ export class PortalPagosController {
 
   constructor(private readonly portal: PortalPagosService) {}
 
+  /** `POST /api/portal-pagos/resolver_usuario` — abonado/cédula/correo → `cid`s candidatos del login. */
+  async resolverUsuario(req: Request, body: any, res: Response) {
+    return this.responder(req, body, res, () => this.portal.resolverUsuario(body?.usuario));
+  }
+
   /** `POST /api/portal-pagos/get_due_customer` — deuda, ficha, promos y llaves de Wompi. */
   async getDueCustomer(req: Request, body: any, res: Response) {
     return this.responder(req, body, res, () => this.portal.getDueCustomer(Number(body?.cid)));

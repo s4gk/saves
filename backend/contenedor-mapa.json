@@ -119,5 +119,6 @@
   "src/billing/cargo-orden.service.ts#CargoOrdenService": "cargoOrdenService",
   "src/billing/orden-al-pagar.service.ts#OrdenAlPagarService": "ordenAlPagarService",
   "src/portal-pagos/portal-pagos.service.ts#PortalPagosService": "portalPagosService",
-  "src/network/vlan-equipos.service.ts#VlanEquiposService": "vlanEquiposService"
+  "src/network/vlan-equipos.service.ts#VlanEquiposService": "vlanEquiposService",
+  "src/fixed-assets/fixed-assets.service.ts#FixedAssetsService": "fixedAssetsService"
 }

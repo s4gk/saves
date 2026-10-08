@@ -4152,6 +4152,123 @@
     "publico": false
   },
   {
+    "metodo": "GET",
+    "ruta": "/api/billing/invoices/export.xlsx",
+    "controlador": "BillingController",
+    "fichero": "src/billing/billing.controller.ts",
+    "handler": "listXlsx",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "contabilidad",
+      "caja"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'contabilidad'",
+      "'caja'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [
+      "search",
+      "status",
+      "ron",
+      "branchId",
+      "from",
+      "to",
+      "all",
+      "overdue",
+      "sortBy",
+      "sortDir"
+    ],
+    "parametros": [
+      {
+        "clase": "Res",
+        "llave": null,
+        "tipo": "Response",
+        "nombre": "res"
+      },
+      {
+        "clase": "Query",
+        "llave": "search",
+        "tipo": "string",
+        "nombre": "search"
+      },
+      {
+        "clase": "Query",
+        "llave": "status",
+        "tipo": "string",
+        "nombre": "status"
+      },
+      {
+        "clase": "Query",
+        "llave": "ron",
+        "tipo": "string",
+        "nombre": "ron"
+      },
+      {
+        "clase": "Query",
+        "llave": "branchId",
+        "tipo": "string",
+        "nombre": "branchId"
+      },
+      {
+        "clase": "Query",
+        "llave": "from",
+        "tipo": "string",
+        "nombre": "from"
+      },
+      {
+        "clase": "Query",
+        "llave": "to",
+        "tipo": "string",
+        "nombre": "to"
+      },
+      {
+        "clase": "Query",
+        "llave": "all",
+        "tipo": "string",
+        "nombre": "all"
+      },
+      {
+        "clase": "Query",
+        "llave": "overdue",
+        "tipo": "string",
+        "nombre": "overdue"
+      },
+      {
+        "clase": "Query",
+        "llave": "sortBy",
+        "tipo": "string",
+        "nombre": "sortBy"
+      },
+      {
+        "clase": "Query",
+        "llave": "sortDir",
+        "tipo": "string",
+        "nombre": "sortDir"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
     "metodo": "POST",
     "ruta": "/api/billing/invoices",
     "controlador": "BillingController",
@@ -4524,6 +4641,158 @@
         "clase": "Body",
         "llave": null,
         "tipo": "CreateNoteDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/billing/subscribers/:id/pending-notes",
+    "controlador": "BillingController",
+    "fichero": "src/billing/billing.controller.ts",
+    "handler": "createPendingNote",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "CreateNoteDto",
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "CreateNoteDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/billing/pending-notes",
+    "controlador": "BillingController",
+    "fichero": "src/billing/billing.controller.ts",
+    "handler": "listPendingNotes",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "contabilidad",
+      "caja"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'contabilidad'",
+      "'caja'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [
+      "subscriberId"
+    ],
+    "parametros": [
+      {
+        "clase": "Query",
+        "llave": "subscriberId",
+        "tipo": "string | undefined",
+        "nombre": "subscriberId"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/billing/pending-notes/:id/cancel",
+    "controlador": "BillingController",
+    "fichero": "src/billing/billing.controller.ts",
+    "handler": "cancelPendingNote",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "CancelPendingNoteDto",
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "CancelPendingNoteDto",
         "nombre": "dto"
       },
       {
@@ -4936,7 +5205,8 @@
     "query": [
       "from",
       "to",
-      "all"
+      "all",
+      "sede"
     ],
     "parametros": [
       {
@@ -4956,6 +5226,18 @@
         "llave": "all",
         "tipo": "string",
         "nombre": "all"
+      },
+      {
+        "clase": "Query",
+        "llave": "sede",
+        "tipo": "string",
+        "nombre": "sede"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
       }
     ],
     "usaRes": false,
@@ -7856,11 +8138,11 @@
     "publico": false
   },
   {
-    "metodo": "GET",
-    "ruta": "/api/geo/technicians",
+    "metodo": "PUT",
+    "ruta": "/api/geo/branches/:id/office",
     "controlador": "GeoController",
     "fichero": "src/geo/geo.controller.ts",
-    "handler": "technicians",
+    "handler": "setBranchOffice",
     "guards": [
       "JwtAuthGuard",
       "AreaGuard"
@@ -7876,6 +8158,58 @@
       "'gerencia'",
       "'administracion'",
       "'sistemas'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "SetBranchOfficeDto",
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "SetBranchOfficeDto",
+        "nombre": "dto"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/geo/technicians",
+    "controlador": "GeoController",
+    "fichero": "src/geo/geo.controller.ts",
+    "handler": "technicians",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "gerencia",
+      "administracion",
+      "sistemas",
+      "caja"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'gerencia'",
+      "'administracion'",
+      "'sistemas'",
+      "'caja'"
     ],
     "permisosFuente": [],
     "orPermissionFuente": [],
@@ -8962,6 +9296,12 @@
         "llave": null,
         "tipo": "MulterFile",
         "nombre": "file"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
       }
     ],
     "usaRes": false,
@@ -12108,6 +12448,82 @@
     "usaRes": false,
     "subeFichero": false,
     "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/network/naps/importar-kmz",
+    "controlador": "NetworkController",
+    "fichero": "src/network/network.controller.ts",
+    "handler": "importarNapsKmz",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard",
+      "ModuloRedGuard"
+    ],
+    "areas": [
+      "tecnicos",
+      "administracion"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'tecnicos'",
+      "'administracion'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [
+      "branchId",
+      "aplicar",
+      "sobrescribir",
+      "parecidas"
+    ],
+    "parametros": [
+      {
+        "clase": "UploadedFile",
+        "llave": null,
+        "tipo": "MulterFile",
+        "nombre": "file"
+      },
+      {
+        "clase": "Query",
+        "llave": "branchId",
+        "tipo": "string",
+        "nombre": "branchId"
+      },
+      {
+        "clase": "Query",
+        "llave": "aplicar",
+        "tipo": "string",
+        "nombre": "aplicar"
+      },
+      {
+        "clase": "Query",
+        "llave": "sobrescribir",
+        "tipo": "string",
+        "nombre": "sobrescribir"
+      },
+      {
+        "clase": "Query",
+        "llave": "parecidas",
+        "tipo": "string",
+        "nombre": "parecidas"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": true,
+    "subidaFuente": "'file', { limits: { fileSize: 40 * 1024 * 1024 } }",
     "httpCode": null,
     "publico": false
   },
@@ -21837,12 +22253,16 @@
       "AreaGuard"
     ],
     "areas": [
-      "gerencia"
+      "gerencia",
+      "administracion",
+      "contabilidad"
     ],
     "permisos": [],
     "orPermission": [],
     "areasFuente": [
-      "'gerencia'"
+      "'gerencia'",
+      "'administracion'",
+      "'contabilidad'"
     ],
     "permisosFuente": [],
     "orPermissionFuente": [],
@@ -21872,6 +22292,69 @@
         "llave": "categoria",
         "tipo": "string",
         "nombre": "categoria"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "PATCH",
+    "ruta": "/api/reports/cartera-seguimiento/:mes/:subscriberId",
+    "controlador": "ReportsController",
+    "fichero": "src/reports/reports.controller.ts",
+    "handler": "gestionarCartera",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "gerencia",
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'gerencia'",
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "GestionarCarteraDto",
+    "params": [
+      "mes",
+      "subscriberId"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "mes",
+        "tipo": "string",
+        "nombre": "mes"
+      },
+      {
+        "clase": "Param",
+        "llave": "subscriberId",
+        "tipo": "string",
+        "nombre": "subscriberId"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "GestionarCarteraDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
       }
     ],
     "usaRes": false,
@@ -23529,6 +24012,166 @@
   },
   {
     "metodo": "GET",
+    "ruta": "/api/staff/:id/photo",
+    "controlador": "StaffController",
+    "fichero": "src/staff/staff.controller.ts",
+    "handler": "photo",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "gerencia"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Res",
+        "llave": null,
+        "tipo": "Response",
+        "nombre": "res"
+      }
+    ],
+    "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/staff/:id/photo",
+    "controlador": "StaffController",
+    "fichero": "src/staff/staff.controller.ts",
+    "handler": "uploadPhoto",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard",
+      "PermissionsGuard"
+    ],
+    "areas": [
+      "administracion",
+      "gerencia"
+    ],
+    "permisos": [
+      "APP_PERMISSIONS.SYSTEM_ADMIN"
+    ],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [
+      "APP_PERMISSIONS.SYSTEM_ADMIN"
+    ],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "UploadedFile",
+        "llave": null,
+        "tipo": "MulterFile",
+        "nombre": "file"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": true,
+    "subidaFuente": "'file', {\n      storage: diskStorage({\n        destination: (_req, _file, cb) => {\n          mkdirSync(FOTOS_ROOT, { recursive: true });\n          cb(null, FOTOS_ROOT);\n        },\n        // La extensión sale del MIME ya validado, nunca del `originalname`.\n        filename: (_req, file, cb) => cb(null, nombreEnDisco(randomUUID(), file.mimetype)),\n      }),\n      limits: { fileSize: MAX_FOTO_BYTES },\n      fileFilter: (_req, file, cb) => {\n        const ok = mimeAceptado(file.mimetype, MIMES_IMAGEN);\n        cb(ok ? null : new BadRequestException('La foto debe ser una imagen (JPG, PNG, WEBP…)'), ok);\n      },\n    }",
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "DELETE",
+    "ruta": "/api/staff/:id/photo",
+    "controlador": "StaffController",
+    "fichero": "src/staff/staff.controller.ts",
+    "handler": "deletePhoto",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard",
+      "PermissionsGuard"
+    ],
+    "areas": [
+      "administracion",
+      "gerencia"
+    ],
+    "permisos": [
+      "APP_PERMISSIONS.SYSTEM_ADMIN"
+    ],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [
+      "APP_PERMISSIONS.SYSTEM_ADMIN"
+    ],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
     "ruta": "/api/staff/:id/permissions",
     "controlador": "StaffController",
     "fichero": "src/staff/staff.controller.ts",
@@ -24566,7 +25209,7 @@
     "permisosFuente": [],
     "orPermissionFuente": [],
     "scopesFuente": [],
-    "dto": null,
+    "dto": "MotivoBorradoDto",
     "params": [
       "id",
       "fileId"
@@ -24584,6 +25227,12 @@
         "llave": "fileId",
         "tipo": "string",
         "nombre": "fileId"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "MotivoBorradoDto",
+        "nombre": "dto"
       },
       {
         "clase": "CurrentUser",
@@ -25124,7 +25773,7 @@
     "permisosFuente": [],
     "orPermissionFuente": [],
     "scopesFuente": [],
-    "dto": null,
+    "dto": "MotivoBorradoDto",
     "params": [
       "id",
       "invoiceId"
@@ -25142,6 +25791,12 @@
         "llave": "invoiceId",
         "tipo": "string",
         "nombre": "invoiceId"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "MotivoBorradoDto",
+        "nombre": "dto"
       },
       {
         "clase": "CurrentUser",
@@ -25300,7 +25955,7 @@
     "permisosFuente": [],
     "orPermissionFuente": [],
     "scopesFuente": [],
-    "dto": null,
+    "dto": "MotivoBorradoDto",
     "params": [
       "id",
       "noteId"
@@ -25318,6 +25973,12 @@
         "llave": "noteId",
         "tipo": "string",
         "nombre": "noteId"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "MotivoBorradoDto",
+        "nombre": "dto"
       },
       {
         "clase": "CurrentUser",
@@ -25889,6 +26550,65 @@
     "params": [],
     "query": [],
     "parametros": [
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/subscribers/activos-por-mes",
+    "controlador": "SubscribersController",
+    "fichero": "src/subscribers/subscribers.controller.ts",
+    "handler": "activosPorMes",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad",
+      "tecnicos",
+      "caja"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'",
+      "'tecnicos'",
+      "'caja'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [
+      "branchId",
+      "status"
+    ],
+    "parametros": [
+      {
+        "clase": "Query",
+        "llave": "branchId",
+        "tipo": "string",
+        "nombre": "branchId"
+      },
+      {
+        "clase": "Query",
+        "llave": "status",
+        "tipo": "string",
+        "nombre": "status"
+      },
       {
         "clase": "CurrentUser",
         "llave": null,
@@ -27596,6 +28316,7 @@
       "tec",
       "priority",
       "sede",
+      "barrio",
       "subscriberId",
       "from",
       "to",
@@ -27647,6 +28368,12 @@
         "llave": "sede",
         "tipo": "string",
         "nombre": "sede"
+      },
+      {
+        "clase": "Query",
+        "llave": "barrio",
+        "tipo": "string",
+        "nombre": "barrio"
       },
       {
         "clase": "Query",
@@ -28191,6 +28918,12 @@
         "nombre": "id"
       },
       {
+        "clase": "Body",
+        "llave": "sn",
+        "tipo": "any",
+        "nombre": "sn"
+      },
+      {
         "clase": "CurrentUser",
         "llave": null,
         "tipo": "AuthUser",
@@ -28612,6 +29345,7 @@
       "tec",
       "priority",
       "sede",
+      "barrio",
       "from",
       "to",
       "all"
@@ -28664,6 +29398,12 @@
         "llave": "sede",
         "tipo": "string",
         "nombre": "sede"
+      },
+      {
+        "clase": "Query",
+        "llave": "barrio",
+        "tipo": "string",
+        "nombre": "barrio"
       },
       {
         "clase": "Query",
@@ -33519,6 +34259,49 @@
   },
   {
     "metodo": "POST",
+    "ruta": "/api/portal-pagos/resolver_usuario",
+    "controlador": "PortalPagosController",
+    "fichero": "src/portal-pagos/portal-pagos.controller.ts",
+    "handler": "resolverUsuario",
+    "guards": [],
+    "areas": [],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "any",
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Req",
+        "llave": null,
+        "tipo": "Request",
+        "nombre": "req"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "any",
+        "nombre": "body"
+      },
+      {
+        "clase": "Res",
+        "llave": null,
+        "tipo": "Response",
+        "nombre": "res"
+      }
+    ],
+    "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": true
+  },
+  {
+    "metodo": "POST",
     "ruta": "/api/portal-pagos/inv_list",
     "controlador": "PortalPagosController",
     "fichero": "src/portal-pagos/portal-pagos.controller.ts",
@@ -34818,6 +35601,802 @@
       }
     ],
     "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "list",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad",
+      "gerencia"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Query",
+        "llave": null,
+        "tipo": "Record<string, string | undefined>",
+        "nombre": "q"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/fixed-assets",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "create",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "CreateFixedAssetDto",
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "CreateFixedAssetDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets/meta",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "meta",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad",
+      "gerencia"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [],
+    "parametros": [],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets/template",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "template",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Res",
+        "llave": null,
+        "tipo": "Response",
+        "nombre": "res"
+      }
+    ],
+    "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets/export",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "exportExcel",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad",
+      "gerencia"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Query",
+        "llave": null,
+        "tipo": "Record<string, string | undefined>",
+        "nombre": "q"
+      },
+      {
+        "clase": "Res",
+        "llave": null,
+        "tipo": "Response",
+        "nombre": "res"
+      }
+    ],
+    "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/fixed-assets/import",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "importExcel",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "UploadedFile",
+        "llave": null,
+        "tipo": "MulterFile",
+        "nombre": "file"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": true,
+    "subidaFuente": "'file', subidaExcel",
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets/depreciation/preview",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "depreciationPreview",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [
+      "year",
+      "month"
+    ],
+    "parametros": [
+      {
+        "clase": "Query",
+        "llave": "year",
+        "tipo": "string",
+        "nombre": "year"
+      },
+      {
+        "clase": "Query",
+        "llave": "month",
+        "tipo": "string",
+        "nombre": "month"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/fixed-assets/depreciation/run",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "runDepreciation",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "RunDepreciationDto",
+    "params": [],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "RunDepreciationDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets/:id",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "detail",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad",
+      "gerencia"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "PATCH",
+    "ruta": "/api/fixed-assets/:id",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "update",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "UpdateFixedAssetDto",
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "UpdateFixedAssetDto",
+        "nombre": "dto"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "DELETE",
+    "ruta": "/api/fixed-assets/:id",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "remove",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/fixed-assets/:id/dispose",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "dispose",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "DisposeFixedAssetDto",
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "DisposeFixedAssetDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "POST",
+    "ruta": "/api/fixed-assets/:id/photos",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "uploadPhoto",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "UploadedFile",
+        "llave": null,
+        "tipo": "MulterFile",
+        "nombre": "file"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": true,
+    "subidaFuente": "'file', subidaFoto",
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/fixed-assets/:id/photos/:photoId",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "photo",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad",
+      "gerencia"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'",
+      "'gerencia'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id",
+      "photoId"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Param",
+        "llave": "photoId",
+        "tipo": "string",
+        "nombre": "photoId"
+      },
+      {
+        "clase": "Res",
+        "llave": null,
+        "tipo": "Response",
+        "nombre": "res"
+      }
+    ],
+    "usaRes": true,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "DELETE",
+    "ruta": "/api/fixed-assets/:id/photos/:photoId",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "deletePhoto",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id",
+      "photoId"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Param",
+        "llave": "photoId",
+        "tipo": "string",
+        "nombre": "photoId"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "PUT",
+    "ruta": "/api/fixed-assets/:id/location",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "setLocation",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": "AssetLocationDto",
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Body",
+        "llave": null,
+        "tipo": "AssetLocationDto",
+        "nombre": "dto"
+      },
+      {
+        "clase": "CurrentUser",
+        "llave": null,
+        "tipo": "AuthUser",
+        "nombre": "user"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "DELETE",
+    "ruta": "/api/fixed-assets/:id/location",
+    "controlador": "FixedAssetsController",
+    "fichero": "src/fixed-assets/fixed-assets.controller.ts",
+    "handler": "clearLocation",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard"
+    ],
+    "areas": [
+      "administracion",
+      "contabilidad"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'administracion'",
+      "'contabilidad'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      }
+    ],
+    "usaRes": false,
     "subeFichero": false,
     "subidaFuente": null,
     "httpCode": null,

@@ -86,7 +86,6 @@ export class AddNoteDto {
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString({ message: 'Escribe la observación de la nota: por qué se aplica.' })
   @MinLength(5, { message: 'La observación debe explicar el motivo de la nota (mínimo 5 caracteres).' })
-  @MaxLength(500, { message: 'La observación no puede pasar de 500 caracteres.' })
   description!: string;
 }
 

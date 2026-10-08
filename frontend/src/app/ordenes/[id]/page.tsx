@@ -146,7 +146,10 @@ export default function OrdenDetallePage() {
   const llevaBodega = order?.kind !== "servicio";
   const canReceive = useMemo(() => {
     if (!order) return false;
-    if (["recibido", "finalizado", "cancelado", "anulado"].includes(order.status)) return false;
+    if (["finalizado", "cancelado", "anulado"].includes(order.status)) return false;
+    // Se decide por lo que de verdad entró, no por la etiqueta: el superusuario puede
+    // poner «recibido» a mano (no mueve stock) y la orden quedaba sin cómo recibirse.
+    if ((order.items ?? []).length && (order.items ?? []).every((it: any) => (it.received ?? 0) >= (it.qty ?? 0))) return false;
     // Órdenes del flujo nuevo: recibir solo después de aprobar.
     if (order.approval?.awaiting) return false;
     return true;
@@ -879,7 +882,7 @@ export default function OrdenDetallePage() {
             </Field>
           )}
           <Field label="Monto" required><Input type="number" min={0} value={noteAmount} onChange={(e) => setNoteAmount(e.target.value)} autoFocus /></Field>
-          <div className="sm:col-span-2"><Field label="Observación (por qué se aplica)" required><Input value={noteDesc} onChange={(e) => setNoteDesc(e.target.value)} maxLength={500} placeholder="Ej.: descuento pactado con el proveedor por faltante en la entrega" /></Field></div>
+          <div className="sm:col-span-2"><Field label="Observación (por qué se aplica)" required><Input value={noteDesc} onChange={(e) => setNoteDesc(e.target.value)} placeholder="Ej.: descuento pactado con el proveedor por faltante en la entrega" /></Field></div>
         </div>
         <p className="mt-2 text-[12px] text-text-tertiary">Crédito y retención <strong>restan</strong> del total; débito <strong>suma</strong>. El total no puede quedar por debajo de lo ya pagado.</p>
         <div className="mt-3 flex justify-end gap-2">

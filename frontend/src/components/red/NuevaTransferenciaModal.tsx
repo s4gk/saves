@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/Icon";
 import { Button } from "@/components/ui/Button";
-import { Select, Textarea, Field } from "@/components/ui/Field";
+import { Input, Select, Textarea, Field } from "@/components/ui/Field";
 import { Modal } from "@/components/Modal";
 import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
@@ -46,7 +46,11 @@ export function NuevaTransferenciaModal({
   const [observations, setObservations] = useState("");
   const [equipment, setEquipment] = useState<any[]>([]);
   const [loadingEquip, setLoadingEquip] = useState(false);
-  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  // Lo escogido guarda el equipo entero, no solo el id: al buscar otro, los ya
+  // marcados salen de la lista pero siguen en la transferencia.
+  const [selected, setSelected] = useState<Record<string, any>>({});
+  const [busqueda, setBusqueda] = useState("");
+  const [totalEquipos, setTotalEquipos] = useState(0);
   const [saving, setSaving] = useState(false);
 
   const origenes = useMemo(
@@ -60,6 +64,7 @@ export function NuevaTransferenciaModal({
     setToId("");
     setObservations("");
     setSelected({});
+    setBusqueda("");
     void authFetch("/network/warehouses")
       .then(listaJson<Bodega>)
       .then((lista) => {
@@ -70,24 +75,47 @@ export function NuevaTransferenciaModal({
       .catch(() => setWarehouses([]));
   }, [open, sedeOrigen, authFetch]);
 
-  // Cargar equipos de la bodega origen
+  // Al cambiar de bodega origen se empieza de cero: lo marcado era de la otra.
+  useEffect(() => {
+    setSelected({});
+    setBusqueda("");
+  }, [fromId]);
+
+  // Equipos de la bodega origen. La búsqueda la hace el servidor (código, MAC,
+  // serial o marca) porque la lista viene de a 100 y una bodega tiene miles.
   useEffect(() => {
     if (!fromId) {
       setEquipment([]);
-      setSelected({});
+      setTotalEquipos(0);
       return;
     }
+    let vigente = true;
     setLoadingEquip(true);
-    setSelected({});
-    const qs = new URLSearchParams({ warehouseId: fromId, pageSize: "100" });
-    void authFetch(`/network/equipment?${qs}`)
-      .then((r) => r.json())
-      .then((d: any) => setEquipment(d?.items ?? []))
-      .catch(() => setEquipment([]))
-      .finally(() => setLoadingEquip(false));
-  }, [fromId, authFetch]);
+    const q = busqueda.trim();
+    const t = setTimeout(() => {
+      const qs = new URLSearchParams({ warehouseId: fromId, pageSize: "100" });
+      if (q) qs.set("search", q);
+      void authFetch(`/network/equipment?${qs}`)
+        .then((r) => r.json())
+        .then((d: any) => {
+          if (!vigente) return;
+          setEquipment(d?.items ?? []);
+          setTotalEquipos(d?.total ?? d?.items?.length ?? 0);
+        })
+        .catch(() => { if (vigente) { setEquipment([]); setTotalEquipos(0); } })
+        .finally(() => { if (vigente) setLoadingEquip(false); });
+    }, q ? 300 : 0);
+    return () => { vigente = false; clearTimeout(t); };
+  }, [fromId, busqueda, authFetch]);
 
-  const selectedIds = useMemo(() => Object.keys(selected).filter((k) => selected[k]), [selected]);
+  const selectedIds = useMemo(() => Object.keys(selected), [selected]);
+  const alternar = useCallback((eq: any, marcar: boolean) => {
+    setSelected((s) => {
+      const n = { ...s };
+      if (marcar) n[eq.id] = eq; else delete n[eq.id];
+      return n;
+    });
+  }, []);
 
   // La sede manda: dice quién puede crear la transferencia y quién la firma.
   const sedeDe = useCallback((whId: string): string | null => warehouses.find((w) => w.id === whId)?.branchName ?? null, [warehouses]);
@@ -167,16 +195,53 @@ export function NuevaTransferenciaModal({
 
       <Field
         label="Equipos a transferir"
-        hint={fromId ? `${selectedIds.length} seleccionados de ${equipment.length}` : "Selecciona primero la bodega origen"}
+        hint={
+          !fromId
+            ? "Selecciona primero la bodega origen"
+            : `${selectedIds.length} seleccionados · ${
+                totalEquipos > equipment.length
+                  ? `mostrando ${equipment.length} de ${totalEquipos.toLocaleString("es-CO")}, busca para afinar`
+                  : `${equipment.length} ${busqueda.trim() ? "coinciden" : "en la bodega"}`
+              }`
+        }
         required
       >
+        {fromId && (
+          <div className="relative mb-2">
+            <Icon name="search" size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+            <Input
+              className="pl-9"
+              placeholder="Buscar por código, MAC, serial o marca…"
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+            />
+          </div>
+        )}
+        {selectedIds.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {selectedIds.map((id) => (
+              <button
+                key={id}
+                type="button"
+                title="Quitar de la transferencia"
+                onClick={() => alternar(selected[id], false)}
+                className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-text-primary hover:bg-error-soft hover:text-error-text"
+              >
+                {selected[id].code}
+                <Icon name="x" size={11} />
+              </button>
+            ))}
+          </div>
+        )}
         <div className="max-h-64 overflow-y-auto rounded-lg border border-border-default bg-surface">
           {!fromId ? (
             <div className="px-3 py-6 text-center text-[12px] text-text-tertiary">Elige una bodega origen para ver sus equipos.</div>
           ) : loadingEquip ? (
             <div className="px-3 py-6 text-center text-[12px] text-text-tertiary">Cargando equipos…</div>
           ) : equipment.length === 0 ? (
-            <div className="px-3 py-6 text-center text-[12px] text-text-tertiary">Esta bodega no tiene equipos disponibles.</div>
+            <div className="px-3 py-6 text-center text-[12px] text-text-tertiary">
+              {busqueda.trim() ? `Ningún equipo de esta bodega coincide con «${busqueda.trim()}».` : "Esta bodega no tiene equipos disponibles."}
+            </div>
           ) : (
             equipment.map((eq: any) => (
               <label key={eq.id} className="flex cursor-pointer items-center gap-3 border-b border-border-subtle px-3 py-2 last:border-0 hover:bg-surface-2">
@@ -184,7 +249,7 @@ export function NuevaTransferenciaModal({
                   type="checkbox"
                   className="h-4 w-4 shrink-0 accent-brand"
                   checked={!!selected[eq.id]}
-                  onChange={(e) => setSelected((s) => ({ ...s, [eq.id]: e.target.checked }))}
+                  onChange={(e) => alternar(eq, e.target.checked)}
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2 text-[13px]">

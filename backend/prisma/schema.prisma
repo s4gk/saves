@@ -515,12 +515,52 @@ model FixedAsset {
   disposalProceeds        Decimal?            @db.Decimal(18, 2)
   disposalEntryId         String? // asiento de baja/venta
   notes                   String?
+  /// Identificación física: con qué se reconoce el equipo en el sitio (una OLT, una
+  /// Mikrotik, un vehículo). El serial es el que trae la placa del fabricante.
+  brand                   String?
+  model                   String?
+  serialNumber            String?
+  /// Dónde está: la sede y el punto exacto dentro de ella (nodo, rack, oficina).
+  branchId                String?
+  branch                  Branch?             @relation(fields: [branchId], references: [id])
+  location                String?
+  /// Coordenadas GPS tomadas con el celular en el sitio (WGS84), con la precisión que
+  /// reportó el dispositivo en metros y quién/cuándo las capturó.
+  latitude                Float?
+  longitude               Float?
+  gpsAccuracy             Int?
+  gpsCapturedAt           DateTime?
+  gpsCapturedBy           String?
+  /// Quién lo tiene a cargo (custodio).
+  responsible             String?
+  /// Con qué se compró: proveedor y número de factura de compra.
+  supplier                String?
+  invoiceNumber           String?
+  createdBy               String?
+  photos                  FixedAssetPhoto[]
   depreciations           DepreciationEntry[]
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
 
   @@index([categoryId])
   @@index([status])
+  @@index([branchId])
+}
+
+/// Foto de un activo fijo (el equipo, su placa con el serial, dónde quedó instalado).
+/// El binario vive en `uploads/fixed-assets/<assetId>/<storedName>`.
+model FixedAssetPhoto {
+  id           String     @id @default(cuid())
+  assetId      String
+  asset        FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  storedName   String
+  originalName String
+  mimeType     String
+  size         Int
+  uploadedBy   String?
+  createdAt    DateTime   @default(now())
+
+  @@index([assetId])
 }
 
 /// One depreciation charge per asset per month — idempotent by (asset, year, month).
@@ -2870,6 +2910,9 @@ model Branch {
   name         String // title (Yopal, Villanueva, Monterrey, Mocoa, Aguazul, Tauramena, Villavicencio)
   summary      String?
   dir          String?
+  /// Ubicación de la oficina de la sede: el mapa vuela aquí al elegir la sede.
+  officeLat    Float?
+  officeLng    Float?
   subscribers  Subscriber[]
   mikrotiks    Mikrotik[]
   olts         Olt[]
@@ -2881,6 +2924,17 @@ model Branch {
   /// Centro de costo de la sede (contabilidad de gestión: estado de resultados por sede).
   costCenterId String?              @unique
   costCenter   CostCenter?          @relation(fields: [costCenterId], references: [id])
+  /// Activos fijos que están en esta sede (OLT, routers, vehículos…).
+  fixedAssets  FixedAsset[]
+  /// Sede DESACTIVADA (`false`) = la que ya no opera pero cuyos datos se quedan:
+  /// desaparece de TODOS los selectores y filtros de sede (alta de cliente, órdenes,
+  /// agenda, reportes, inventario, promociones, campañas, red…), y ya no se puede
+  /// elegir para nada nuevo. Lo que ya existe no se toca: sus clientes, facturas,
+  /// órdenes y movimientos se siguen viendo, facturando y sincronizando con el legacy
+  /// igual que antes, y el nombre de la sede sigue resolviéndose donde haga falta
+  /// (una factura de Mocoa no puede quedarse sin sede en pantalla).
+  /// Se cambia en Configuración › Sedes. Ver `src/common/sedes-activas.ts`.
+  isActive     Boolean              @default(true)
   createdAt    DateTime             @default(now())
 }
 
@@ -3024,6 +3078,7 @@ model Subscriber {
   waConversations     WhatsappConversation[]
   contactos           SubscriberContact[]
   advances            CustomerAdvance[]
+  pendingNotes        PendingNote[]
   pendingInstalls     PendingInstall[]
   pendingOrders       PendingOrder[]
   verificaciones      ChatAccessVerification[]
@@ -3636,6 +3691,53 @@ model NoteRequest {
   @@index([assignedToId, status])
 }
 
+/// Nota crédito/débito que se deja PENDIENTE porque el cliente aún no tiene la
+/// factura sobre la cual aplicarla. Se aplica sola a la próxima factura que nazca
+/// (corrida del mes o factura manual), en el mismo commit que la crea. Ver
+/// `billing/notas-pendientes.ts`. No viaja al legacy: lo que viaja es el renglón
+/// "Nota Credito"/"Nota Debito" que deja en la factura al aplicarse.
+model PendingNote {
+  id             String     @id @default(cuid())
+  subscriberId   String
+  subscriber     Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  type           String // CREDITO | DEBITO
+  amount         Decimal    @db.Decimal(14, 2)
+  /// Lo ya aplicado. Una crédito mayor que la factura se aplica hasta dejarla en
+  /// cero y el resto sigue pendiente para la siguiente.
+  applied        Decimal    @default(0) @db.Decimal(14, 2)
+  description    String     @db.Text
+  /// Etiqueta de retención (`RETENTION_TYPES`), igual que en la nota directa.
+  retentionType  String?
+  status         String     @default("PENDIENTE") // PENDIENTE | APLICADA | ANULADA
+  /// Quien la emitió (Staff.legacyId): firma el renglón de la factura al aplicarse.
+  authorLegacyId Int?
+  createdByName  String
+  canceledAt     DateTime?
+  canceledBy     String?
+  cancelReason   String?    @db.Text
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  applications PendingNoteApplication[]
+
+  @@index([subscriberId, status])
+  @@index([status, createdAt])
+}
+
+/// Cada vez que una nota pendiente cae sobre una factura.
+model PendingNoteApplication {
+  id        String      @id @default(cuid())
+  noteId    String
+  note      PendingNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  invoiceId String
+  invoice   SubInvoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount    Decimal     @db.Decimal(14, 2)
+  createdAt DateTime    @default(now())
+
+  @@index([noteId])
+  @@index([invoiceId])
+}
+
 /// Factura de suscriptor (legacy `invoices`). Dos ejes de estado: status (pago) y ron (servicio/cartera).
 model SubInvoice {
   id       String @id @default(cuid())
@@ -3770,6 +3872,7 @@ model SubInvoice {
   electronicInvoices ElectronicInvoice[]
   advancesOrigin     CustomerAdvance[]            @relation("AnticipoOrigen")
   advancesApplied    CustomerAdvanceApplication[]
+  pendingNotesApplied PendingNoteApplication[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4234,6 +4337,7 @@ model ScheduledPayment {
   dayOfMonth    Int                   @default(1) // día del mes en que corresponde pagarlo
   beneficiary   String? // a quién se le paga
   note          String?
+  supplyOrderId String? // orden de compra que salda (2026-10-05): el pago se registra como abono a ella
   active        Boolean               @default(true)
   createdById   String?
   createdByName String?
@@ -5571,6 +5675,10 @@ model Equipment {
   /// filas que ya existían se sellaron con 2020-01-01 al crear la columna, que es lo que
   /// las deja fuera de cualquier corte razonable.
   createdAt        DateTime  @default(now())
+  /// Categoría y tipo (ONU, OLT, RB Mikrotik…), elegidos al dar de alta o al editar.
+  /// Solo nexus: el legacy no los tiene. Catálogo en `src/network/equipos-catalogo.ts`.
+  category         String?
+  equipmentType    String?
 
   transferItems EquipmentTransferItem[]
 
@@ -5580,6 +5688,7 @@ model Equipment {
   @@index([editedAt])
   @@index([returnedAt])
   @@index([reservedTicketId])
+  @@index([equipmentType])
 }
 
 /// Transferencia de equipos entre almacenes (legacy `transfer_equipos`).
@@ -5700,6 +5809,11 @@ model Ticket {
   assignedAt      DateTime?
   /// Momento exacto del cierre, por lo mismo que `assignedAt` frente a `finalDate`.
   resolvedAt      DateTime?
+  /// Momento exacto en que el técnico la EMPEZÓ (pasó a REALIZANDO). Con
+  /// `resolvedAt` da lo que duró la visita, que es contra lo que se mide el bono
+  /// por terminar temprano (2026-10-01, ver order-score.policy.ts). Devolverla a
+  /// PENDIENTE lo borra: el intento no cuenta.
+  startedAt       DateTime?
 
   // --- Quién GENERÓ la orden (2026-08-28) ---
   // Hasta hoy el autor de una orden vivía sólo en `col`, que es texto libre heredado
@@ -5813,6 +5927,11 @@ model Ticket {
   /// Cuándo se sellaron los puntos. Distingue "cerrada antes de que existiera el
   /// puntaje" (null) de "cerrada y valió 0 puntos", que no es lo mismo.
   scoredAt DateTime?
+  /// Bono por terminar temprano, ya INCLUIDO en `score`: 1 si la visita duró menos
+  /// que el tiempo estándar de su tipo (`TicketTypeTime`), 0 si no. `null` = orden
+  /// cerrada antes de que existiera el bono. Se guarda aparte para poder explicar
+  /// de dónde salen los puntos.
+  earlyBonus Int?
 
   // --- Traslado de domicilio (2026-08-27) ---
   // Hasta ahora la orden de 'Traslado' no portaba a dónde se muda el cliente: la
@@ -5882,6 +6001,14 @@ model Ticket {
   /// "aplicar velocidad" contra la OLT (que lee el plan VIGENTE del abonado).
   /// null = se registró el plan pero el cambio no llegó a aplicarse.
   planAppliedAt DateTime?
+  /// COMBO destino (`PlanBundle.id`) de una orden de megas que no cambia sólo el
+  /// internet sino el paquete entero (internet + TV / streaming). `planToId` sigue
+  /// siendo el plan de INTERNET del combo —de ahí salen las megas, el perfil PPP y
+  /// el traffic-table—; esto dice que al cerrar se aplica el combo completo. Sin FK
+  /// por lo mismo que `planToId`. null = la orden cambia sólo el internet.
+  bundleToId    String?
+  /// Copia del nombre del combo: el catálogo se renombra.
+  bundleToName  String?
 
   // --- Cargo de la orden (2026-09-01, ver billing/cargos-orden.ts) ---
   // El traslado no es el único trabajo que se cobra al abrirlo: 'AgregarInternet'
@@ -6007,6 +6134,20 @@ model TicketTypeScore {
   /// "entero del 1 al 5" y un CHECK suelto no explica por qué está ahí.
   points    Int
   /// Quién dejó este puntaje. Es una decisión de gestión, no un dato técnico.
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+
+/// Tiempo estándar de un tipo de orden, en minutos: lo que se espera que dure la
+/// visita del inicio al cierre. Quien la termina en menos gana el bono (ver
+/// `Ticket.earlyBonus`). Tabla aparte de `TicketTypeScore` porque allí "sin fila"
+/// significa "puntaje sugerido" y una cosa no debe arrastrar a la otra. Vacía =
+/// todo sugerido; `minutes = 0` = este tipo no da bono.
+model TicketTypeTime {
+  id        String   @id @default(cuid())
+  type      String   @unique
+  minutes   Int
   updatedBy String?
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
@@ -6678,7 +6819,16 @@ model CarteraSeguimiento {
   estadoFinal SubscriberStatus?
   /// RETIRADO | ACTIVADO | PARCIAL | PAGO_SIN_ACTIVAR | SIN_PAGO
   categoria   String?
+  /// Fecha del último pago del mes (congelada al cierre; en vivo mientras está abierto).
+  ultimoPago  DateTime?         @db.Date
   cerradoEn   DateTime?
+
+  // --- Gestión de cartera (la escribe la persona, no el cron) ---
+  /// Corrección a mano de la clasificación; si está, manda sobre `categoria`.
+  categoriaManual String?
+  observaciones   String?
+  gestionadoPorId String?
+  gestionadoEn    DateTime?
 
   createdAt DateTime @default(now())
 

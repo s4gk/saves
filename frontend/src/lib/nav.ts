@@ -31,15 +31,25 @@ export const screenKey = (href: string) => "screen" + href.replace(/\//g, ".");
 
 /** Sedes del módulo "Equipos disponibles" (una pantalla por sede, `/red/disponibles/<slug>`). */
 /** `legacyId` = `Branch.legacyId`, con el que se acota por sede en el backend. */
+/**
+ * `oculta` = sede DESACTIVADA (`Branch.isActive = false` en la base, se cambia en
+ * Configuración › Sedes). No se borra de esta lista: su pantalla sigue respondiendo por
+ * URL y conserva su nombre, pero sale del MENÚ y del catálogo de permisos. ESPEJO de
+ * `SEDES_DISPONIBLES` en `backend/src/auth/permissions.catalog.ts`: si se enciende o se
+ * apaga una sede, hay que tocar las dos listas.
+ */
 export const SEDES_DISPONIBLES = [
   { slug: "yopal", label: "Yopal", legacyId: 2 },
   { slug: "villanueva", label: "Villanueva", legacyId: 3 },
   { slug: "monterrey", label: "Monterrey", legacyId: 4 },
   { slug: "aguazul", label: "Aguazul", legacyId: 6 },
   { slug: "tauramena", label: "Tauramena", legacyId: 7 },
-  { slug: "villavicencio", label: "Villavicencio", legacyId: 8 },
-  { slug: "mocoa", label: "Mocoa", legacyId: 5 },
+  { slug: "villavicencio", label: "Villavicencio", legacyId: 8, oculta: true },
+  { slug: "mocoa", label: "Mocoa", legacyId: 5, oculta: true },
 ] as const;
+
+/** Las que se enseñan: el menú no ofrece pantallas de una sede desactivada. */
+export const SEDES_DISPONIBLES_VISIBLES = SEDES_DISPONIBLES.filter((s) => !("oculta" in s && s.oculta));
 
 // ── ESPEJO FIEL DEL SIDEBAR LEGACY (saves-vestel) ───────────────────────────
 // Réplica de la estructura del menú de la app legacy (CodeIgniter,
@@ -130,6 +140,7 @@ const contabilidad: NavItem[] = [
   { icon: "calendar", label: "Cierre de mes", href: "/contabilidad/cierres" },
   { icon: "settings", label: "Mapeo de cuentas", href: "/contabilidad/mapeo-cuentas" },
   { icon: "list-tree", label: "Centros de costo", href: "/contabilidad/centros-de-costo" },
+  { icon: "boxes", label: "Activos fijos", href: "/contabilidad/activos-fijos" },
 ];
 
 // RED / ISP — operación de red que NO es Mikrotik (ese tiene módulo propio).
@@ -173,7 +184,7 @@ const inventario: NavItem[] = [
     // `backend/src/auth/permissions.catalog.ts`.
     icon: "package-check",
     label: "Equipos disponibles",
-    children: SEDES_DISPONIBLES.map((s) => ({ icon: "map-pin", label: s.label, href: `/red/disponibles/${s.slug}` })),
+    children: SEDES_DISPONIBLES_VISIBLES.map((s) => ({ icon: "map-pin", label: s.label, href: `/red/disponibles/${s.slug}` })),
   },
   {
     icon: "package",

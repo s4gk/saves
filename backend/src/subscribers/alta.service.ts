@@ -1,4 +1,5 @@
 import { PrismaService } from '../prisma/prisma.service';
+import { BadRequestException } from '../core/http/errores';
 import { SubscribersService } from './subscribers.service';
 import { MikrotikService } from '../network/mikrotik.service';
 import { FacturasService } from '../billing/facturas.service';
@@ -73,6 +74,11 @@ export class AltaClienteService {
   ) {}
 
   async alta(dto: CreateSubscriberDto, user: AuthUser) {
+    // En la venta solo se contratan combos. Se frena ANTES de crear el abonado:
+    // después ya habría quemado consecutivo y quedaría sin servicio.
+    if (!dto.bundleId?.trim() && (dto.planIds ?? []).some(Boolean)) {
+      throw new BadRequestException('En la venta solo se ofrecen combos: elige un combo en lugar de planes sueltos.');
+    }
     // 1) El abonado. Si esto revienta (sede ajena, secret repetido) no se ha
     // hecho nada más y el error sube tal cual a la pantalla de alta.
     const creado = await this.subscribers.create(dto, user);

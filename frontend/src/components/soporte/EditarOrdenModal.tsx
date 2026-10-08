@@ -8,7 +8,7 @@ import { toast } from "@/components/ui/Toast";
 import { useAuth } from "@/context/AuthProvider";
 import { listaJson, mensajeDeError } from "@/lib/errores";
 import { fullCurrency } from "@/lib/format";
-import { type Plan } from "@/lib/plans";
+import { type Bundle, type Plan, comboDePlanes } from "@/lib/plans";
 import { TitularFields, faltaEnTitular, titularDesde, titularPayload, titularTexto, type TitularValor } from "@/components/soporte/TitularFields";
 import { DireccionFields, DIRECCION_VACIA, NOM_KEYS, ZONA_KEYS, direccionArmada, type DireccionValor } from "@/components/subscribers/DireccionFields";
 
@@ -36,7 +36,7 @@ export type OrdenEditable = {
    * de megas que nacieron sin decirlo: las del legacy (allá el plan vive en su tabla
    * `temporales`) y las que abre el chatbot con el plan por confirmar.
    */
-  megas?: { planId: string | null; plan: string | null; a: number | null; de: number | null } | null;
+  megas?: { planId: string | null; plan: string | null; a: number | null; de: number | null; comboId?: string | null; combo?: string | null } | null;
   /** El cambio de titular que la orden ya tiene registrado, si tiene alguno. */
   cambioTitular?: { desde: string | null; hasta: string; datos: Record<string, unknown> | null } | null;
 };
@@ -111,7 +111,11 @@ export function EditarOrdenModal({
   /** El catálogo de internet y lo que el cliente tiene hoy, para las órdenes de megas. */
   const [planes, setPlanes] = useState<Plan[]>([]);
   const [servicios, setServicios] = useState<ServicioActual[]>([]);
+  /** Los combos a la venta: megas + plan de TV van en el combo que los reúne. */
+  const [combos, setCombos] = useState<Bundle[]>([]);
   const [planNuevo, setPlanNuevo] = useState(orden.megas?.planId ?? "");
+  /** El plan de TV elegido; `null` = no se ha tocado (manda el del combo que ya trae la orden). */
+  const [tvTocado, setTvTocado] = useState<string | null>(null);
   /** Los datos del nuevo titular, desde los que la orden ya tenga. */
   const [titularInicial] = useState(() => titularDesde(orden.cambioTitular?.datos));
   const [titular, setTitular] = useState<TitularValor>(titularInicial);
@@ -202,7 +206,22 @@ export function EditarOrdenModal({
       .sort((a, b) => (a.megas ?? 0) - (b.megas ?? 0) || a.name.localeCompare(b.name)),
     [planes],
   );
+  const planesTv = useMemo(
+    () => planes.filter((p) => p.kind === "TV").sort((a, b) => a.name.localeCompare(b.name)),
+    [planes],
+  );
+  /** La TV que trae la orden: la del combo que tiene puesto. */
+  const tvInicial = useMemo(() => {
+    const c = orden.megas?.comboId ? combos.find((b) => b.id === orden.megas?.comboId) : null;
+    return c?.items.find((i) => i.kind === "TV")?.planId ?? "";
+  }, [combos, orden.megas]);
+  const tvNuevo = tvTocado ?? tvInicial;
   const planElegido = useMemo(() => planesInternet.find((p) => p.id === planNuevo) ?? null, [planesInternet, planNuevo]);
+  const tvElegido = useMemo(() => planesTv.find((p) => p.id === tvNuevo) ?? null, [planesTv, tvNuevo]);
+  const comboElegido = useMemo(() => comboDePlanes(combos, planNuevo, tvNuevo), [combos, planNuevo, tvNuevo]);
+  const sinCombo = !!planElegido && !!tvElegido && !comboElegido;
+  /** ¿Se tocó el destino? (megas o TV distintas de lo que la orden traía) */
+  const destinoCambiado = planNuevo !== (orden.megas?.planId ?? "") || tvNuevo !== tvInicial;
   const internetActual = useMemo(() => servicios.find((s) => s.kind === "INTERNET") ?? null, [servicios]);
   /**
    * DE CUÁNTO VIENE. Espejo de lo que hace el servidor al corregir: si la orden ya
@@ -243,9 +262,19 @@ export function EditarOrdenModal({
   useEffect(() => {
     if (!conPlanInternet || planes.length) return;
     let vivo = true;
-    void authFetch("/plans?activeOnly=true&kind=INTERNET")
-      .then(listaJson)
-      .then((d) => { if (vivo) setPlanes(d as Plan[]); })
+    // Los dos a la vez y se guardan juntos: si los planes llegaban primero,
+    // `planes.length` cambiaba, este efecto se limpiaba (vivo = false) y la
+    // respuesta de los combos se tiraba — sin combos, TODO internet + TV salía
+    // como «No hay combo armado» aunque el combo existiera.
+    void Promise.all([
+      authFetch("/plans?activeOnly=true").then(listaJson),
+      authFetch("/plan-bundles?activeOnly=true").then(listaJson).catch(() => []),
+    ])
+      .then(([p, b]) => {
+        if (!vivo) return;
+        setCombos(b as Bundle[]);
+        setPlanes(p as Plan[]);
+      })
       .catch(() => {});
     return () => { vivo = false; };
   }, [conPlanInternet, planes.length, authFetch]);
@@ -309,6 +338,13 @@ export function EditarOrdenModal({
     if (porDias && (!Number.isInteger(diasNum) || diasNum < 1 || diasNum > 30)) {
       setErr("Los días de reconexión deben ser un número entre 1 y 30."); return;
     }
+    if (conPlanInternet && sinCombo) {
+      setErr(`No hay combo armado con ${planElegido?.megas ?? planElegido?.name} Megas + «${tvElegido?.name}». Ármalo en Configuración → Planes → Combos.`);
+      return;
+    }
+    if (conPlanInternet && destinoCambiado && !planNuevo) {
+      setErr("Elige las megas: la TV sola no hace el combo."); return;
+    }
     if (porMegas && megasAlReves) {
       setErr(`«${planElegido?.name}» ${subeMegas ? "no sube" : "no baja"} nada: el cliente venía de ${origenMegas.megas} Megas.`);
       return;
@@ -331,8 +367,10 @@ export function EditarOrdenModal({
           // El plan solo viaja si se eligió otro: abrir este modal en una orden de
           // megas y guardar la observación no puede volver a cambiarle el plan al
           // cliente (y con él el precio de su próxima factura).
-          ...(conPlanInternet && planNuevo && planNuevo !== (orden.megas?.planId ?? "")
-            ? { planToId: planNuevo }
+          // Megas y TV viajan juntas si se tocó cualquiera de las dos. `tvPlanToId: ""`
+          // quita el combo y deja sólo el internet.
+          ...(conPlanInternet && planNuevo && destinoCambiado
+            ? { planToId: planNuevo, tvPlanToId: tvNuevo }
             : {}),
           // El titular solo viaja si se tocó: guardar la observación no puede
           // reescribirle la ficha al cliente.
@@ -440,7 +478,7 @@ export function EditarOrdenModal({
               <p className="mb-2 text-[12px] text-text-tertiary">
                 La orden dice <span className="text-text-secondary">
                   {orden.megas.a != null ? `${orden.megas.a} Megas` : orden.megas.plan}
-                  {orden.megas.plan ? ` · plan «${orden.megas.plan}»` : ""}
+                  {orden.megas.combo ? ` · combo «${orden.megas.combo}»` : orden.megas.plan ? ` · plan «${orden.megas.plan}»` : ""}
                 </span>. Elige otro solo si ese está mal; el cliente pasa a él cuando se cierre la orden.
               </p>
             ) : (
@@ -453,30 +491,47 @@ export function EditarOrdenModal({
                   : porAgregarInternet ? null : "."}
               </p>
             )}
-            <Field label="Plan nuevo" hint="La velocidad la pone el plan: es también el precio de la próxima factura y el perfil que se le empuja al router">
-              <Select value={planNuevo} onChange={(e) => setPlanNuevo(e.target.value)} disabled={!planesInternet.length}>
-                <option value="">{planesInternet.length ? "— sin cambiar el plan —" : "Cargando…"}</option>
-                {planesInternet.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.megas != null ? `${p.megas} Megas · ${p.name}` : p.name} · {fullCurrency(p.price)}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Megas (plan de internet)" hint="La velocidad la pone el plan: es también el precio de la próxima factura y el perfil que se le empuja al router">
+                <Select value={planNuevo} onChange={(e) => setPlanNuevo(e.target.value)} disabled={!planesInternet.length}>
+                  <option value="">{planesInternet.length ? "— sin cambiar el plan —" : "Cargando…"}</option>
+                  {planesInternet.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.megas != null ? `${p.megas} Megas · ${p.name}` : p.name} · {fullCurrency(p.price)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Plan de TV" hint="Con TV, queda en combo (internet + TV).">
+                <Select value={tvNuevo} onChange={(e) => setTvTocado(e.target.value)} disabled={!planesTv.length}>
+                  <option value="">— sin combo: sólo cambia el internet —</option>
+                  {planesTv.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} · {fullCurrency(p.price)}</option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+            {sinCombo && (
+              <p className="mt-2 flex items-start gap-1.5 text-[12px] text-warning-text">
+                No hay combo armado con {planElegido?.megas ?? planElegido?.name} Megas + «{tvElegido?.name}». Ármalo en
+                Configuración → Planes → Combos, o deja la TV sin combo.
+              </p>
+            )}
             {/* El plan que la orden trae puede estar OCULTO en el catálogo (72 de 85
                 lo están): el desplegable solo ofrece los activos, así que si el suyo
                 no está se dice aquí en vez de dejar la casilla en blanco, que se lee
                 como "esta orden no tiene plan". */}
-            {orden.megas?.planId && !planesInternet.some((p) => p.id === orden.megas?.planId) && planesInternet.length > 0 && (
+            {orden.megas?.planId && !orden.megas.comboId && !planesInternet.some((p) => p.id === orden.megas?.planId) && planesInternet.length > 0 && (
               <p className="mt-1 text-[11.5px] text-text-tertiary">
                 El plan que tiene puesto («{orden.megas.plan}») está oculto en el catálogo y no sale en la lista.
               </p>
             )}
-            {planElegido && !megasAlReves && planNuevo !== (orden.megas?.planId ?? "") && (
+            {planElegido && !megasAlReves && !sinCombo && destinoCambiado && (
               <p className="mt-2 text-[12px] text-text-secondary">
                 Queda en{" "}
                 <b className="text-text-primary">{planElegido.megas != null ? `${planElegido.megas} Megas` : planElegido.name}</b>
-                {" · "}{fullCurrency(planElegido.price)} al mes. Se le aplica al cerrar la orden.
+                {comboElegido && <> + <b className="text-text-primary">{tvElegido?.name}</b>, en el combo «{comboElegido.name}»</>}
+                {" · "}{fullCurrency(comboElegido ? comboElegido.total : planElegido.price)} al mes. Se le aplica al cerrar la orden.
               </p>
             )}
             {megasAlReves && (

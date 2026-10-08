@@ -1,4 +1,5 @@
 import { BundlesService } from './bundles.service';
+import type { AuthUser } from '../auth/current-user.decorator';
 import { CreateBundleDto, UpdateBundleDto } from './dto/bundle.dto';
 
 /** Combos comerciales (paquetes de planes que se venden juntos). */
@@ -12,6 +13,11 @@ export class BundlesController {
   /** Catálogo de apps que se pueden ofrecer en un combo (para el selector). */
   apps() {
     return this.bundles.appsCatalogo();
+  }
+
+  /** Abonados que tienen el combo. */
+  abonados(id: string, user: AuthUser) {
+    return this.bundles.abonados(id, user);
   }
 
   create(dto: CreateBundleDto) {

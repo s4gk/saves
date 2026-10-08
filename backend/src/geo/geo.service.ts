@@ -5,7 +5,7 @@ import { AuthUser } from '../auth/current-user.decorator';
 import { exigirSedeSuscriptor, sedesDe, whereSedeSuscriptor } from '../common/sede-scope';
 import { esClienteDeSuOrden, esTecnicoDeCampo, whereSuscriptoresDeSusOrdenes } from '../common/tecnico-scope';
 import { assertPoint, distMeters, parsePoint } from './geo.util';
-import { MapQueryDto, PingDto, RouteDto, SetSubscriberLocationDto } from './dto/geo.dto';
+import { MapQueryDto, PingDto, RouteDto, SetBranchOfficeDto, SetSubscriberLocationDto } from './dto/geo.dto';
 import { RoutingService } from './routing.service';
 import { direccionDe } from '../common/subscriber-address';
 
@@ -219,8 +219,24 @@ export class GeoService {
    * traerse las columnas del registro ganador; con `DISTINCT ON` de Postgres es
    * una sola pasada por el índice `(userId, createdAt)`.
    */
-  async technicians(_user: AuthUser, horas = VIGENCIA_TECNICO_H) {
+  async technicians(user: AuthUser, horas = VIGENCIA_TECNICO_H) {
     const desde = new Date(Date.now() - horas * 3600_000);
+    // Quien va acotado por sede (la cajera) ve sólo a los técnicos de sus sedes. Dos
+    // condiciones y las dos hacen falta: la sede sale de `User.sedesAccede` del que
+    // reportó (un usuario sin sedes es de mando y no se le enseña a nadie acotado), y
+    // "técnico" = que haya latido en la ventana, porque el latido sólo lo manda
+    // `esTecnicoDeCampo()`; sin esto saldría también otra cajera que subió un adjunto.
+    const sedes = await sedesDe(this.prisma, user);
+    const acotado = sedes
+      ? Prisma.sql`AND "userId" IN (
+          SELECT u.id FROM "User" u
+          WHERE u."sedesAccede" && ${sedes}::int[]
+        )
+        AND "userId" IN (
+          SELECT "userId" FROM "GeoPing"
+          WHERE "reason" = 'heartbeat' AND "createdAt" >= ${desde}
+        )`
+      : Prisma.empty;
     const filas = await this.prisma.$queryRaw<
       Array<{
         userId: string; userName: string; lat: number; lng: number;
@@ -231,7 +247,7 @@ export class GeoService {
       SELECT DISTINCT ON ("userId")
         "userId", "userName", "lat", "lng", "accuracy", "reason", "refType", "refId", "createdAt"
       FROM "GeoPing"
-      WHERE "createdAt" >= ${desde}
+      WHERE "createdAt" >= ${desde} ${acotado}
       ORDER BY "userId", "createdAt" DESC
     `;
     return filas.map((f) => ({
@@ -381,6 +397,19 @@ export class GeoService {
       this.prisma.nap.count({ where: { gpsLat: { not: null } } }),
     ]);
     return { total, conGps, totalActivos, conGpsActivos, naps, napsConGps };
+  }
+
+  /** Coloca la oficina de una sede. No toca abonados ni pings: es sólo el pin de la sede. */
+  async setBranchOffice(id: string, dto: SetBranchOfficeDto) {
+    const p = this.validar(dto.lat, dto.lng);
+    const existe = await this.prisma.branch.findUnique({ where: { id }, select: { id: true } });
+    if (!existe) throw new NotFoundException('Sede no encontrada.');
+    const b = await this.prisma.branch.update({
+      where: { id },
+      data: { officeLat: p.lat, officeLng: p.lng },
+      select: { id: true, name: true, officeLat: true, officeLng: true },
+    });
+    return { id: b.id, name: b.name, office: { lat: b.officeLat, lng: b.officeLng } };
   }
 
   private validar(lat: number, lng: number) {

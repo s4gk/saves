@@ -519,11 +519,31 @@ async function pushCustomers(my, sum) {
     if (rows.length) log(`customers: ${rows.length} ${DRY ? 'en plan (seco)' : 'RETENIDOS (gate de altas cerrado)'}`);
     return;
   }
+  const renumerados = [];
   for (const s of rows) {
+    // El legacy sigue dando altas con `MAX(abonado)+1` y la ida tarda hasta 15 min en
+    // traerlas: en esa ventana nuestra secuencia puede repartir un número que allá ya
+    // es de otro cliente (pasó del 27-08 al 28-09: 67 clientes con número ajeno). Se
+    // mira DENTRO del bucle, como en `pushTickets`, y el nuestro cede.
+    const [[dupe]] = await my.query('SELECT id FROM customers WHERE abonado = ? LIMIT 1', [s.abonado]);
+    if (dupe) {
+      const [[{ mx }]] = await my.query('SELECT MAX(abonado) AS mx FROM customers');
+      const [{ nuevo }] = await prisma.$queryRaw`
+        SELECT setval('"Subscriber_abonado_seq"',
+          GREATEST(${Number(mx) || 0}::bigint, (SELECT last_value FROM "Subscriber_abonado_seq")) + 1)::int AS nuevo`;
+      await prisma.subscriber.update({ where: { id: s.id }, data: { abonado: nuevo } });
+      renumerados.push({ antes: s.abonado, ahora: nuevo });
+      s.abonado = nuevo;
+    }
     const id = await insertRow(my, 'customers', invCustomer(s, s.branch?.legacyId ?? null));
     await prisma.subscriber.update({ where: { id: s.id }, data: { legacyId: id } });
   }
+  sum.customers.renumerados = renumerados;
   if (rows.length) log(`customers: +${rows.length} empujados al legacy`);
+  if (renumerados.length) {
+    log(`customers: ${renumerados.length} con abonado renumerado porque allá ya era de otro: `
+      + renumerados.map((r) => `${r.antes}→${r.ahora}`).join(', '));
+  }
 }
 
 async function pushCustomerUpdates(my, sum) {
@@ -1510,6 +1530,40 @@ async function pushReconexiones(my, sum) {
   const facturas = [];
   if (conFacturas.length) {
     const porSub = new Map(conFacturas.map((p) => [p.subId, p]));
+    /*
+      EL ÚLTIMO CORTE CONOCIDO AQUÍ, por servicio (07-10-2026). `corteLegacy` sólo ve
+      los cortes que movieron `usu_estado` allá, y el corte que se hace desde nexus
+      —cerrar una 'Corte …', el lote del Mikrotik— NO lo mueve: el abonado sigue
+      'Activo'. Sin esto, cualquier 'Reconexion …' de los últimos RECONEXION_DIAS
+      valía, también la ANTERIOR al corte: el abonado 51854 se reconectó al pagar el
+      29-09, se le cerró la «Corte Combo» #510765 el 30-09, `pushEstadoServicio` llevó
+      el 'Cortado' al legacy y la pasada siguiente de aquí se lo borró con la
+      reconexión del día antes. La ida trajo la factura limpia y la corrida del 01-10
+      le cobró octubre completo (50 abonados así).
+      La hora del corte: `resolvedAt` si se cerró aquí; si no, la de creación de una
+      orden nacida aquí; y las que bajaron del legacy, el inicio de su día (`created`):
+      su `createdAt` es la hora de la importación, posterior al corte real, y no puede
+      dejar fuera una reconexión de esa misma tarde.
+    */
+    const cortesAqui = await prisma.ticket.findMany({
+      where: {
+        subscriberId: { in: [...porSub.keys()] },
+        status: 'RESUELTO',
+        type: { startsWith: 'Corte' },
+        created: { gte: new Date(desde.getTime() - 60 * 24 * 3600 * 1000) },
+      },
+      select: { subscriberId: true, type: true, created: true, createdAt: true, resolvedAt: true, createdBySource: true },
+    });
+    const ultimoCorte = new Map(); // subId → { internet: Date|null, tv: Date|null }
+    for (const c of cortesAqui) {
+      const deAqui = ['USUARIO', 'SISTEMA', 'CHATBOT'].includes(c.createdBySource);
+      const t = c.resolvedAt ?? (deAqui ? c.createdAt : c.created);
+      if (!t) continue;
+      const u = ultimoCorte.get(c.subscriberId) ?? { internet: null, tv: null };
+      if (/internet|combo/i.test(c.type) && (!u.internet || t > u.internet)) u.internet = t;
+      if (/television|combo/i.test(c.type) && (!u.tv || t > u.tv)) u.tv = t;
+      ultimoCorte.set(c.subscriberId, u);
+    }
     // SÓLO la factura VIGENTE de cada abonado: la que el legacy levanta al cobrar y la
     // única que se pinta en la ficha. Las anteriores marcadas 'Cortado' son el rastro
     // de cortes viejos —hay abonados con 22, desde 2021— y no se reescribe el historial
@@ -1534,13 +1588,15 @@ async function pushReconexiones(my, sum) {
       if (!pg) continue;
       const p = porSub.get(pg.subscriberId);
       if (!p) continue;
-      // La orden tiene que ser posterior al corte que el legacy todavía enseña.
-      const vale = (o) => !p.corteLegacy || o.fecha >= p.corteLegacy;
-      const devolvio = (svc) => (p.ordenes ?? []).some((o) => vale(o)
+      // La orden tiene que ser posterior al corte que el legacy todavía enseña Y al
+      // último corte de ESE servicio que se conoce aquí (ver `ultimoCorte`).
+      const corteAqui = ultimoCorte.get(pg.subscriberId) ?? { internet: null, tv: null };
+      const vale = (o, corte) => (!p.corteLegacy || o.fecha >= p.corteLegacy) && (!corte || o.fecha > corte);
+      const devolvio = (svc, corte) => (p.ordenes ?? []).some((o) => vale(o, corte)
         && (o.type.startsWith(svc) || o.type.startsWith('Reconexion Combo')));
       const set = {};
-      if (norm(r.estado_combo) === 'Cortado' && (pg.estadoCombo === null || devolvio('Reconexion Internet'))) set.estado_combo = null;
-      if (norm(r.estado_tv) === 'Cortado' && (pg.estadoTv === null || devolvio('Reconexion Television'))) set.estado_tv = null;
+      if (norm(r.estado_combo) === 'Cortado' && (pg.estadoCombo === null || devolvio('Reconexion Internet', corteAqui.internet))) set.estado_combo = null;
+      if (norm(r.estado_tv) === 'Cortado' && (pg.estadoTv === null || devolvio('Reconexion Television', corteAqui.tv))) set.estado_tv = null;
       if (!Object.keys(set).length) continue;
       // El `ron` es del abonado, no de un servicio: sólo se levanta si en esa factura
       // no queda ningún corte en pie.

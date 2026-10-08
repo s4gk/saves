@@ -207,33 +207,24 @@ export default function FacturacionPage() {
     }
   }
 
-  async function exportCsv() {
+  // Excel armado en el servidor (hoja de facturas + resumen). El CSV de antes iba
+  // separado por comas y el Excel en español lo abría todo en una sola columna.
+  async function exportExcel() {
     setExporting(true);
     try {
-      let rows: InvoiceRow[] = [];
-      let p = 1, pages = 1;
-      do {
-        const qs = filterQs({ page: String(p), pageSize: "100" });
-        const d: InvoiceList = await (await authFetch(`/billing/invoices?${qs.toString()}`)).json();
-        rows = rows.concat(d.items ?? []);
-        pages = d.pages ?? 1;
-        p++;
-      } while (p <= pages && p <= 60); // tope de seguridad (~6000 filas)
-      if (!rows.length) { toast("No hay facturas para exportar", "send"); return; }
-      const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const header = ["N°", "Cliente", "Abonado", "Servicio", "Fecha", "Vence", "Total", "Pagado", "Saldo", "Estado"];
-      const lines = rows.map((r) => [
-        r.tid, r.subscriber, r.abonado ?? "", r.service ?? "", fmtDate(r.date), fmtDate(r.dueDate),
-        r.total, r.paid, r.balance, INVOICE_STATUS_LABEL[r.status] ?? r.status,
-      ].map(esc).join(","));
-      const csv = "﻿" + [header.map(esc).join(","), ...lines].join("\r\n");
-      const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      const qs = filterQs(orden.params);
+      const res = await authFetch(`/billing/invoices/export.xlsx?${qs.toString()}`);
+      if (!res.ok) {
+        const cuerpo = await res.json().catch(() => null);
+        throw new Error(cuerpo?.message ?? "No se pudo exportar");
+      }
+      const url = URL.createObjectURL(await res.blob());
       const a = document.createElement("a");
       a.href = url;
-      a.download = `facturas-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `facturas-${new Date().toISOString().slice(0, 10)}.xlsx`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      toast(`${rows.length} factura(s) exportada(s)`, "check");
+      toast("Excel de facturas descargado", "check");
     } catch (e) { toast(mensajeDeError(e) ?? "Error al exportar", "x"); }
     finally { setExporting(false); }
   }
@@ -331,12 +322,12 @@ export default function FacturacionPage() {
 
         <button
           type="button"
-          onClick={exportCsv}
+          onClick={exportExcel}
           disabled={exporting}
-          title="Exportar el set filtrado a CSV"
+          title="Exportar las facturas filtradas a Excel"
           className="inline-flex items-center gap-1.5 rounded-lg border border-border-default bg-surface px-3 py-2 text-[12px] font-semibold text-text-secondary transition-colors hover:bg-surface-2 disabled:opacity-50"
         >
-          <Icon name={exporting ? "loader" : "download"} size={14} className={exporting ? "animate-spin" : ""} /> <span className="hidden sm:inline">{exporting ? "Exportando…" : "Exportar"}</span>
+          <Icon name={exporting ? "loader" : "download"} size={14} className={exporting ? "animate-spin" : ""} /> <span className="hidden sm:inline">{exporting ? "Exportando…" : "Exportar Excel"}</span>
         </button>
       </ListToolbar>
 

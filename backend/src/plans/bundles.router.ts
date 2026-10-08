@@ -11,7 +11,7 @@
  */
 import { crearRouter, manejar } from '../core/http/ruta';
 import { validar } from '../core/http/validar';
-import { autenticar, exigirArea } from '../core/auth/instancias';
+import { autenticar, exigirArea, usuarioDe } from '../core/auth/instancias';
 import { BundlesController } from './bundles.controller';
 import { bundlesService } from '../core/contenedor';
 import { CreateBundleDto, UpdateBundleDto } from './dto/bundle.dto';
@@ -36,6 +36,15 @@ bundlesRouter.get(
   autenticar,
   exigirArea('administracion', 'contabilidad', 'tecnicos', 'sistemas', 'caja'),
   manejar(() => bundles.apps()),
+);
+
+// Quiénes tienen el combo. Lo ve quien administra el catálogo: es la lista de
+// clientes que se mueve al cambiarle algo al combo.
+bundlesRouter.get(
+  '/:id/abonados',
+  autenticar,
+  exigirArea('sistemas', 'administracion'),
+  manejar((req) => bundles.abonados(req.params.id, usuarioDe(req))),
 );
 
 // Escribir es fijar el PRECIO con el que se vende: mismas manos que el catálogo.

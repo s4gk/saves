@@ -30,6 +30,7 @@ type Live = {
   ip?: string;
   inActivos?: boolean;
   inMorosos?: boolean;
+  morososEn?: string[];
 };
 
 type Estado = {
@@ -67,6 +68,11 @@ const TONOS: Record<Pinta["tono"], { caja: string; punto: string }> = {
  * NO es sinónimo de navegar: si está en MOROSOS, está cortado. Verde solo
  * cuando tiene sesión Y no está en la lista.
  */
+/** " (en Yopal_Eoc)": el corte puede quedar vivo en otro router de la sede. */
+function donde(l: Live): string {
+  return l.morososEn?.length ? ` (en ${l.morososEn.join(", ")})` : "";
+}
+
 function leer(e: Estado): Pinta {
   if (e.dryRun) {
     return {
@@ -110,8 +116,8 @@ function leer(e: Estado): Pinta {
       icono: "ban",
       titulo: "Cortado por mora",
       detalle: l.sessionActive
-        ? "Conecta, pero el router le bota el tráfico: su IP está en la lista MOROSOS."
-        : "En la lista MOROSOS y sin sesión levantada.",
+        ? `Conecta, pero el router le bota el tráfico: su IP está en la lista MOROSOS${donde(l)}.`
+        : `En la lista MOROSOS${donde(l)} y sin sesión levantada.`,
     };
   }
   if (l.sessionActive) {

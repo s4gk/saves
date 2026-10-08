@@ -814,8 +814,8 @@ export class GenieacsService {
    * El lote de TV con la red en pausa (`network.tvSoloSistema`): no se toca ni el ACS
    * ni la OLT, sólo el sistema.
    *
-   * · CORTE: la ficha queda con la TV CORTADO y la orden "Corte Television" nace
-   *   PENDIENTE (desde 2026-09-23): el corte físico lo hace un técnico y la cierra él.
+   * · CORTE: la ficha queda con la TV CORTADO y la orden "Corte Television" nace ya
+   *   RESUELTA (desde 2026-10-01; del 23-09 al 01-10 nacía PENDIENTE).
    * · ALTA desde la pantalla masiva (`marcarSinRed`): la decide una persona que ya
    *   devolvió la señal a mano, así que la ficha pasa a ACTIVO.
    * · ALTA automática (pago, cierre de orden): NO se marca. Cada fila sale sin vía y
@@ -880,10 +880,15 @@ export class GenieacsService {
    * en la ficha, ni en los informes de campo, ni en el legacy, que es donde se
    * consulta el historial del abonado.
    *
-   * Si la red lo aplicó (TR-069/OLT), la orden nace RESUELTA: es constancia. Si no
-   * —TR-069 en pausa o sin equipo—, nace PENDIENTE: es el trabajo de quien va a cortar
-   * en sitio, y la cierra él (2026-09-23). En ninguno de los dos casos se duplica: si
-   * el abonado ya tenía abierta su "Corte Television", se reusa (o se cierra) ESA.
+   * La orden nace SIEMPRE RESUELTA, la haya aplicado la red (TR-069/OLT) o no. Del
+   * 23-09 al 01-10-2026 la que la red no aplicaba nacía PENDIENTE para quien cortaba en
+   * sitio, pero nadie podía cerrarla (el cierre pide la firma de quien recibe y en un
+   * corte no hay quien firme) y cada lote dejaba un montón de órdenes abiertas que había
+   * que cerrar por script. El dueño pidió que el corte masivo las cierre solo. No se
+   * duplica: si el abonado ya tenía abierta su "Corte Television", se cierra ESA.
+   *
+   * Consecuencia a propósito: como ya no queda corte PENDIENTE, el pago posterior no
+   * tiene nada que anular (`anularCortesTvSinHacer`) y abre su "Reconexion Television".
    *
    * `serviceStatusAt` es lo que hace que el corte SOBREVIVA: sin esa marca la ida del
    * legacy devuelve el valor viejo a los 15 minutos y el corte se deshace solo (ver
@@ -945,21 +950,18 @@ export class GenieacsService {
       const porRed = !!(r?.ok && r.via);
       const comoSeHizo = porRed
         ? `Aplicado por ${r!.via === 'TR069' ? 'TR-069' : 'la OLT'}.`
-        : 'Hay que hacerlo en sitio: la red no lo aplica (TR-069 en pausa o sin equipo).';
+        : 'Corte masivo registrado en el sistema: la red no lo aplica (TR-069 en pausa o sin equipo).';
       const input = {
         subscriberId: id,
         type: 'Corte Television',
         subject: 'servicio',
-        problem: porRed ? 'Corte de televisión.' : 'Corte de televisión: hacerlo manualmente y cerrar la orden.',
+        problem: 'Corte de televisión.',
         section: [comoSeHizo, r?.detail || null, quien ? `Lo registró ${quien}.` : null].filter(Boolean).join(' '),
         autor: quien || 'Sistema',
       };
-      // Lo que hizo la red es constancia (nace cerrada). Lo que NO hizo es trabajo:
-      // la orden queda PENDIENTE y la cierra quien corta en sitio (2026-09-23, pedido
-      // del usuario: la TV se hace a mano mientras el TR-069 no funcione).
-      const orden = porRed
-        ? await this.ordenes.registrarResuelta(input)
-        : await this.ordenes.abrirSiNoHay(input);
+      // Nace cerrada siempre (2026-10-01, pedido del dueño): el corte masivo no deja
+      // órdenes abiertas, lo haya aplicado la red o no.
+      const orden = await this.ordenes.registrarResuelta(input);
       if (orden) abiertas++;
     }
     this.logger.log(`Corte de TV: ${abiertas}/${ids.length} órdenes registradas.`);

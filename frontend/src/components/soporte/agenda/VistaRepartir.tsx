@@ -380,8 +380,19 @@ export function VistaRepartir({ fecha, setFecha, filtros, setFiltros }: VistaPro
         key: "acciones",
         header: "Agendar a",
         sortable: false,
-        render: (t) => (
-          <span className="flex min-w-[15rem] flex-col gap-1.5 sm:flex-row sm:items-center">
+        render: (t) => {
+          // Asignada sin día: pasa con las órdenes que se asignan desde el legacy o
+          // desde la ficha antes de agendarlas. Sin decirlo, el desplegable vacío se
+          // leía como "no es de nadie" (2026-09-28, las de Fabián).
+          const asignada = (tecnicos.find((c) => c.staffId === t.staffId)?.nombre ?? t.tecnico)?.trim() || null;
+          return (
+          <span className="flex min-w-[15rem] flex-col gap-1">
+          {asignada && (
+            <span className="text-[11px] text-text-tertiary">
+              Asignada a <span className="font-semibold text-text-secondary">{asignada}</span> · sin día
+            </span>
+          )}
+          <span className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
             <Select
               value=""
               disabled={guardando}
@@ -397,7 +408,7 @@ export function VistaRepartir({ fecha, setFecha, filtros, setFiltros }: VistaPro
                 const ya = mismaFecha(t) && t.barrioId ? zonas[c.staffId]?.[t.barrioId] ?? 0 : 0;
                 return (
                   <option key={c.staffId} value={c.staffId}>
-                    {c.nombre}{ya ? ` · ya tiene ${ya} en este barrio` : ""}
+                    {c.nombre}{c.staffId === t.staffId ? " · asignada" : ""}{ya ? ` · ya tiene ${ya} en este barrio` : ""}
                   </option>
                 );
               })}
@@ -417,7 +428,9 @@ export function VistaRepartir({ fecha, setFecha, filtros, setFiltros }: VistaPro
               }`}
             />
           </span>
-        ),
+          </span>
+          );
+        },
       },
     ];
   }, [d, seleccion, guardando, agendar, fechaDe, fechaFila, dia, zonas]);
@@ -577,8 +590,8 @@ export function VistaRepartir({ fecha, setFecha, filtros, setFiltros }: VistaPro
         <div className="rounded-xl border border-border-subtle bg-surface-2 p-3">
           <p className="mb-2 text-[12px] font-semibold text-text-secondary">
             {d.yaAgendadas.length === 1
-              ? "1 orden de esta búsqueda ya tiene día"
-              : `${d.yaAgendadas.length} órdenes de esta búsqueda ya tienen día`}
+              ? "1 orden que coincide ya tiene día"
+              : `${d.yaAgendadas.length} órdenes que coinciden ya tienen día`}
             {d.yaAgendadasHayMas ? " (se muestran las más próximas)" : ""}
           </p>
           <ul className="flex flex-col gap-1">

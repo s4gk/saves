@@ -3,6 +3,8 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBundleDto, UpdateBundleDto } from './dto/bundle.dto';
 import { num, round2 } from '../common/money';
+import type { AuthUser } from '../auth/current-user.decorator';
+import { sedesDe, whereSedeSuscriptor } from '../common/sede-scope';
 import {
   PLAYHUB_CATALOG,
   esAppElegible,
@@ -27,7 +29,10 @@ type BundleSalida = {
     listPrice: number;
     taxRate: number;
     megas: number | null;
-    /** El plan que compone el combo está oculto del catálogo. */
+    /**
+     * El plan suelto está oculto del catálogo. Solo informa: ocultar un plan lo
+     * saca de la venta SUELTA, el combo se sigue vendiendo mientras él esté visible.
+     */
     planActive: boolean;
   }[];
   /**
@@ -41,8 +46,6 @@ type BundleSalida = {
   savings: number;
   /** Abonados que hoy tienen este combo. */
   subscribers: number;
-  /** Combo que no se puede ofrecer porque alguno de sus planes está oculto. */
-  blocked: boolean;
 };
 
 /**
@@ -92,14 +95,41 @@ export class BundlesService {
       // Cuenta servicios, no abonados: un combo de 2 planes deja 2 filas por
       // cliente, así que se divide entre las piezas para no inflar el número.
       subscribers: items.length ? Math.round(b._count.services / items.length) : 0,
-      blocked: items.some((i) => !i.planActive),
     };
   }
 
   /**
-   * Listado de combos. `activeOnly=true` para los desplegables de venta, que
-   * además descartan los que arrastran un plan oculto: ofrecer un combo cuyo
-   * plan ya no se vende termina en un error al aplicarlo.
+   * Quiénes tienen el combo: los abonados con al menos un servicio que salió de
+   * él (`SubscriberService.bundleId`). Acotado a las sedes del usuario, como
+   * cualquier listado de clientes.
+   */
+  async abonados(id: string, user: AuthUser) {
+    const existe = await this.prisma.planBundle.findUnique({ where: { id }, select: { id: true } });
+    if (!existe) throw new NotFoundException('Combo no encontrado');
+    const sedes = await sedesDe(this.prisma, user);
+    const rows = await this.prisma.subscriber.findMany({
+      where: { services: { some: { bundleId: id } }, ...whereSedeSuscriptor(sedes) },
+      select: {
+        id: true, abonado: true, fullName: true, docNumber: true, status: true,
+        branch: { select: { name: true } },
+      },
+      orderBy: { abonado: 'asc' },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      abonado: r.abonado,
+      nombre: r.fullName?.trim() || null,
+      documento: r.docNumber,
+      estado: r.status,
+      sede: r.branch?.name ?? null,
+    }));
+  }
+
+  /**
+   * Listado de combos. `activeOnly=true` para los desplegables de venta. Lo que
+   * manda es la visibilidad del COMBO, no la de sus planes: desde que se vende
+   * solo por combo, los planes sueltos se ocultan y el combo tiene que seguir
+   * saliendo (el 07-oct ocultar «Television» sacó de la venta los 5 combos con TV).
    */
   async list(params: { activeOnly?: boolean } = {}): Promise<BundleSalida[]> {
     const rows = await this.prisma.planBundle.findMany({
@@ -108,7 +138,7 @@ export class BundlesService {
       include: BundlesService.INCLUDE,
     });
     const salida = rows.map((b) => this.presentar(b));
-    return params.activeOnly ? salida.filter((b) => !b.blocked) : salida;
+    return salida;
   }
 
   /**
@@ -122,7 +152,7 @@ export class BundlesService {
     }
     const planes = await this.prisma.plan.findMany({
       where: { id: { in: ids } },
-      select: { id: true, kind: true, name: true, active: true },
+      select: { id: true, kind: true, name: true },
     });
     if (planes.length !== ids.length) throw new NotFoundException('Uno o más planes no existen.');
 
@@ -135,11 +165,6 @@ export class BundlesService {
       }
       porKind.set(p.kind, p.name);
     }
-    const oculto = planes.find((p) => !p.active);
-    if (oculto) {
-      throw new BadRequestException(`El plan “${oculto.name}” está oculto; muéstralo antes de meterlo en un combo.`);
-    }
-
     const byId = new Map(planes.map((p) => [p.id, p]));
     return items.map((i) => ({
       planId: i.planId,

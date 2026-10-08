@@ -19,6 +19,7 @@ import { useRequest } from "@/lib/useRequest";
 import { useOrden } from "@/lib/useOrden";
 import { ordenDeTexto, useFiltrosEnUrl, useFiltrosRecordados } from "@/lib/useFiltrosUrl";
 import { listaJson, mensajeDeError } from "@/lib/errores";
+import { ImportarKmzModal } from "./ImportarKmzModal";
 
 export default function NapsPage() {
   // `useFiltrosRecordados` usa `useSearchParams`, que en el App Router exige una
@@ -128,6 +129,7 @@ function BranchNaps({ branch, urlInicial, onBack }: { branch: BranchOpt; urlInic
   const [page, setPage] = useState(Number(urlInicial.pag) > 1 ? Number(urlInicial.pag) : 1);
   const [pageSize, setPageSize] = useState(Number(urlInicial.tam) > 0 ? Number(urlInicial.tam) : 25);
   const [creating, setCreating] = useState(false);
+  const [importando, setImportando] = useState(false);
 
   // Filtros del listado. Viajan al servidor (el listado pagina allí), así que
   // filtran sobre las 1.406 NAPs y no sólo sobre la página que se está viendo.
@@ -214,7 +216,10 @@ function BranchNaps({ branch, urlInicial, onBack }: { branch: BranchOpt; urlInic
             </p>
           </div>
         </div>
-        <Button onClick={() => setCreating(true)}><Icon name="plus" size={15} /> Nueva NAP</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={() => setImportando(true)} title="Ubicar las cajas con el KMZ de Google Earth"><Icon name="map-pin" size={15} /> Importar KMZ</Button>
+          <Button onClick={() => setCreating(true)}><Icon name="plus" size={15} /> Nueva NAP</Button>
+        </div>
       </div>
 
       {/* El orden se pide pulsando la cabecera de la tabla; antes había aquí un
@@ -289,6 +294,12 @@ function BranchNaps({ branch, urlInicial, onBack }: { branch: BranchOpt; urlInic
         </>
       )}
 
+      <ImportarKmzModal
+        open={importando}
+        branch={branch}
+        onClose={() => setImportando(false)}
+        onAplicado={() => { setImportando(false); void load(); }}
+      />
       <CreateNapModal
         open={creating}
         branch={branch}

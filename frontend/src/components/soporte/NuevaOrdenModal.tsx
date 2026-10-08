@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/Badge";
 import { TICKET_ESTADOS_ABIERTOS, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, TICKET_PRIORITIES, type TicketRow } from "@/lib/support";
 import { DireccionFields, DIRECCION_VACIA, NOM_KEYS, ZONA_KEYS, direccionArmada, type DireccionValor } from "@/components/subscribers/DireccionFields";
 import { fmtDate, fullCurrency } from "@/lib/format";
-import { type Plan } from "@/lib/plans";
+import { type Bundle, type Plan, comboDePlanes } from "@/lib/plans";
 import { TitularFields, TITULAR_VACIO, faltaEnTitular, titularPayload, titularTexto, type TitularValor } from "@/components/soporte/TitularFields";
 
 /**
@@ -128,6 +128,13 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
   const [titularActual, setTitularActual] = useState<string | null>(null);
   /** Los planes de internet que se pueden vender hoy (los ocultos no se ofrecen). */
   const [planes, setPlanes] = useState<Plan[]>([]);
+  /**
+   * Los combos a la venta. En una orden de megas se eligen por separado las megas
+   * (plan de internet) y el plan de TV; juntos, van en el combo que los reúne.
+   */
+  const [combos, setCombos] = useState<Bundle[]>([]);
+  /** El plan de TV con el que queda ("" = sin TV en la orden: sólo cambia el internet). */
+  const [tvNuevo, setTvNuevo] = useState("");
   /** Lo que tiene contratado, para decir de cuánto viene. */
   const [servicios, setServicios] = useState<ServicioActual[]>([]);
   /**
@@ -172,7 +179,7 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
     setClase("servicio"); setType(""); setPriority("Media"); setAgendar(false); setFecha(hoy()); setFechaOrden(hoy());
     setMotivo("");
     setDir(DIRECCION_VACIA); setDirActual(null);
-    setPlanNuevo(""); setServicios([]);
+    setPlanNuevo(""); setTvNuevo(""); setServicios([]);
     setTitular(TITULAR_VACIO); setTitularActual(null);
     setAbiertas([]); setAbiertasTotal(0); setAvisando(false); setAvisado(false);
     setYaFacturadas([]); setYaFacturadaTid(null);
@@ -227,6 +234,15 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
   const porAgregarInternet = type.trim().toLowerCase() === "agregarinternet";
   /** ¿Este trabajo lleva plan de internet destino? (backend: `ordenLlevaPlanInternet`) */
   const conPlanInternet = porMegas || porAgregarInternet;
+  /**
+   * 'Migracion': el plan con que QUEDA el cliente se escribe en la observación
+   * (pedido de cartera, 2026-09-28: «lo tengo en cuenta al validar mes a mes»).
+   * Es sólo la nota —no viaja como `planToId` ni se le aplica nada al cerrar—:
+   * la migración cambia la red, no lo que se cobra.
+   */
+  const porMigracion = type.trim().toLowerCase().startsWith("migraci");
+  /** Hace falta el catálogo de planes y lo que el cliente tiene hoy. */
+  const conCatalogoPlanes = conPlanInternet || porMigracion;
   /** El plan de internet que tiene hoy: de ahí sale el "de cuánto viene". */
   const internetActual = useMemo(() => servicios.find((s) => s.kind === "INTERNET") ?? null, [servicios]);
   /** Los de internet, del más lento al más rápido: así se lee el desplegable. */
@@ -236,7 +252,19 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
       .sort((a, b) => (a.megas ?? 0) - (b.megas ?? 0) || a.name.localeCompare(b.name)),
     [planes],
   );
+  /** Los planes de TV a la venta: el segundo campo de la orden de megas. */
+  const planesTv = useMemo(
+    () => planes.filter((p) => p.kind === "TV").sort((a, b) => a.name.localeCompare(b.name)),
+    [planes],
+  );
   const planElegido = useMemo(() => planesInternet.find((p) => p.id === planNuevo) ?? null, [planesInternet, planNuevo]);
+  const tvElegido = useMemo(() => planesTv.find((p) => p.id === tvNuevo) ?? null, [planesTv, tvNuevo]);
+  /** Las megas + la TV elegidas van en este combo (null si falta una o no hay combo armado). */
+  const comboElegido = useMemo(() => comboDePlanes(combos, planNuevo, tvNuevo), [combos, planNuevo, tvNuevo]);
+  /** Eligió megas y TV pero no hay combo que las junte: el backend la rechaza. */
+  const sinCombo = !!planElegido && !!tvElegido && !comboElegido;
+  /** La TV que tiene hoy, para decirlo al lado del campo. */
+  const tvActual = useMemo(() => servicios.find((s) => s.kind === "TV") ?? null, [servicios]);
   /**
    * El error de dedo de siempre: el plan de al lado en el desplegable, que deja una
    * orden diciendo 'Subir megas' y bajando la velocidad. Se avisa aquí y además lo
@@ -246,6 +274,13 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
     planElegido?.megas != null && internetActual?.megas != null
       ? (subeMegas && planElegido.megas <= internetActual.megas) || (bajaMegas && planElegido.megas >= internetActual.megas)
       : false;
+  /** La línea que va en la observación de la migración: con qué plan queda. */
+  const notaMigracion = porMigracion && (planElegido || tvElegido)
+    ? `Migración: queda con plan ${[
+        planElegido ? `«${planElegido.name}»${planElegido.megas != null ? ` (${planElegido.megas} Megas)` : ""}` : null,
+        tvElegido ? `«${tvElegido.name}»` : null,
+      ].filter(Boolean).join(" + ")}${comboElegido ? ` en combo «${comboElegido.name}»` : ""}.`
+    : null;
   const direccionNueva = direccionArmada(dir);
   /**
    * La dirección escrita es la que el cliente ya tiene. NO frena la orden (decisión del
@@ -328,24 +363,43 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
   // nada. El catálogo se pide una vez por formulario abierto; lo contratado, cada
   // vez que se cambia de cliente.
   useEffect(() => {
-    if (!conPlanInternet || planes.length) return;
+    if (!conCatalogoPlanes || planes.length) return;
     let vivo = true;
-    void authFetch("/plans?activeOnly=true&kind=INTERNET")
-      .then(listaJson)
-      .then((d) => { if (vivo) setPlanes(d as Plan[]); })
+    // Todos los tipos: de aquí salen el internet (megas) y la TV.
+    // Los dos a la vez y se guardan juntos: si los planes llegaban primero,
+    // `planes.length` cambiaba, este efecto se limpiaba (vivo = false) y la
+    // respuesta de los combos se tiraba — sin combos, TODO internet + TV salía
+    // como «No hay combo armado» aunque el combo existiera.
+    void Promise.all([
+      authFetch("/plans?activeOnly=true").then(listaJson),
+      authFetch("/plan-bundles?activeOnly=true").then(listaJson).catch(() => []),
+    ])
+      .then(([p, b]) => {
+        if (!vivo) return;
+        setCombos(b as Bundle[]);
+        setPlanes(p as Plan[]);
+      })
       .catch(() => {});
     return () => { vivo = false; };
-  }, [conPlanInternet, planes.length, authFetch]);
+  }, [conCatalogoPlanes, planes.length, authFetch]);
 
   useEffect(() => {
-    if (!conPlanInternet || !sub) return;
+    if (!conCatalogoPlanes || !sub) return;
     let vivo = true;
     void authFetch(`/subscribers/${sub.id}/plan`)
       .then(listaJson)
       .then((d) => { if (vivo) setServicios(d as ServicioActual[]); })
       .catch(() => {});
     return () => { vivo = false; };
-  }, [porMegas, sub, authFetch]);
+  }, [conCatalogoPlanes, sub, authFetch]);
+
+  // En la migración se parte de lo que ya tiene: casi siempre queda con lo mismo
+  // y sólo se toca si cambia. Se rehace al cambiar de cliente; al salir de la
+  // migración se vacía, para no dejarle a una orden de megas el plan que ya tiene.
+  useEffect(() => {
+    setPlanNuevo(porMigracion ? (servicios.find((s) => s.kind === "INTERNET")?.planId ?? "") : "");
+    setTvNuevo(porMigracion ? (servicios.find((s) => s.kind === "TV")?.planId ?? "") : "");
+  }, [porMigracion, servicios]);
 
   // La zona de hoy, para partir de ella. Se pide solo cuando hace falta: es una
   // consulta más y la mayoría de las órdenes no son traslados.
@@ -421,6 +475,9 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
     if (porAgregarInternet && internetActual) {
       setErr(`El cliente ya tiene internet («${internetActual.planName ?? "plan sin nombre"}»). Para moverlo de plan usa 'Subir megas' o 'Bajar megas'.`); return;
     }
+    if (sinCombo) {
+      setErr(`No hay combo armado con ${planElegido?.megas ?? planElegido?.name} Megas + «${tvElegido?.name}». Ármalo en Configuración → Planes → Combos, o deja la TV en «sin cambiar».`); return;
+    }
     if (megasAlReves) {
       setErr(
         subeMegas
@@ -428,6 +485,9 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
           : `«${planElegido?.name}» no baja nada: el cliente tiene ${internetActual?.megas} Megas.`,
       );
       return;
+    }
+    if (porMigracion && !notaMigracion) {
+      setErr("Di con qué plan queda el cliente: va en la observación de la orden."); return;
     }
     if (porTraslado && !direccionNueva) {
       setErr("Escribe la dirección a la que se muda el cliente."); return;
@@ -447,7 +507,9 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
           type,
           assigned: assigned || undefined,
           priority,
-          section: section || undefined,
+          // La migración antepone con qué plan queda (la observación es lo que viaja
+          // al legacy y lo que se lee al validar el mes).
+          section: [notaMigracion, section.trim()].filter(Boolean).join("\n") || undefined,
           // En el retiro, `problem` es el motivo por el que se va (ver el catálogo
           // del backend); en el resto de las órdenes esa casilla es la falla, y
           // este formulario no la pide (se escribe en la observación).
@@ -459,6 +521,8 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
           // (igual que la dirección de un traslado): el precio de su próxima factura
           // y el perfil del router quedan al día desde que se abre la orden.
           planToId: conPlanInternet ? planNuevo : undefined,
+          // La TV: con ella la orden deja al cliente en el combo de megas + TV.
+          tvPlanToId: conPlanInternet && tvNuevo ? tvNuevo : undefined,
           // «Esto ya se le cobró»: la orden se ata a esa factura y NO se emite el
           // cargo automático. Sin esto, facturar en ventanilla y abrir la orden
           // después le deja al cliente dos facturas del mismo trabajo.
@@ -495,6 +559,7 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
       // facturarlo a mano.
       if (d?.cargo && !d.cargo.cobrado && !d?.traslado) toast(d.cargo.mensaje, "alert-circle");
       if (d?.traslado && !d.traslado.cobrado) toast(d.traslado.mensaje, "alert-circle");
+      if (d?.asignacionRetenida) toast(d.asignacionRetenida, "alert-circle");
       // Las megas se aplican al abrir la orden, así que hay que decir si el cliente
       // YA quedó en el plan nuevo. Si no se pudo, queda trabajo pendiente en su
       // ficha y enterarse mañana es enterarse tarde.
@@ -698,21 +763,43 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
                   plan usa &apos;Subir megas&apos; o &apos;Bajar megas&apos;.
                 </p>
               )}
-              <Field label="Plan nuevo" required hint="La velocidad la pone el plan: es también el precio de la próxima factura y el perfil que se le empuja al router">
-                <Select value={planNuevo} onChange={(e) => setPlanNuevo(e.target.value)} disabled={!planesInternet.length}>
-                  <option value="">{planesInternet.length ? "— elige el plan —" : "Cargando…"}</option>
-                  {planesInternet.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.megas != null ? `${p.megas} Megas · ${p.name}` : p.name} · {fullCurrency(p.price)}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              {planElegido && !megasAlReves && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Megas (plan de internet)" required hint="La velocidad la pone el plan: es también el precio de la próxima factura y el perfil que se le empuja al router">
+                  <Select value={planNuevo} onChange={(e) => setPlanNuevo(e.target.value)} disabled={!planesInternet.length}>
+                    <option value="">{planesInternet.length ? "— elige las megas —" : "Cargando…"}</option>
+                    {planesInternet.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.megas != null ? `${p.megas} Megas · ${p.name}` : p.name} · {fullCurrency(p.price)}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field
+                  label="Plan de TV"
+                  hint={tvActual ? `Hoy tiene «${tvActual.planName ?? "TV"}». Con TV, queda en combo.` : "Con TV, queda en combo (internet + TV)."}
+                >
+                  <Select value={tvNuevo} onChange={(e) => setTvNuevo(e.target.value)} disabled={!planesTv.length}>
+                    <option value="">— sin combo: sólo cambia el internet —</option>
+                    {planesTv.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name} · {fullCurrency(p.price)}</option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+              {sinCombo && (
+                <p className="mt-2 flex items-start gap-1.5 text-[12px] text-warning-text">
+                  <Icon name="alert-triangle" size={13} className="mt-[2px] shrink-0" />
+                  No hay combo armado con {planElegido?.megas ?? planElegido?.name} Megas + «{tvElegido?.name}». Ármalo en
+                  Configuración → Planes → Combos, o deja la TV sin combo.
+                </p>
+              )}
+              {planElegido && !megasAlReves && !sinCombo && (
                 <p className="mt-2 text-[12px] text-text-secondary">
                   Queda en{" "}
                   <b className="text-text-primary">{planElegido.megas != null ? `${planElegido.megas} Megas` : planElegido.name}</b>
-                  {" · "}{fullCurrency(planElegido.price)} al mes.{" "}
+                  {comboElegido && <> + <b className="text-text-primary">{tvElegido?.name}</b>, en el combo «{comboElegido.name}»</>}
+                  {" · "}{fullCurrency(comboElegido ? comboElegido.total : planElegido.price)} al mes.{" "}
+                  {comboElegido && "Al cerrar se le aplica el combo (y la TV, si no la tenía, se le cobra por los días que quedan). "}
                   {porAgregarInternet
                     ? "Al cerrar la orden se le monta el servicio, se le crea el secret en el router y se le cobran los días que quedan del mes."
                     : "Se le aplica al cerrar la orden, y ahí se le reprecia la factura de este mes."}
@@ -726,6 +813,49 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
                     : `«${planElegido?.name}» no baja nada: el cliente tiene ${internetActual?.megas} Megas.`}
                 </p>
               )}
+            </div>
+          )}
+          {/* Con qué plan QUEDA tras la migración: sólo se escribe en la observación. */}
+          {porMigracion && (
+            <div className="rounded-lg border border-border-default bg-surface-2 p-3 sm:col-span-2">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[13px] font-semibold text-text-primary">¿Con qué plan queda el cliente?</span>
+                {sub && (internetActual || tvActual) && (
+                  <span className="text-[12px] text-text-secondary">
+                    Hoy tiene{" "}
+                    <b className="text-text-primary">
+                      {[internetActual?.planName, tvActual?.planName].filter(Boolean).join(" + ") || "plan sin registrar"}
+                    </b>
+                  </span>
+                )}
+              </div>
+              {!sub && <p className="mb-2 text-[12px] text-text-tertiary">Elige primero el cliente para ver qué plan tiene hoy.</p>}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Plan de internet">
+                  <Select value={planNuevo} onChange={(e) => setPlanNuevo(e.target.value)} disabled={!planesInternet.length}>
+                    <option value="">{planesInternet.length ? "— sin internet —" : "Cargando…"}</option>
+                    {planesInternet.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.megas != null ? `${p.megas} Megas · ${p.name}` : p.name} · {fullCurrency(p.price)}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="Plan de TV">
+                  <Select value={tvNuevo} onChange={(e) => setTvNuevo(e.target.value)} disabled={!planesTv.length}>
+                    <option value="">— sin TV —</option>
+                    {planesTv.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name} · {fullCurrency(p.price)}</option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+              <p className="mt-2 text-[12px] text-text-secondary">
+                {notaMigracion
+                  ? <>En la observación queda: <b className="text-text-primary">{notaMigracion}</b></>
+                  : "Elige al menos un plan: se escribe en la observación de la orden."}{" "}
+                No le cambia el plan ni lo que se le cobra.
+              </p>
             </div>
           )}
           {/* Por qué se va. Ocupa el ancho entero porque los motivos son frases
@@ -911,3 +1041,4 @@ export function NuevaOrdenModal({ open, onClose, onDone, fixedSub }: { open: boo
     </Modal>
   );
 }
+

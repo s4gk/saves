@@ -56,6 +56,29 @@ const fecha = (s?: string | null) =>
 /** Un serial de ONU se parece a ZTEGDE519CDF o a 5A544547DE519CDF; "solicitar" no. */
 const pareceSerialOnu = (s?: string | null) => !!s && /^[A-Z0-9]{4}[0-9A-F]{8}$|^[0-9A-F]{16}$/i.test(s.trim());
 
+type Tono = "success" | "warning" | "error" | "default";
+
+/**
+ * Rangos sanos de una ONT GPON, para pintar en rojo lo que se sale (2026-10-01).
+ * El láser emite entre 0,5 y 5 dBm; se alimenta a 3,3 V (±0,3) y por encima de
+ * 70 °C el equipo está cocinándose. La potencia recibida usa `rxTone`, como siempre.
+ */
+const txTone = (n?: number | null): Tono => (n == null ? "default" : n < 0.5 || n > 5 ? "error" : "success");
+const tempTone = (n?: number | null): Tono => (n == null ? "default" : n > 70 ? "error" : n > 60 ? "warning" : "default");
+const voltTone = (n?: number | null): Tono => (n == null ? "default" : n < 3 || n > 3.6 ? "error" : "default");
+/** `normal` / `match` son lo sano; cualquier otra cosa (failed, mismatch…) es avería. */
+const configTone = (s?: string | null): Tono => (!s || /^(normal|match)$/i.test(s.trim()) ? "default" : "error");
+/** Una caída por LOS/LOF es de fibra; el dying-gasp es que se fue la luz en la casa. */
+const caidaTone = (s?: string | null): Tono => (s && /lo[sf]/i.test(s) ? "error" : "default");
+
+const TEXTO: Record<Tono, string> = {
+  success: "text-success-text",
+  warning: "font-bold text-warning-text",
+  error: "font-bold text-error-text",
+  default: "",
+};
+const PEOR: Tono[] = ["error", "warning"];
+
 /**
  * La pestaña Equipos de la ficha, como se recorre la fibra (2026-09-14, opción A del
  * lienzo "Equipo y ONU en la ficha"): OLT → caja NAP → equipo → casa, y debajo el
@@ -149,6 +172,18 @@ export function AcometidaFibra({
   const sello = o?.consultadoEn ? new Date(o.consultadoEn).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" }) : null;
   const libres = caja?.ports.filter((p) => p.libre).length ?? null;
   const encendida = duracion(o?.estado?.desdeCuando);
+  const tonoRx = rxTone(rx === null ? null : String(rx));
+  const tonoTx = txTone(o?.optica?.tx);
+  const tonoRun: Tono = runTone(o?.estado?.run);
+  const tonoTemp = tempTone(o?.optica?.temperatura);
+  const tonoVolt = voltTone(o?.optica?.voltaje);
+  const tonoCaida = caidaTone(o?.estado?.causaCaida);
+  // Cuántos parámetros de la ONU están fuera de rango: tiñe la tarjeta entera.
+  const tonosOnu: Tono[] = o
+    ? [tonoRx, tonoTx, tonoOltRx as Tono, tonoRun, configTone(o.estado?.config), configTone(o.estado?.match), tonoTemp, tonoVolt]
+    : [];
+  const fueraDeRango = tonosOnu.filter((t) => t === "error").length;
+  const tonoOnu: Tono = PEOR.find((t) => tonosOnu.includes(t)) ?? "default";
 
   return (
     <div className="flex flex-col gap-4">
@@ -347,26 +382,57 @@ export function AcometidaFibra({
 
         <Tarjeta
           titulo="Parámetros de la ONU"
-          accion={o?.estado?.run ? <Badge label={o.estado.run} tone={runTone(o.estado.run)} /> : null}
+          tono={tonoOnu}
+          accion={
+            <span className="flex flex-wrap items-center justify-end gap-1.5">
+              {fueraDeRango > 0 && <Badge label={`${fueraDeRango} fuera de rango`} tone="error" />}
+              {o?.estado?.run && <Badge label={o.estado.run} tone={tonoRun} />}
+            </span>
+          }
         >
           {o ? (
             <>
               <div className="mb-2 grid grid-cols-3 gap-1.5">
-                <Potencia etiqueta="Recibe ONT" valor={o.optica?.rx} tono={rxTone(o.optica?.rx == null ? null : String(o.optica.rx))} destacado />
-                <Potencia etiqueta="Emite ONT" valor={o.optica?.tx} tono="default" />
+                <Potencia etiqueta="Recibe ONT" valor={o.optica?.rx} tono={tonoRx} destacado />
+                <Potencia etiqueta="Emite ONT" valor={o.optica?.tx} tono={tonoTx} />
                 <Potencia etiqueta="Llega a OLT" valor={o.optica?.oltRx} tono={tonoOltRx} />
               </div>
               {o.avisoOptica && <p className="mb-1 text-[11px] leading-snug text-text-tertiary">{o.avisoOptica}</p>}
-              <Fila k="Run / config / match" v={[o.estado?.run, o.estado?.config, o.estado?.match].filter(Boolean).join(" · ") || null} />
+              <Fila
+                k="Run / config / match"
+                v={
+                  [o.estado?.run, o.estado?.config, o.estado?.match].some(Boolean) ? (
+                    <>
+                      {([[o.estado?.run, tonoRun], [o.estado?.config, configTone(o.estado?.config)], [o.estado?.match, configTone(o.estado?.match)]] as [string | null | undefined, Tono][])
+                        .filter(([v]) => v)
+                        .map(([v, t], i) => (
+                          <span key={i}>
+                            {i > 0 && " · "}
+                            <span className={TEXTO[t]}>{v}</span>
+                          </span>
+                        ))}
+                    </>
+                  ) : null
+                }
+              />
               <Fila k="Distancia" v={o.estado?.distancia != null ? `${o.estado.distancia.toLocaleString("es-CO")} m` : null} />
               <Fila
                 k="Temperatura · voltaje"
-                v={[o.optica?.temperatura != null && `${o.optica.temperatura} °C`, o.optica?.voltaje != null && `${o.optica.voltaje.toLocaleString("es-CO")} V`].filter(Boolean).join(" · ") || null}
+                v={
+                  o.optica?.temperatura != null || o.optica?.voltaje != null ? (
+                    <>
+                      {o.optica?.temperatura != null && <span className={TEXTO[tonoTemp]}>{o.optica.temperatura} °C</span>}
+                      {o.optica?.temperatura != null && o.optica?.voltaje != null && " · "}
+                      {o.optica?.voltaje != null && <span className={TEXTO[tonoVolt]}>{o.optica.voltaje.toLocaleString("es-CO")} V</span>}
+                    </>
+                  ) : null
+                }
               />
               <Fila k="Corriente" v={o.optica?.corriente != null ? `${o.optica.corriente} mA` : null} />
               <Fila k="Encendida hace" v={encendida} />
               <Fila
                 k="Última caída"
+                tono={tonoCaida}
                 v={o.estado?.causaCaida ? `${o.estado.causaCaida === "dying-gasp" ? "se fue la luz (dying-gasp)" : o.estado.causaCaida}${o.estado.ultimaCaida ? ` · ${o.estado.ultimaCaida}` : ""}` : null}
               />
               <Fila k="SN en la OLT" v={<span className="font-mono">{o.onu?.sn || "—"}</span>} />
@@ -422,9 +488,16 @@ function Aviso({ titulo, texto, children }: { titulo: string; texto?: string | n
   );
 }
 
-function Tarjeta({ titulo, accion, children }: { titulo: string; accion?: React.ReactNode; children: React.ReactNode }) {
+/** Con `tono` de aviso la tarjeta entera se distingue: borde y franja superior del color. */
+function Tarjeta({ titulo, accion, tono = "default", children }: { titulo: string; accion?: React.ReactNode; tono?: Tono; children: React.ReactNode }) {
+  const marco =
+    tono === "error"
+      ? "border-error-text/40 border-t-[3px] border-t-error-text"
+      : tono === "warning"
+        ? "border-warning-text/40 border-t-[3px] border-t-warning-text"
+        : "border-border-subtle";
   return (
-    <div className="rounded-xl border border-border-subtle bg-surface p-4 shadow-sm">
+    <div className={`rounded-xl border bg-surface p-4 shadow-sm ${marco}`}>
       <div className="mb-2.5 flex items-center gap-2">
         <span className="text-[13px] font-bold text-text-primary">{titulo}</span>
         {accion && <span className="ml-auto">{accion}</span>}
@@ -434,11 +507,11 @@ function Tarjeta({ titulo, accion, children }: { titulo: string; accion?: React.
   );
 }
 
-function Fila({ k, v }: { k: string; v: React.ReactNode }) {
+function Fila({ k, v, tono = "default" }: { k: string; v: React.ReactNode; tono?: Tono }) {
   return (
     <div className="flex justify-between gap-3 border-b border-border-subtle py-1.5 last:border-0">
       <span className="text-[12px] text-text-tertiary">{k}</span>
-      <span className="min-w-0 break-words text-right text-[12px] font-medium text-text-primary">{v ?? "—"}</span>
+      <span className={`min-w-0 break-words text-right text-[12px] font-medium ${v != null && tono !== "default" ? TEXTO[tono] : "text-text-primary"}`}>{v ?? "—"}</span>
     </div>
   );
 }

@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChartCard } from "@/components/charts";
 import { DataTable } from "@/components/ui/DataTable";
 import { Icon } from "@/components/Icon";
 import { cop, SUB_STATUS_LABEL } from "@/lib/subscribers";
 import { fmtDate } from "@/lib/format";
 import { nfmt } from "@/lib/reportes";
+import { useAuth } from "@/context/AuthProvider";
+import { toast } from "@/components/ui/Toast";
 
 /** Color de cada categoría: el mismo en las cuentas, las tarjetas, las pastillas y la tabla. */
 const TONO: Record<string, { chip: string; texto: string; punto: string }> = {
@@ -37,16 +39,69 @@ function Linea({ signo, label, nota, gente, barra, valor, tono, fuerte, fondo }:
   valor: string; tono?: string; fuerte?: boolean; fondo?: boolean;
 }) {
   return (
-    <div className={`grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b border-border-subtle px-2 py-3 last:border-b-0 md:grid-cols-[28px_minmax(0,1fr)_120px_minmax(0,240px)_160px] ${fondo ? "bg-surface-2" : ""}`}>
-      <div className={`text-center text-[18px] font-extrabold ${tono ?? "text-text-tertiary"}`}>{signo}</div>
+    <div className={`grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b border-border-subtle px-2 py-2 last:border-b-0 md:grid-cols-[24px_minmax(0,1fr)_110px_minmax(0,200px)_130px] ${fondo ? "bg-surface-2" : ""}`}>
+      <div className={`text-center text-[14px] font-extrabold ${tono ?? "text-text-tertiary"}`}>{signo}</div>
       <div className="flex flex-col">
-        <div className={`flex items-center gap-2 ${fuerte ? "text-[15px] font-bold" : "text-[14px]"}`}>{label}</div>
-        {nota && <div className="text-[12px] text-text-tertiary">{nota}</div>}
+        <div className={`flex items-center gap-2 ${fuerte ? "text-[13px] font-bold" : "text-[12px]"}`}>{label}</div>
+        {nota && <div className="text-[11px] text-text-tertiary">{nota}</div>}
       </div>
-      <div className="hidden text-right text-[13px] text-text-secondary md:block">{gente}</div>
+      <div className="hidden text-right text-[12px] text-text-secondary md:block">{gente}</div>
       <div className="hidden md:block">{barra}</div>
-      <div className={`text-right tabular-nums ${fuerte ? "text-[18px] font-extrabold" : "text-[15px] font-bold"} ${tono ?? ""}`}>{valor}</div>
+      <div className={`text-right tabular-nums ${fuerte ? "text-[14px] font-extrabold" : "text-[13px] font-semibold"} ${tono ?? ""}`}>{valor}</div>
     </div>
+  );
+}
+
+type Cambios = { categoria?: string | null; observaciones?: string | null };
+type Guardar = (id: string, cambios: Cambios) => Promise<boolean>;
+
+const gestionTitulo = (x: any) =>
+  x.gestionadoPor ? `Gestionado por ${x.gestionadoPor}${x.gestionadoEn ? ` el ${fmtDate(x.gestionadoEn)}` : ""}` : undefined;
+
+/** Resultado como lista desplegable: la clasificación automática o una corrección a mano. */
+function CeldaResultado({ x, cats, etiqueta, guardar }: { x: any; cats: any[]; etiqueta: Record<string, string>; guardar: Guardar }) {
+  const [enviando, setEnviando] = useState(false);
+  return (
+    <div className="flex flex-col gap-0.5">
+      <select
+        value={x.manual ? x.categoria : ""}
+        disabled={enviando}
+        aria-label={`Resultado de ${x.nombre}`}
+        title={gestionTitulo(x)}
+        onChange={async (e) => { setEnviando(true); await guardar(x.id, { categoria: e.target.value || null }); setEnviando(false); }}
+        className={`max-w-[190px] cursor-pointer rounded-full border-0 px-2 py-0.5 text-[11px] font-semibold disabled:opacity-60 ${TONO[x.categoria]?.chip ?? ""}`}>
+        <option value="">{etiqueta[x.categoriaAuto]} (automática)</option>
+        {cats.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+      </select>
+      {x.manual && <span className="pl-2 text-[10px] text-text-tertiary">A mano · el sistema dice «{etiqueta[x.categoriaAuto]}»</span>}
+    </div>
+  );
+}
+
+/** Observaciones de Cartera: se guardan al salir del campo (o con Enter). */
+function CeldaObservaciones({ x, guardar }: { x: any; guardar: Guardar }) {
+  const [texto, setTexto] = useState<string>(x.observaciones ?? "");
+  const [enviando, setEnviando] = useState(false);
+  useEffect(() => { setTexto(x.observaciones ?? ""); }, [x.observaciones]);
+  const enviar = async () => {
+    if (texto.trim() === (x.observaciones ?? "").trim()) return;
+    setEnviando(true);
+    if (!(await guardar(x.id, { observaciones: texto }))) setTexto(x.observaciones ?? "");
+    setEnviando(false);
+  };
+  return (
+    <input
+      value={texto}
+      disabled={enviando}
+      onChange={(e) => setTexto(e.target.value)}
+      onBlur={() => void enviar()}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      placeholder="Agregar…"
+      maxLength={2000}
+      aria-label={`Observaciones de ${x.nombre}`}
+      title={gestionTitulo(x) ?? texto}
+      className="w-full min-w-[180px] rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[12px] hover:border-border-default focus:border-brand focus:bg-surface focus:outline-none disabled:opacity-60"
+    />
   );
 }
 
@@ -57,8 +112,12 @@ function Linea({ signo, label, nota, gente, barra, valor, tono, fuerte, fondo }:
  * deuda de hoy se muestra partida en VIEJA (lo del día 1 sin pagar) y NUEVA (las
  * facturas del mes), que es lo que confundía: quien saldó su cartera y debe el mes en
  * curso no es un abono parcial (ver backend reports/cartera-seguimiento.ts).
+ *
+ * Cartera puede corregir el resultado de cada usuario y dejarle observaciones; al
+ * guardar se vuelve a pedir el reporte para que el resumen y el mes a mes cuadren.
  */
-export function CarteraSeguimiento({ data }: { data: any }) {
+export function CarteraSeguimiento({ data, recargar }: { data: any; recargar?: () => Promise<void> }) {
+  const { authFetch } = useAuth();
   const [cat, setCat] = useState<string>("");
   const [limite, setLimite] = useState(PAGINA);
 
@@ -83,6 +142,18 @@ export function CarteraSeguimiento({ data }: { data: any }) {
   const maxRec = Math.max(...pagados.map((c) => c.recuperado), 1);
   const noPagaron = r.usuariosInicial - r.usuariosPagaron;
   const elegir = (k: string) => { setCat(cat === k ? "" : k); setLimite(PAGINA); };
+  const guardar: Guardar = async (id, cambios) => {
+    try {
+      const r = await authFetch(`/reports/cartera-seguimiento/${data.mes}/${id}`, { method: "PATCH", body: JSON.stringify(cambios) });
+      if (!r.ok) throw new Error((await r.json().catch(() => null))?.message ?? `El servidor respondió ${r.status}`);
+      await recargar?.();
+      toast("Guardado", "check");
+      return true;
+    } catch (e) {
+      toast(`No se guardó: ${(e as Error).message}`, "alert-triangle");
+      return false;
+    }
+  };
 
   return (
     <>
@@ -101,32 +172,32 @@ export function CarteraSeguimiento({ data }: { data: any }) {
       </div>
 
       {/* 1 · La respuesta */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
-        <div className="flex flex-col gap-4 rounded-2xl border border-border-subtle bg-surface p-6">
-          <div className="text-[12px] font-bold uppercase tracking-wide text-brand">El mes en una frase</div>
-          <p className="text-[20px] font-medium leading-snug md:text-[24px]">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
+        <div className="flex flex-col gap-2.5 rounded-xl border border-border-subtle bg-surface p-4">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-brand">El mes en una frase</div>
+          <p className="text-[15px] font-medium leading-snug md:text-[17px]">
             De los <b className="font-extrabold">{cop(r.carteraInicial)}</b> que había en cartera el 1 de {mesCorto},
             se recuperaron <b className="font-extrabold text-success-text">{cop(r.recuperado)}</b>.
           </p>
-          <div className="flex flex-wrap gap-x-6 gap-y-2 text-[13px] text-text-secondary">
-            <span><b className="text-[17px] text-text-primary">{pctTxt(r.porcentajeRecuperado)}</b> de la cartera</span>
-            <span><b className="text-[17px] text-text-primary">{nfmt(r.usuariosPagaron)}</b> de {nfmt(r.usuariosInicial)} usuarios pagaron</span>
-            <span><b className="text-[17px] text-text-primary">{cop(r.deudaViejaPendiente)}</b> de deuda vieja sigue sin pagar</span>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-[12px] text-text-secondary">
+            <span><b className="text-[14px] text-text-primary">{pctTxt(r.porcentajeRecuperado)}</b> de la cartera</span>
+            <span><b className="text-[14px] text-text-primary">{nfmt(r.usuariosPagaron)}</b> de {nfmt(r.usuariosInicial)} usuarios pagaron</span>
+            <span><b className="text-[14px] text-text-primary">{cop(r.deudaViejaPendiente)}</b> de deuda vieja sigue sin pagar</span>
           </div>
         </div>
-        <div className={`flex flex-col gap-2 rounded-2xl border p-6 ${igual ? "border-border-subtle bg-surface-2" : bajo ? "border-success/30 bg-success-soft" : "border-error/30 bg-error-soft"}`}>
-          <div className={`flex items-center gap-2 text-[12px] font-bold uppercase tracking-wide ${igual ? "text-text-secondary" : bajo ? "text-success-text" : "text-error-text"}`}>
-            <Icon name={igual ? "arrow-left-right" : bajo ? "trending-down" : "trending-up"} size={16} />
+        <div className={`flex flex-col gap-1.5 rounded-xl border p-4 ${igual ? "border-border-subtle bg-surface-2" : bajo ? "border-success/30 bg-success-soft" : "border-error/30 bg-error-soft"}`}>
+          <div className={`flex items-center gap-2 text-[11px] font-bold uppercase tracking-wide ${igual ? "text-text-secondary" : bajo ? "text-success-text" : "text-error-text"}`}>
+            <Icon name={igual ? "arrow-left-right" : bajo ? "trending-down" : "trending-up"} size={14} />
             {igual ? "La cartera se mantuvo igual" : bajo ? "La cartera bajó" : "La cartera subió"}
           </div>
-          <div className={`text-[32px] font-extrabold tracking-tight ${igual ? "" : bajo ? "text-success-text" : "text-error-text"}`}>{cop(Math.abs(r.diferencia))}</div>
+          <div className={`text-[22px] font-extrabold tracking-tight ${igual ? "" : bajo ? "text-success-text" : "text-error-text"}`}>{cop(Math.abs(r.diferencia))}</div>
           {r.otrosMovimientos > 0 && (
-            <p className="text-[13px] leading-relaxed text-text-secondary">
+            <p className="text-[12px] leading-relaxed text-text-secondary">
               {bajo ? "Bajó menos de lo recuperado porque" : "Subió porque"} a estos mismos usuarios se les facturaron <b>{cop(r.otrosMovimientos)}</b> nuevos este mes que todavía no han pagado.
             </p>
           )}
           {r.otrosMovimientos < 0 && (
-            <p className="text-[13px] leading-relaxed text-text-secondary">
+            <p className="text-[12px] leading-relaxed text-text-secondary">
               Además de lo recuperado, la deuda bajó <b>{cop(-r.otrosMovimientos)}</b> por notas crédito o depuraciones.
             </p>
           )}
@@ -162,15 +233,15 @@ export function CarteraSeguimiento({ data }: { data: any }) {
       {/* 3 · Los grupos */}
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-[16px] font-bold">Qué pasó con los {nfmt(r.usuariosInicial)} usuarios</h2>
+          <h2 className="text-[14px] font-bold">Qué pasó con los {nfmt(r.usuariosInicial)} usuarios</h2>
           <span className="text-[12px] text-text-tertiary">Toca un grupo para ver solo esos usuarios abajo</span>
         </div>
-        <div className="flex flex-col gap-2 rounded-xl border border-border-subtle bg-surface px-4 py-3">
+        <div className="flex flex-col gap-2 rounded-xl border border-border-subtle bg-surface px-3 py-2.5">
           <div className="flex justify-between text-[12px] text-text-secondary">
             <span><b className="text-text-primary">{nfmt(r.usuariosPagaron)} pagaron</b> ({pctTxt(pct(r.usuariosPagaron, r.usuariosInicial))})</span>
             <span><b className="text-text-primary">{nfmt(noPagaron)} no pagaron nada</b> ({pctTxt(pct(noPagaron, r.usuariosInicial))})</span>
           </div>
-          <div className="flex h-3 overflow-hidden rounded-full bg-error-soft">
+          <div className="flex h-2.5 overflow-hidden rounded-full bg-error-soft">
             {pagados.filter((c) => c.usuarios > 0).map((c) => (
               <div key={c.key} className={TONO[c.key].punto} style={{ width: `${pct(c.usuarios, r.usuariosInicial)}%`, minWidth: 4 }} title={`${c.label}: ${nfmt(c.usuarios)}`} />
             ))}
@@ -182,13 +253,13 @@ export function CarteraSeguimiento({ data }: { data: any }) {
             const activo = cat === c.key;
             return (
               <button key={c.key} type="button" onClick={() => elegir(c.key)} aria-pressed={activo}
-                className={`flex flex-col gap-2 rounded-xl border-2 bg-surface p-4 text-left transition-colors hover:bg-surface-2 ${activo ? "border-brand" : "border-border-subtle"}`}>
-                <div className={`flex items-center gap-2 text-[13px] font-bold ${t.texto}`}>
+                className={`flex flex-col gap-1.5 rounded-xl border-2 bg-surface p-3 text-left transition-colors hover:bg-surface-2 ${activo ? "border-brand" : "border-border-subtle"}`}>
+                <div className={`flex items-center gap-2 text-[12px] font-bold ${t.texto}`}>
                   <span className={`h-2.5 w-2.5 rounded-full ${t.punto}`} /> {c.label}
                 </div>
-                <div className="text-[28px] font-extrabold leading-none">{nfmt(c.usuarios)}</div>
-                <div className="min-h-[34px] text-[12px] text-text-tertiary">{c.desc}</div>
-                <div className="mt-auto flex flex-col gap-1 border-t border-border-subtle pt-2 text-[12px]">
+                <div className="text-[20px] font-extrabold leading-none">{nfmt(c.usuarios)}</div>
+                <div className="min-h-[30px] text-[11px] text-text-tertiary">{c.desc}</div>
+                <div className="mt-auto flex flex-col gap-0.5 border-t border-border-subtle pt-1.5 text-[11px]">
                   <div className="flex justify-between gap-2"><span className="text-text-secondary">Recuperado</span><b className="tabular-nums">{cop(c.recuperado)}</b></div>
                   <div className="flex justify-between gap-2"><span className="text-text-secondary">Deuda vieja pendiente</span><b className="tabular-nums">{cop(c.deudaVieja)}</b></div>
                 </div>
@@ -205,7 +276,7 @@ export function CarteraSeguimiento({ data }: { data: any }) {
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filtrar por resultado">
             {[{ key: "", label: "Todos", usuarios: r.usuariosInicial }, ...cats].map((c: any) => (
               <button key={c.key} type="button" onClick={() => { setCat(c.key); setLimite(PAGINA); }} aria-pressed={cat === c.key}
-                className={`rounded-full border px-3 py-1.5 text-[12px] font-semibold ${cat === c.key ? "border-brand bg-brand text-on-brand" : "border-border-default text-text-secondary hover:bg-surface-2"}`}>
+                className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${cat === c.key ? "border-brand bg-brand text-on-brand" : "border-border-default text-text-secondary hover:bg-surface-2"}`}>
                 {c.label} · {nfmt(c.usuarios)}
               </button>
             ))}
@@ -215,8 +286,10 @@ export function CarteraSeguimiento({ data }: { data: any }) {
           { key: "abonado", header: "Abonado", render: (x: any) => <span className="font-mono text-text-secondary">{x.abonado ?? "—"}</span> },
           { key: "nombre", header: "Cliente", render: (x: any) => <Link href={`/clientes/${x.id}`} className="font-medium text-brand hover:underline">{x.nombre}</Link> },
           { key: "sede", header: "Sede", render: (x: any) => x.sede },
+          { key: "ultimoPago", header: "Último pago", sortValue: (x: any) => x.ultimoPago ?? "",
+            render: (x: any) => x.ultimoPago ? <span className="whitespace-nowrap">{fmtDate(x.ultimoPago)}</span> : <span className="text-text-tertiary">—</span> },
           { key: "categoria", header: "Resultado", sortValue: (x: any) => etiqueta[x.categoria],
-            render: (x: any) => <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold ${TONO[x.categoria]?.chip}`}>{etiqueta[x.categoria]}</span> },
+            render: (x: any) => <CeldaResultado x={x} cats={cats} etiqueta={etiqueta} guardar={guardar} /> },
           { key: "deudaInicial", header: "Debía el día 1", align: "right", render: (x: any) => cop(x.deudaInicial) },
           { key: "pagado", header: "Pagó en el mes", align: "right",
             render: (x: any) => x.pagado > 0 ? <span className="font-semibold text-success-text" title={`${x.pagos} pago(s)`}>{cop(x.pagado)}</span> : <span className="text-text-tertiary">—</span> },
@@ -225,6 +298,8 @@ export function CarteraSeguimiento({ data }: { data: any }) {
           { key: "deudaNueva", header: "Factura nueva", align: "right",
             render: (x: any) => x.deudaNueva > 0 ? cop(x.deudaNueva) : x.deudaNueva < 0 ? <span title="Notas crédito o depuraciones">−{cop(-x.deudaNueva)}</span> : <span className="text-text-tertiary">—</span> },
           { key: "estadoFinal", header: data.abierto ? "Estado hoy" : "Estado al cierre", render: (x: any) => SUB_STATUS_LABEL[x.estadoFinal] ?? x.estadoFinal ?? "—" },
+          { key: "observaciones", header: "Observaciones", sortValue: (x: any) => x.observaciones ?? "",
+            render: (x: any) => <CeldaObservaciones x={x} guardar={guardar} /> },
         ]} />
         {filas.length > limite && (
           <button onClick={() => setLimite((l) => l + PAGINA)} className="self-center rounded-lg border border-border-default px-3 py-1.5 text-[12px] text-text-secondary hover:bg-surface-2">

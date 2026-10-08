@@ -1,4 +1,9 @@
-import { descuentosDePromocionPendientes } from './descuento-al-cobrar';
+import {
+  aplicarPromocionesAlCobrar, descuentosDePromocionPendientes, finMinimoConGracia, DIAS_GRACIA_CONVENIO,
+} from './descuento-al-cobrar';
+import { aplicarNotaEnTx } from '../billing/facturas.service';
+
+jest.mock('../billing/facturas.service', () => ({ aplicarNotaEnTx: jest.fn() }));
 
 /**
  * A QUÉ factura alcanza el 5% de pronto pago cuando se concede solo en ventanilla.
@@ -189,5 +194,74 @@ describe('descuento de promoción al cobrar', () => {
     const aMano = await descuentosDePromocionPendientes(
       prismaFake([{ ...regla, invoiceIds: ['f-nov'] }]), 'sub-1', [nov], HOY);
     expect(aMano.get('f-nov')?.amount).toBe(3574);
+  });
+
+  /**
+   * Factura 505826 (2026-10-02): 77.000, con el 5 % eran 73.150 y se cobraron 73.141.
+   * Por 9 pesos no se concedió el descuento y el recibo salió debiendo 3.859.
+   */
+  describe('al cobrar, unos pesos de redondeo no tumban el descuento', () => {
+    const octubre = factura({ id: 'f-oct', tid: 505826, subtotal: 72769, total: 77000 });
+    const cobrar = (monto: number) => {
+      const px = prismaFake();
+      px.promotionApplication.create = jest.fn();
+      return aplicarPromocionesAlCobrar(px, 'sub-1', [octubre], { payDate: HOY, monto });
+    };
+    beforeEach(() => (aplicarNotaEnTx as jest.Mock).mockClear());
+
+    it('con 9 pesos de menos la deja saldada: el descuento absorbe lo que falta', async () => {
+      const r = await cobrar(73141);
+      expect(r.total).toBe(3859);
+      expect(aplicarNotaEnTx).toHaveBeenCalledWith(
+        expect.anything(), 'f-oct', expect.objectContaining({ type: 'CREDITO', amount: 3859 }),
+      );
+    });
+
+    it('con el valor exacto concede el 5 % justo', async () => {
+      expect((await cobrar(73150)).total).toBe(3850);
+    });
+
+    it('un abono de verdad sigue sin descuento', async () => {
+      expect((await cobrar(73000)).total).toBe(0);
+      expect(aplicarNotaEnTx).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * Gracia del convenio (regla del usuario, 08-10-2026): el banco reporta tarde y el
+ * Excel trae la fecha del archivo. La promo del 1 al 5 de octubre tiene que valer
+ * en los archivos del 6 y del 7 (abonados 52337 y 51073).
+ */
+describe('gracia de la promoción para el convenio', () => {
+  const d = (m: number, dia: number) => new Date(Date.UTC(2026, m - 1, dia));
+  const iso = (x: Date) => x.toISOString().slice(0, 10);
+
+  it('retrocede días hábiles: el miércoles 07-oct con 2 días llega al lunes 05-oct', () => {
+    expect(iso(finMinimoConGracia(d(10, 7), DIAS_GRACIA_CONVENIO))).toBe('2026-10-05');
+    expect(iso(finMinimoConGracia(d(10, 6), DIAS_GRACIA_CONVENIO))).toBe('2026-10-03');
+  });
+
+  it('salta domingos y festivos (el sábado sí es hábil)', () => {
+    // Lunes 12-oct-2026 es festivo (Día de la Raza, Emiliani) y el 11 domingo.
+    expect(iso(finMinimoConGracia(d(10, 13), 2))).toBe('2026-10-09');
+  });
+
+  it('sin gracia no mueve la fecha', () => {
+    expect(iso(finMinimoConGracia(d(10, 7), 0))).toBe('2026-10-07');
+  });
+
+  it('con gracia, la consulta acepta promos que terminaron hasta esa fecha', async () => {
+    const px = prismaFake([{ ...PROMO, startDate: d(10, 1), endDate: d(10, 5) }]);
+    const oct = factura({ id: 'f-oct', invoiceDate: d(10, 1), subtotal: 77000, total: 77000 });
+    const r = await descuentosDePromocionPendientes(px, 'sub-1', [oct], d(10, 7), undefined, finMinimoConGracia(d(10, 7), 2));
+    expect(px.promotion.findMany.mock.calls[0][0].where.endDate).toEqual({ gte: d(10, 5) });
+    expect(r.get('f-oct')?.amount).toBe(3850);
+  });
+
+  it('sin gracia la vigencia se mide contra el día del pago, como siempre', async () => {
+    const px = prismaFake();
+    await descuentosDePromocionPendientes(px, 'sub-1', [factura({})], HOY);
+    expect(px.promotion.findMany.mock.calls[0][0].where.endDate).toEqual({ gte: HOY });
   });
 });

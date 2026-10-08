@@ -134,6 +134,7 @@ import { SupportWriteService } from '../support/support-write.service';
 import { OrdenesAutomaticasService } from '../support/ordenes-automaticas.service';
 import { SupportService } from '../support/support.service';
 import { TasksService } from '../tasks/tasks.service';
+import { FixedAssetsService } from '../fixed-assets/fixed-assets.service';
 import { CobranzasService } from '../treasury/cobranzas.service';
 import { PagosFijosService } from '../treasury/pagos-fijos.service';
 import { TreasuryService } from '../treasury/treasury.service';
@@ -233,7 +234,7 @@ export const chatbotLinkService = new ChatbotLinkService(prismaService);
 // distancias del recorrido sugerido, y el orden de este fichero es topológico.
 export const routingService = new RoutingService();
 export const agendaService = new AgendaService(prismaService, eventos, routingService);
-export const supportWriteService = new SupportWriteService(prismaService, mikrotikService, geofenceService, responsibilityNotifierService, eventos, agendaService, orderScoreService, prorrateoReconexionService, genieacsService, cargoOrdenService, subscribersService, oltService);
+export const supportWriteService = new SupportWriteService(prismaService, mikrotikService, geofenceService, responsibilityNotifierService, eventos, agendaService, orderScoreService, prorrateoReconexionService, genieacsService, cargoOrdenService, subscribersService, oltService, onuAlDevolverService);
 export const altaClienteService = new AltaClienteService(prismaService, subscribersService, mikrotikService, facturasService, supportWriteService);
 // La orden que nace del pago de su factura (hoy, el traslado). Va detrás de
 // `supportWriteService` porque abre órdenes con él.
@@ -298,7 +299,8 @@ export const subscriberNotesService = new SubscriberNotesService(prismaService);
 export const equipoReservaService = new EquipoReservaService(prismaService, onuAlDevolverService);
 export const onuProvisionService = new OnuProvisionService(prismaService, oltService, oltPlanProfileService, mikrotikService, equipoReservaService, subscribersService, vlanEquiposService);
 export const tasksService = new TasksService(prismaService);
-export const pagosFijosService = new PagosFijosService(prismaService, cobranzasService);
+export const fixedAssetsService = new FixedAssetsService(prismaService, journalService);
+export const pagosFijosService = new PagosFijosService(prismaService, cobranzasService, ordersService);
 
 /** Todos los servicios, para los ganchos de arranque y apagado. */
 export const todosLosServicios = [
@@ -422,5 +424,6 @@ export const todosLosServicios = [
   subscriberNotesService,
   onuProvisionService,
   tasksService,
+  fixedAssetsService,
   pagosFijosService,
 ];

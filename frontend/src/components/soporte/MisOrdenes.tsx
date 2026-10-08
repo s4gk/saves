@@ -23,7 +23,7 @@ import { ordenDeTexto, useFiltrosEnUrl, useFiltrosRecordados } from "@/lib/useFi
 import {
   type Paged, type TicketRow, type SupportStats,
   TICKET_STATUS_LABEL, TICKET_STATUS_TONE, TICKET_PRIORITY_TONE,
-  TICKET_TYPES, TICKET_PRIORITIES,
+  TICKET_TYPES, ticketTypeLabel, TICKET_PRIORITIES,
 } from "@/lib/support";
 
 /** Un filtro múltiple tal como viaja en la URL: "PENDIENTE,REALIZANDO" → ["PENDIENTE","REALIZANDO"]. */
@@ -211,7 +211,7 @@ function MisOrdenesLista({ urlInicial, recordado }: { urlInicial: Record<string,
         />
         <MultiSelect
           label="Detalles" todos="Todos los detalles" value={type} onChange={setType} width={280}
-          options={TICKET_TYPES.map((t) => ({ value: t, label: t }))}
+          options={TICKET_TYPES.map((t) => ({ value: t, label: ticketTypeLabel(t) }))}
         />
         {filtrosActivos > 0 && (
           <button

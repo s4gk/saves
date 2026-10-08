@@ -15,6 +15,8 @@ import { hoyEnColombia } from '../common/fecha-colombia';
 import { esJefeDeBodega, esSuperusuario, exigirBodegaDeSuSede, sedesDeUsuario } from './bodega-scope';
 import { clavesDe, esTecnicoDeCampo, fichaDelUsuario } from '../common/tecnico-scope';
 import { cajerasDeSede } from '../common/sede-scope';
+import { emparejar, leerKmz, type FilaKmz } from './kmz-naps';
+import { errorCategoriaTipo } from './equipos-catalogo';
 
 export class EquipTransferDto {
   @IsString() fromWarehouseId!: string;
@@ -74,6 +76,8 @@ export class CreateEquipmentDto {
   @IsOptional() @IsString() brand?: string;
   @IsOptional() @IsString() status?: string;
   @IsOptional() @IsString() observation?: string;
+  @IsOptional() @IsString() @MaxLength(60) category?: string;
+  @IsOptional() @IsString() @MaxLength(60) equipmentType?: string;
 }
 /**
  * Edición de un equipo desde inventario (2026-09-14). Los topes son los de las
@@ -86,6 +90,8 @@ export class UpdateEquipmentDto {
   @IsOptional() @IsString() @MaxLength(100) serial?: string;
   @IsOptional() @IsString() @MaxLength(16) status?: string;
   @IsOptional() @IsString() @MaxLength(200) observation?: string;
+  @IsOptional() @IsString() @MaxLength(60) category?: string;
+  @IsOptional() @IsString() @MaxLength(60) equipmentType?: string;
 }
 /** Estados que se pueden poner a mano. "Asignado"/"Reservado" los ponen la asignación y la reserva. */
 export const ESTADOS_EQUIPO_EDITABLES = ['Disponible', 'Bueno', 'Malo', 'Depurado'];
@@ -722,6 +728,10 @@ export class NetworkWriteService {
     if (esTecnicoDeCampo(user)) {
       throw new ForbiddenException('No puedes dar de alta equipos: tu acceso al inventario es de consulta sobre los que tienes asignados.');
     }
+    const category = dto.category?.trim() || null;
+    const equipmentType = dto.equipmentType?.trim() || null;
+    const malTipo = errorCategoriaTipo(category, equipmentType);
+    if (malTipo) throw new BadRequestException(malTipo);
     const wh = await this.prisma.equipmentWarehouse.findUnique({ where: { id: dto.warehouseId } });
     if (!wh) throw new NotFoundException('Bodega no encontrada');
     const max = await this.prisma.equipment.aggregate({ _max: { code: true } });
@@ -731,6 +741,7 @@ export class NetworkWriteService {
         code, supplierLegacy: 0, warehouseId: wh.id, warehouseLegacy: wh.legacyId ?? 0,
         mac: dto.mac ?? null, serial: dto.serial ?? null, brand: dto.brand ?? null,
         status: dto.status ?? 'Disponible', observation: dto.observation ?? null, arrival: new Date(),
+        category, equipmentType,
       },
     });
     return { id: eq.id, code: eq.code };
@@ -992,6 +1003,79 @@ export class NetworkWriteService {
     return { id, deleted: true };
   }
 
+  /**
+   * Ubicación de las cajas de UNA sede desde el KMZ de Google Earth (ver `kmz-naps.ts`).
+   * Sin `aplicar` sólo revisa: devuelve el emparejado para que redes lo mire antes.
+   * Al aplicar escribe las exactas que no tenían GPS; las que ya tenían otro punto
+   * (`sobrescribir`) y las de nombre parecido (`parecidas`) sólo si se pide.
+   * Las cajas no se crean desde aquí: una caja necesita VLAN y puertos.
+   */
+  async importarUbicacionesKmz(
+    buf: Buffer, branchId: string,
+    opc: { aplicar: boolean; sobrescribir: boolean; parecidas: boolean },
+    user?: AuthUser,
+  ) {
+    const branch = await this.prisma.branch.findUnique({ where: { id: branchId }, select: { id: true, name: true } });
+    if (!branch) throw new NotFoundException('Sede no encontrada');
+    let leido: Awaited<ReturnType<typeof leerKmz>>;
+    try {
+      leido = await leerKmz(buf);
+    } catch (e) {
+      throw new BadRequestException((e as Error).message || 'No se pudo leer el KMZ.');
+    }
+    if (!leido.marcadores.length) throw new BadRequestException('El archivo no trae ningún punto (marcador) con nombre.');
+
+    const naps = await this.prisma.nap.findMany({ where: { branchId }, select: { id: true, name: true, gpsLat: true, gpsLng: true } });
+    const filas = emparejar(leido.marcadores, naps);
+    const seAplica = (f: FilaKmz) =>
+      !!f.napId && (f.coincidencia === 'exacta' || (f.coincidencia === 'parecida' && opc.parecidas))
+      && (f.efecto === 'nueva' || (f.efecto === 'mueve' && opc.sobrescribir));
+    const aAplicar = filas.filter(seAplica);
+
+    let aplicadas = 0;
+    if (opc.aplicar && aAplicar.length) {
+      const antes = new Map(naps.map((n) => [n.id, n]));
+      await this.prisma.$transaction(async (tx) => {
+        for (const f of aAplicar) {
+          await tx.nap.update({ where: { id: f.napId! }, data: { gpsLat: f.lat.toFixed(6), gpsLng: f.lng.toFixed(6) } });
+        }
+        await tx.auditLog.create({
+          data: {
+            userId: user?.id ?? null, action: 'UPDATE', entity: 'Nap', entityId: null,
+            before: { origen: 'kmz', sede: branch.name, cajas: aAplicar.map((f) => ({ id: f.napId, gpsLat: antes.get(f.napId!)?.gpsLat ?? null, gpsLng: antes.get(f.napId!)?.gpsLng ?? null })) },
+            after: { origen: 'kmz', sede: branch.name, opc, cajas: aAplicar.map((f) => ({ id: f.napId, nap: f.nap, kmz: f.kmz, gpsLat: f.lat.toFixed(6), gpsLng: f.lng.toFixed(6) })) },
+          },
+        });
+      });
+      aplicadas = aAplicar.length;
+      this.logger.log(`KMZ ${branch.name}: ${aplicadas} cajas ubicadas por ${user?.email ?? '¿?'}`);
+    }
+
+    const conteo = (pred: (f: FilaKmz) => boolean) => filas.filter(pred).length;
+    const conPunto = new Set(filas.filter((f) => f.napId && f.coincidencia !== 'repetida').map((f) => f.napId));
+    return {
+      sede: branch.name,
+      aplicado: opc.aplicar,
+      aplicadas,
+      resumen: {
+        marcadores: filas.length,
+        descartados: leido.descartados,
+        exactas: conteo((f) => f.coincidencia === 'exacta'),
+        parecidas: conteo((f) => f.coincidencia === 'parecida'),
+        ambiguas: conteo((f) => f.coincidencia === 'ambigua'),
+        sinCaja: conteo((f) => f.coincidencia === 'sin_caja'),
+        repetidas: conteo((f) => f.coincidencia === 'repetida'),
+        nuevas: conteo((f) => !!f.napId && f.coincidencia !== 'repetida' && f.efecto === 'nueva'),
+        mueven: conteo((f) => !!f.napId && f.coincidencia !== 'repetida' && f.efecto === 'mueve'),
+        iguales: conteo((f) => !!f.napId && f.coincidencia !== 'repetida' && f.efecto === 'igual'),
+        seAplicarian: aAplicar.length,
+        cajasSede: naps.length,
+        cajasSinPunto: naps.filter((n) => !conPunto.has(n.id)).length,
+      },
+      filas: filas.map((f) => ({ ...f, seAplica: seAplica(f) })),
+    };
+  }
+
   // --- Asignar / desasignar equipo a cliente ---
   async assignEquipmentToSubscriber(equipmentId: string, dto: AssignEquipmentSubDto) {
     const eq = await this.prisma.equipment.findUnique({ where: { id: equipmentId } });
@@ -1058,6 +1142,7 @@ export class NetworkWriteService {
     const nuevo = {
       brand: limpio(dto.brand), mac: limpio(dto.mac), serial: limpio(dto.serial),
       status: limpio(dto.status), observation: limpio(dto.observation),
+      category: limpio(dto.category), equipmentType: limpio(dto.equipmentType),
     };
     const data: Prisma.EquipmentUpdateInput = {};
     for (const campo of Object.keys(nuevo) as (keyof typeof nuevo)[]) {
@@ -1065,6 +1150,14 @@ export class NetworkWriteService {
       if (v !== undefined && v !== (eq[campo] ?? null)) data[campo] = v;
     }
     if (!Object.keys(data).length) return { id: eq.id, code: eq.code, cambios: 0 };
+
+    if ('category' in data || 'equipmentType' in data) {
+      const malTipo = errorCategoriaTipo(
+        nuevo.category !== undefined ? nuevo.category : eq.category,
+        nuevo.equipmentType !== undefined ? nuevo.equipmentType : eq.equipmentType,
+      );
+      if (malTipo) throw new BadRequestException(malTipo);
+    }
 
     if ('status' in data) {
       if ((eq.status ?? '').toLowerCase() === 'reservado' || eq.reservedTicketId) {

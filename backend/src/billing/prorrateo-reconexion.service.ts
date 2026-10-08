@@ -42,10 +42,14 @@ import { CARGOS_POR_ORDEN } from './cargos-orden';
  *   · Factura de la MENSUALIDAD del mes con saldo → se le añade el renglón (y queda
  *     `editedAt`, o el sync de ida la revertiría en la siguiente pasada de 15
  *     minutos).
- *   · Factura del mes ya pagada, timbrada ante la DIAN, o inexistente → factura
- *     NUEVA con vencimiento a fin de mes. El legacy sí revive una factura pagada;
- *     aquí no, porque eso deja mintiendo al recibo que el cliente acaba de recibir
- *     y rompe el documento electrónico.
+ *   · Aunque esa factura YA ESTÉ PAGADA: se le añade el renglón y vuelve a quedar
+ *     con saldo (PARTIAL). Regla del usuario (08-10-2026): la reconexión «2» no
+ *     divide las facturas, se queda en la misma recurrente — antes nacía una
+ *     factura aparte y el mes quedaba partido en dos (abonado 5236: TV de octubre
+ *     en la #506339 pagada, el internet reconectado en la #510379). Es lo mismo que
+ *     hace el legacy, que revive la factura pagada.
+ *   · Timbrada ante la DIAN (ese documento no se toca) o sin mensualidad en el mes
+ *     → factura NUEVA con vencimiento a fin de mes.
  *   · NUNCA en un cobro puntual de ventanilla (traslado, 'Agregar Internet',
  *     afiliación): esa factura se emitió por un valor cerrado (`esCobroPuntual`).
  *
@@ -348,7 +352,7 @@ export class ProrrateoReconexionService {
       where: { subscriberId, status: { not: 'CANCELED' }, invoiceDate: { gte: mesIni, lt: mesFin } },
       orderBy: [{ invoiceDate: 'desc' }, { tid: 'desc' }],
       select: {
-        id: true, tid: true, status: true, total: true, paidAmount: true, subtotal: true, tax: true,
+        id: true, tid: true, kind: true, status: true, total: true, paidAmount: true, subtotal: true, tax: true,
         items: { select: { productName: true, description: true, price: true } },
         electronicInvoices: { select: { type: true, dianNumber: true } },
       },
@@ -375,10 +379,12 @@ export class ProrrateoReconexionService {
       }
     }
 
-    // DÓNDE cae el cobro: la factura de la MENSUALIDAD del mes, nunca un cobro
-    // puntual de ventanilla (ver `esCobroPuntual`). Si en el mes sólo hay cobros
-    // puntuales —o no hay nada—, los días se van a una factura nueva.
-    const factura = facturas.find((f) => !this.esCobroPuntual(f.items, catalogo));
+    // DÓNDE cae el cobro: la factura de la MENSUALIDAD del mes —la RECURRENTE antes
+    // que cualquier otra—, nunca un cobro puntual de ventanilla (ver
+    // `esCobroPuntual`). Si en el mes sólo hay cobros puntuales —o no hay nada—, los
+    // días se van a una factura nueva.
+    const mensualidades = facturas.filter((f) => !this.esCobroPuntual(f.items, catalogo));
+    const factura = mensualidades.find((f) => f.kind === 'RECURRENTE') ?? mensualidades[0];
 
     const lineas: LineaProrrateo[] = [];
     const sinPrecio: string[] = [];
@@ -507,9 +513,12 @@ export class ProrrateoReconexionService {
   /**
    * Mete los renglones en la factura del mes, si esa factura se puede tocar.
    *
-   * Devuelve `null` —y el cobro se va a una factura nueva— cuando la factura ya
-   * está pagada (el recibo del cliente dejaría de cuadrar) o ya fue timbrada ante
-   * la DIAN (ese documento no se toca: se corrige por nota o por otra factura).
+   * Una factura PAGADA también se toca: vuelve a quedar con saldo por los días (la
+   * reconexión no parte el mes en dos facturas, regla del usuario del 08-10-2026).
+   *
+   * Devuelve `null` —y el cobro se va a una factura nueva— sólo cuando la factura
+   * ya fue timbrada ante la DIAN (ese documento no se toca: se corrige por nota o
+   * por otra factura) o es un cobro puntual.
    */
   private async cobrarEnFacturaDelMes(
     invoiceId: string,
@@ -527,7 +536,6 @@ export class ProrrateoReconexionService {
       },
     });
     if (!inv) return null;
-    if (inv.status === 'PAID' || num(inv.paidAmount) >= num(inv.total)) return null;
     if (inv.electronicInvoices.some((e) => e.type === 'FACTURADA' && e.dianNumber)) return null;
     // El mismo freno que en `evaluar`, aquí porque esta es la puerta por la que se
     // escribe: un cargo cerrado (traslado, agregar internet, afiliación) no engorda.

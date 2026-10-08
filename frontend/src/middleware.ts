@@ -81,6 +81,9 @@ const ROUTE_AREA: [RegExp, string[]][] = [
   // ejecutivo, caja el panel de su caja (el informe del recaudo del día) y
   // técnicos su jornada (las órdenes que le tocan hoy y su rendimiento).
   [/^\/dashboard(\/|$)/, ["gerencia", "caja", "tecnicos"]],
+  // El seguimiento de cartera lo trabaja Cartera/cobranza (clasifica y anota usuario
+  // por usuario), no sólo gerencia. Mismas áreas que la API. Va ANTES de /reportes.
+  [/^\/reportes\/cartera-seguimiento(\/|$)/, ["gerencia", "administracion", "contabilidad"]],
   [/^\/reportes(\/|$)/, ["gerencia"]],
   // Metabase (análisis de datos). Lo sirve el rewrite de next.config.mjs.
   [/^\/analitica(\/|$)/, ["gerencia"]],

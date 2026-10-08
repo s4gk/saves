@@ -4,11 +4,22 @@ import { normalizePhone } from '../common/phone.util';
 import { ChatbotSessionStore } from './chatbot-session.store';
 import { ChatbotUsageService } from './chatbot-usage.service';
 import { convKeyOf } from './chatbot.identity';
+import { SUPERADMIN_PERMISSION } from '../auth/permissions.catalog';
 
 /** Interruptor del bot. Igual que `network.mikrotikLive`: el ajuste manda, el env es el default. */
 export const CHATBOT_ENABLED_KEY = 'chatbot.enabled';
 /** Lista blanca de teléfonos (E.164, separados por coma). Vacía = atiende a todos. */
 export const CHATBOT_ALLOWLIST_KEY = 'chatbot.allowlist';
+/**
+ * Roles del ERP a los que el bot atiende (nombres de `Role`, separados por coma).
+ * Vacío = atiende a todos (funcionarios, abonados y público).
+ *
+ * Existe porque el 2026-09-24 se decidió que, por ahora, el bot sea SOLO de gestión
+ * interna: un número que no es de un funcionario activo con uno de estos roles (o con
+ * el permiso de superusuario) no llega al motor, igual que con el bot apagado — el
+ * mensaje queda en la bandeja y lo contesta una persona.
+ */
+export const CHATBOT_ROLES_KEY = 'chatbot.soloRoles';
 /**
  * Ids de los planes que el agente público puede ofrecer (separados por coma).
  *
@@ -50,7 +61,7 @@ const TTL_MS = 5000;
  * Motivo por el que el bot no atiende, en clave estable para que el transporte pueda
  * reaccionar distinto a cada uno sin comparar textos en español.
  */
-export type MotivoVeto = 'apagado' | 'escalada' | 'tope' | 'piloto';
+export type MotivoVeto = 'apagado' | 'escalada' | 'tope' | 'piloto' | 'rol';
 
 /**
  * Lo que se le dice al cliente cuando el bot topó el cupo del día.
@@ -79,7 +90,7 @@ const AVISO_TOPE =
  */
 export class ChatbotGateService {
   private readonly logger = new Logger('ChatbotGate');
-  private cache: { at: number; enabled: boolean; allow: string[]; fromSetting: boolean } | null = null;
+  private cache: { at: number; enabled: boolean; allow: string[]; roles: string[]; fromSetting: boolean } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -95,10 +106,11 @@ export class ChatbotGateService {
     if (this.cache && Date.now() - this.cache.at < TTL_MS) return this.cache;
     let enabled = this.envEnabled;
     let allow: string[] = [];
+    let roles: string[] = [];
     let fromSetting = false;
     try {
       const rows = await this.prisma.appSetting.findMany({
-        where: { key: { in: [CHATBOT_ENABLED_KEY, CHATBOT_ALLOWLIST_KEY] } },
+        where: { key: { in: [CHATBOT_ENABLED_KEY, CHATBOT_ALLOWLIST_KEY, CHATBOT_ROLES_KEY] } },
         select: { key: true, value: true },
       });
       const val = (k: string) => rows.find((r) => r.key === k)?.value ?? null;
@@ -108,12 +120,13 @@ export class ChatbotGateService {
         fromSetting = true;
       }
       allow = this.parseList(val(CHATBOT_ALLOWLIST_KEY));
+      roles = (val(CHATBOT_ROLES_KEY) ?? '').split(',').map((r) => r.trim()).filter(Boolean);
     } catch (e) {
       // Si la BD falla, NO se asume encendido: ante la duda, el bot se calla.
       this.logger.warn(`No se pudo leer la configuración del bot; se apaga por precaución: ${(e as Error).message}`);
       enabled = false;
     }
-    this.cache = { at: Date.now(), enabled, allow, fromSetting };
+    this.cache = { at: Date.now(), enabled, allow, roles, fromSetting };
     return this.cache;
   }
 
@@ -123,6 +136,35 @@ export class ChatbotGateService {
       .split(/[,;\s]+/)
       .map((p) => normalizePhone(p))
       .filter((p): p is string => !!p);
+  }
+
+  /**
+   * ¿El número es de un funcionario activo con uno de los roles permitidos o con el
+   * permiso de superusuario? Permisos efectivos igual que `AuthService.resolveUser`
+   * (roles ∪ ALLOW − DENY). Ante un fallo de BD responde que no: el bot se calla.
+   */
+  private async esPersonalPermitido(digits: string | null, roles: string[]): Promise<boolean> {
+    if (!digits) return false;
+    try {
+      const user = await this.prisma.user.findFirst({
+        where: { whatsappPhone: digits, isActive: true },
+        select: {
+          roles: { select: { role: { select: { name: true, permissions: { select: { permission: { select: { key: true } } } } } } } },
+          permissionOverrides: { select: { effect: true, permission: { select: { key: true } } } },
+        },
+      });
+      if (!user) return false;
+      if (user.roles.some((ur) => roles.includes(ur.role.name))) return true;
+      const deny = user.permissionOverrides.some((o) => o.effect === 'DENY' && o.permission.key === SUPERADMIN_PERMISSION);
+      if (deny) return false;
+      return (
+        user.permissionOverrides.some((o) => o.effect !== 'DENY' && o.permission.key === SUPERADMIN_PERMISSION) ||
+        user.roles.some((ur) => ur.role.permissions.some((rp) => rp.permission.key === SUPERADMIN_PERMISSION))
+      );
+    } catch (e) {
+      this.logger.warn(`No se pudo comprobar el rol de ${digits}; el bot no lo atiende: ${(e as Error).message}`);
+      return false;
+    }
   }
 
   /** Invalida la cache: tras cambiar el ajuste, el efecto es inmediato y no en 5s. */
@@ -142,6 +184,12 @@ export class ChatbotGateService {
   ): Promise<{ ok: boolean; reason?: string; code?: MotivoVeto; aviso?: string }> {
     const c = await this.load();
     if (!c.enabled) return { ok: false, reason: 'apagado', code: 'apagado' };
+
+    // Solo personal: va antes que la escalada y el tope para que a un cliente no le
+    // llegue ni el aviso de "te atiende un asesor" — para él, el bot no existe.
+    if (c.roles.length && !(await this.esPersonalPermitido(normalizePhone(phone), c.roles))) {
+      return { ok: false, reason: 'no es personal autorizado para el bot', code: 'rol' };
+    }
 
     // Escalada a una persona: manda sobre la lista blanca y sobre todo lo demás. Si el
     // cliente pidió un humano, que el bot vuelva a meterse en la conversación es peor
@@ -203,6 +251,8 @@ export class ChatbotGateService {
       source: c.fromSetting ? ('ajuste' as const) : ('env' as const),
       envDefault: this.envEnabled,
       allowlist: c.allow,
+      /** Roles a los que atiende; vacío = a todos. */
+      soloRoles: c.roles,
       /** Con lista blanca, el bot está en piloto: no atiende al resto de abonados. */
       pilot: c.allow.length > 0,
     };

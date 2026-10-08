@@ -85,6 +85,12 @@ describe('conciliarSecret · la ficha y el secret dicen lo mismo', () => {
     expect(avisos.join(' ')).toMatch(/clave PPP quedó vacía/);
   });
 
+  it('una clave con espacios nunca llega al router, y editarla corrige la que quedó con espacio (abonado 64653)', () => {
+    expect(conciliarSecret({ ...FICHA, pppPassword: '24203232 ' }, EN_EL_ROUTER, ['pppPassword']).set.password).toBeUndefined();
+    const { set } = conciliarSecret(FICHA, { ...EN_EL_ROUTER, password: '24203232 ' }, ['pppPassword']);
+    expect(set.password).toBe('24203232');
+  });
+
   it('renombrar el usuario PPP renombra el secret', () => {
     const { set } = conciliarSecret({ ...FICHA, pppUsername: 'DIANARESTREPO3' }, EN_EL_ROUTER, ['pppUsername']);
     expect(set.name).toBe('DIANARESTREPO3');

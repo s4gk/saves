@@ -22,6 +22,12 @@ import { listaJson } from "@/lib/errores";
 const NuevaNotaModal = dynamic(() => import("@/components/billing/NuevaNotaModal").then((m) => m.NuevaNotaModal), { ssr: false });
 
 type Autor = { id: number; name: string; count: number };
+type NotaPendiente = {
+  id: string; type: "CREDITO" | "DEBITO"; amount: number; applied: number; pending: number;
+  description: string; createdByName: string; createdAt: string;
+  subscriber: { id: string; abonado: number | null; name: string };
+  applications: { invoiceId: string; tid: number; amount: number }[];
+};
 
 export default function NotasPage() {
   const { loading: authLoading, authFetch, sedeScoped, puedeEmitirNotas } = useAuth();
@@ -98,6 +104,14 @@ export default function NotasPage() {
 
   useEffect(() => { setPage(1); }, [search, type, branchId, authorId, from, to, montoMin, montoMax, pageSize, orden.clave]);
 
+  // Notas dejadas para la PRÓXIMA factura (aún no están en ninguna): no salen en la
+  // tabla de abajo, que lista renglones de factura, así que se muestran aparte.
+  const { data: pend, refrescar: loadPend } = useRequest<{ items: NotaPendiente[] }>(
+    () => "/billing/pending-notes", [], { saltar: authLoading },
+  );
+  const pendientes = pend?.items ?? [];
+  const [verPendientes, setVerPendientes] = useState(false);
+
   const autores: Autor[] = data?.autores ?? [];
   const hayFiltro = !!(search || type || branchId || authorId || from || to || montoMin || montoMax);
 
@@ -172,6 +186,38 @@ export default function NotasPage() {
           </span>
         )}
       </ListToolbar>
+
+      {pendientes.length > 0 && (
+        <div className="mb-3 rounded-lg border border-warning-border bg-warning-soft text-[12px]">
+          <button
+            type="button"
+            onClick={() => setVerPendientes((v) => !v)}
+            className="flex w-full items-center gap-1.5 px-3 py-2 text-left font-semibold text-warning-text"
+          >
+            <Icon name="clock" size={14} />
+            {pendientes.length === 1 ? "1 nota espera" : `${pendientes.length} notas esperan`} la próxima factura del cliente
+            <span className="font-normal text-text-tertiary">· se aplican solas cuando la factura nace</span>
+            <Icon name={verPendientes ? "chevron-up" : "chevron-down"} size={14} className="ml-auto" />
+          </button>
+          {verPendientes && (
+            <div className="border-t border-warning-border">
+              {pendientes.map((n) => (
+                <div key={n.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-warning-border/50 px-3 py-1.5 last:border-0">
+                  <Link href={`/clientes/${n.subscriber.id}`} className="font-medium text-text-primary hover:underline">
+                    {n.subscriber.name}{n.subscriber.abonado != null ? ` · ${n.subscriber.abonado}` : ""}
+                  </Link>
+                  <span className={`font-semibold ${n.type === "CREDITO" ? "text-success-text" : "text-warning-text"}`}>
+                    {n.type === "CREDITO" ? "-" : "+"}{cop(n.pending)}
+                    {n.applied > 0 && <span className="font-normal text-text-tertiary"> (de {cop(n.amount)}; ya aplicado en {n.applications.map((a) => `#${a.tid}`).join(", ")})</span>}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-text-secondary" title={n.description}>{n.description}</span>
+                  <span className="text-[11px] text-text-tertiary">{n.createdByName} · {new Date(n.createdAt).toLocaleDateString("es-CO")}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Panel de filtros (colapsable). */}
       {filtersOpen && (
@@ -260,7 +306,7 @@ export default function NotasPage() {
         </>
       )}
 
-      {openNew && puedeEmitirNotas && <NuevaNotaModal open={openNew} onClose={() => setOpenNew(false)} onDone={load} />}
+      {openNew && puedeEmitirNotas && <NuevaNotaModal open={openNew} onClose={() => setOpenNew(false)} onDone={() => { load(); loadPend(); }} />}
 
       <Modal open={!!detail} onClose={() => setDetail(null)} title="Detalle de la nota">
         {detail && (

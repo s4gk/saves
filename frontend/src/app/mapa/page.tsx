@@ -11,6 +11,8 @@ import { LoadError } from "@/components/ui/LoadError";
 import { useAuth } from "@/context/AuthProvider";
 import { useRequest } from "@/lib/useRequest";
 import { PERM } from "@/lib/auth";
+import { toast } from "@/components/ui/Toast";
+import { mensajeDeError } from "@/lib/errores";
 import type { BranchOpt } from "@/lib/network";
 import { COLOR_ESTADO, type PuntoMapa } from "@/components/map/puntos";
 import { CENTRO_POR_DEFECTO } from "@/lib/geo";
@@ -32,6 +34,9 @@ const Mapa = dynamic(() => import("@/components/map/Mapa").then((m) => m.Mapa), 
 });
 
 type Capa = "abonados" | "naps" | "tecnicos";
+
+/** Zoom al volar a la oficina de una sede: se ven las calles de alrededor. */
+const ZOOM_OFICINA = 16;
 
 /** Cada cuánto se vuelve a pedir la posición de los técnicos (ellos laten cada minuto). */
 const REFRESCO_TECNICOS_MS = 30_000;
@@ -71,8 +76,13 @@ function Chip({
 
 export default function MapaPage() {
   const router = useRouter();
-  const { loading: authLoading, can, sedeScoped } = useAuth();
-  const verTecnicos = can([PERM.AREA_GERENCIA, PERM.AREA_ADMINISTRACION, PERM.AREA_SISTEMAS]);
+  const { loading: authLoading, can, sedeScoped, user, authFetch } = useAuth();
+  // Mismas áreas que `GET /geo/technicians`; a la cajera el backend sólo le manda
+  // los técnicos de su sede.
+  const verTecnicos = can([PERM.AREA_GERENCIA, PERM.AREA_ADMINISTRACION, PERM.AREA_SISTEMAS, PERM.AREA_CAJA]);
+  // Mismas áreas que `PUT /geo/branches/:id/office`.
+  const moverOficinas = can([PERM.AREA_GERENCIA, PERM.AREA_ADMINISTRACION, PERM.AREA_SISTEMAS]);
+  const [moviendoOficina, setMoviendoOficina] = useState(false);
 
   const [q, setQ] = useState("");
   const [sede, setSede] = useState("");
@@ -85,6 +95,44 @@ export default function MapaPage() {
   const alternar = (c: Capa) => setCapas((v) => ({ ...v, [c]: !v[c] }));
 
   const branches = useRequest<BranchOpt[]>(() => "/network/branches", [], { saltar: authLoading });
+
+  // Sede cuya oficina se enfoca: la elegida en el desplegable o, para quien está
+  // acotado, la suya (si tiene una sola; con varias, el encuadre de sus puntos).
+  const sedeEnfocada = useMemo(() => {
+    const lista = branches.data ?? [];
+    if (sede) return lista.find((b) => b.id === sede) ?? null;
+    if (sedeScoped && user?.sedes?.length === 1) {
+      return lista.find((b) => b.legacyId === user.sedes![0]) ?? null;
+    }
+    return null;
+  }, [branches.data, sede, sedeScoped, user]);
+
+  // Con una búsqueda escrita manda el encuadre de los resultados, no la oficina.
+  const vista =
+    sedeEnfocada?.office && !q.trim()
+      ? { ...sedeEnfocada.office, zoom: ZOOM_OFICINA }
+      : null;
+
+  const refrescarSedes = branches.refrescar;
+  const colocarOficina = async (p: { lat: number; lng: number }) => {
+    if (!sedeEnfocada) return;
+    setMoviendoOficina(false);
+    try {
+      const res = await authFetch(`/geo/branches/${sedeEnfocada.id}/office`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat: p.lat, lng: p.lng }),
+      });
+      if (!res.ok) {
+        const cuerpo = await res.json().catch(() => null);
+        throw new Error(cuerpo?.message ?? `Error ${res.status}`);
+      }
+      toast(`Oficina de ${sedeEnfocada.name} ubicada`, "map-pin");
+      refrescarSedes();
+    } catch (e) {
+      toast(mensajeDeError(e, "No se pudo mover la oficina"), "alert-circle");
+    }
+  };
 
   const puntos = useRequest<PuntosMapa>(
     () => {
@@ -125,6 +173,21 @@ export default function MapaPage() {
 
   const marcadores = useMemo<PuntoMapa[]>(() => {
     const out: PuntoMapa[] = [];
+    // Oficinas: todas cuando se ve todo, sólo la de la sede cuando hay una enfocada.
+    for (const b of branches.data ?? []) {
+      if (!b.office) continue;
+      if (sedeEnfocada && b.id !== sedeEnfocada.id) continue;
+      if (!sedeEnfocada && sedeScoped) continue;
+      out.push({
+        id: `o-${b.id}`,
+        tipo: "oficina",
+        lat: b.office.lat,
+        lng: b.office.lng,
+        titulo: `Oficina ${b.name}`,
+        rutaHasta: true,
+        detalles: [{ label: "Sede", valor: b.name }],
+      });
+    }
     if (capas.abonados) {
       for (const s of puntos.data?.subscribers ?? []) {
         out.push({
@@ -192,7 +255,7 @@ export default function MapaPage() {
       }
     }
     return out;
-  }, [puntos.data, tecnicos.data, capas, verTecnicos]);
+  }, [puntos.data, tecnicos.data, capas, verTecnicos, branches.data, sedeEnfocada, sedeScoped]);
 
   if (authLoading) return <PageSkeleton />;
 
@@ -237,7 +300,14 @@ export default function MapaPage() {
         </div>
         {/* Quien está acotado a su sede no la elige: el mapa ya le llega recortado. */}
         {!sedeScoped && (
-          <Select value={sede} onChange={(e) => setSede(e.target.value)} className="w-44">
+          <Select
+            value={sede}
+            onChange={(e) => {
+              setSede(e.target.value);
+              setMoviendoOficina(false);
+            }}
+            className="w-44"
+          >
             <option value="">Todas las sedes</option>
             {(branches.data ?? []).map((b) => (
               <option key={b.id} value={b.id}>
@@ -272,10 +342,30 @@ export default function MapaPage() {
             Técnicos
           </Chip>
         )}
+        {moverOficinas && sedeEnfocada && (
+          <button
+            type="button"
+            onClick={() => setMoviendoOficina((v) => !v)}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors ${
+              moviendoOficina
+                ? "border-brand bg-brand text-on-brand"
+                : "border-border-default bg-surface text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            <Icon name="map-pin" size={13} />
+            {moviendoOficina ? "Cancelar" : sedeEnfocada.office ? "Mover oficina" : "Ubicar oficina"}
+          </button>
+        )}
         {puntos.cargando && (
           <span className="text-[12px] text-text-tertiary">Cargando puntos…</span>
         )}
       </div>
+
+      {moviendoOficina && sedeEnfocada && (
+        <p className="mb-2 rounded-lg border border-border-default bg-surface-2 px-3 py-1.5 text-[12px] text-text-secondary">
+          Haz clic en el mapa donde queda la oficina de <b>{sedeEnfocada.name}</b>.
+        </p>
+      )}
 
       {puntos.data?.truncated && (
         <p className="mb-2 rounded-lg border border-warning bg-warning-soft px-3 py-1.5 text-[12px] text-text-secondary">
@@ -290,7 +380,9 @@ export default function MapaPage() {
         ) : (
           <Mapa
             puntos={marcadores}
-            centro={CENTRO_POR_DEFECTO}
+            centro={vista ?? CENTRO_POR_DEFECTO}
+            vista={vista}
+            onClicMapa={moviendoOficina ? colocarOficina : undefined}
             onAbrir={(href) => router.push(href)}
             onComoLlegar={(d) => router.push(`/mapa/ruta?lat=${d.lat}&lng=${d.lng}&volver=${encodeURIComponent("/mapa")}`)}
           />

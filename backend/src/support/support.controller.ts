@@ -20,7 +20,7 @@ import { OnuProvisionService } from './onu-provision.service';
 import { OrderScoreService } from './order-score.service';
 import { CargoOrdenService } from '../billing/cargo-orden.service';
 import { CARGOS_POR_ORDEN, cargoDeTipoDeOrden, cargoPorClave } from '../billing/cargos-orden';
-import { PUNTAJE_MAX, PUNTAJE_MIN } from './order-score.policy';
+import { MINUTOS_MAX, PUNTAJE_MAX, PUNTAJE_MIN } from './order-score.policy';
 import { PerformanceService } from '../reports/performance.service';
 import { serviceOrderPdf } from '../common/pdf/pdf-docs';
 import { APP_PERMISSIONS } from '../auth/permissions.catalog';
@@ -43,6 +43,11 @@ export class AutenticarOnuDto {
    * abonado y, de paso, corregirle el serial con el que reporta la OLT.
    */
   @IsOptional() @IsString() equipmentId?: string;
+  /**
+   * Motivo para autenticar aunque la señal RX no sea Óptima (protocolo 4.5).
+   * Solo lo acepta el superadministrador; queda en las notas de la orden.
+   */
+  @IsOptional() @IsString() @MaxLength(500) forzarSenal?: string;
 }
 
 /**
@@ -114,7 +119,9 @@ export class NoAtendidaDto {
  */
 export class PuntajeTipoDto {
   @IsString() @MinLength(1) tipo!: string;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(PUNTAJE_MIN) @Max(PUNTAJE_MAX) puntos!: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(PUNTAJE_MIN) @Max(PUNTAJE_MAX) puntos?: number | null;
+  /** Tiempo estándar en minutos (0 = sin bono). `null` = volver al sugerido. */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(MINUTOS_MAX) minutos?: number | null;
 }
 
 /** Guarda de una sola vez todo lo que la pantalla cambió. */
@@ -579,8 +586,8 @@ export class SupportController {
     return this.onuProvision.autenticar(id, dto, user);
   }
   /** Aplicar al service-port la velocidad del plan vigente (órdenes de subir/bajar megas). */
-  aplicarVelocidadOnu(id: string, user: AuthUser) {
-    return this.onuProvision.aplicarVelocidad(id, user);
+  aplicarVelocidadOnu(id: string, sn: any, user: AuthUser) {
+    return this.onuProvision.aplicarVelocidad(id, user, typeof sn === 'string' ? sn : undefined);
   }
 
   /** PDF de la orden de servicio (acta técnica). */
@@ -608,8 +615,8 @@ export class SupportController {
     return enviarAdjuntoSeguro(res, join(SUPPORT_ROOT, a.storedName), a.storedName);
   }
 
-  tickets(search?: string, status?: string, type?: string, servicio?: string, tec?: string, priority?: string, sede?: string, subscriberId?: string, from?: string, to?: string, all?: string, page?: string, pageSize?: string, sortBy?: string, sortDir?: string, user?: AuthUser) {
-    return this.support.tickets({ search, status, type, servicio, tec, priority, sede, subscriberId, from, to, all, page: Number(page), pageSize: Number(pageSize), sortBy, sortDir }, user);
+  tickets(search?: string, status?: string, type?: string, servicio?: string, tec?: string, priority?: string, sede?: string, barrio?: string, subscriberId?: string, from?: string, to?: string, all?: string, page?: string, pageSize?: string, sortBy?: string, sortDir?: string, user?: AuthUser) {
+    return this.support.tickets({ search, status, type, servicio, tec, priority, sede, barrio, subscriberId, from, to, all, page: Number(page), pageSize: Number(pageSize), sortBy, sortDir }, user, { todasLasSedes: true });
   }
 
   /**
@@ -619,11 +626,11 @@ export class SupportController {
   async ticketsXlsx(
     res: Response,
     search?: string, status?: string, type?: string, servicio?: string,
-    tec?: string, priority?: string, sede?: string,
+    tec?: string, priority?: string, sede?: string, barrio?: string,
     from?: string, to?: string, all?: string,
     user?: AuthUser,
   ) {
-    const rows = await this.support.exportRows({ search, status, type, servicio, tec, priority, sede, from, to, all }, user);
+    const rows = await this.support.exportRows({ search, status, type, servicio, tec, priority, sede, barrio, from, to, all }, user);
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Vestel';
     const ws = wb.addWorksheet('Órdenes de soporte');

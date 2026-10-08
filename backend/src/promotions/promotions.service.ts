@@ -17,6 +17,8 @@ import {
   isBeforeTaxFmt, isFlatFmt, montoDeDescuento, reaches, subscriberFacts,
 } from './publico';
 import { alcanzaLaFactura, yaRebajadaEnOrigen } from './descuento-al-cobrar';
+import { retirarDescuentosDePromocion } from './revertir-descuentos-vencidos';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /** Fecha de hoy sin hora (UTC), para comparar contra los campos @db.Date. */
 function today(): Date {
@@ -392,7 +394,7 @@ export class PromotionsService {
         orderBy: [{ kind: 'asc' }, { name: 'asc' }],
         select: { id: true, name: true, kind: true },
       }),
-      this.prisma.branch.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      this.prisma.branch.findMany({ where: SEDE_ACTIVA, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
       this.prisma.neighborhood.findMany({
         where: { legacyId: { not: null } },
         orderBy: { name: 'asc' },
@@ -582,6 +584,18 @@ export class PromotionsService {
     return this.prisma.$transaction(async (tx) => {
       const promo = await tx.promotion.update({ where: { id }, data, include: this.targetInclude });
       await this.logTargetDiff(tx, id, name, refsBefore, refsAfter, updatedBy);
+      return promo;
+    }).then((promo) => {
+      // Apagarla retira su descuento de las facturas que aún no se pagan. Corre detrás
+      // (una campaña de cartera son miles de notas); la pasada horaria del portal
+      // recoge lo que aquí fallara.
+      if (existing.active && dto.active === false) {
+        void retirarDescuentosDePromocion(this.prisma, id, updatedBy ?? null)
+          .then((r) => console.log(`[promociones] "${name}" desactivada: descuento retirado de`
+            + ` ${r.facturas} facturas (${r.clientes} clientes, $${r.monto})`
+            + `${r.errores ? ` · ${r.errores} con error` : ''}`))
+          .catch((e) => console.error(`[promociones] retirar "${name}" falló: ${(e as Error).message}`));
+      }
       return promo;
     });
   }

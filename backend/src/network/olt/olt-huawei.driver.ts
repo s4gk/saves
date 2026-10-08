@@ -96,8 +96,18 @@ export class OltHuawei extends OltDriver {
     const s = Number(slot);
     const todas: any[] = [];
     for (let p = 0; p <= 15; p++) {
-      const onus = await this.getOnus(f, s, p);
-      if (onus === false || !onus.length) continue;
+      // Un puerto cuya lectura se corta (timeout/sesión caída a mitad del
+      // recorrido) NO puede pasar por vacío o incompleto: el sync marcaría como
+      // ausentes las ONUs que no alcanzó a leer (06-oct: YOPAL slot 1 llegó
+      // hasta 0/1/8:42 y los puertos 9-15 quedaron "ausentes"). Se reintenta
+      // una vez; si vuelve a fallar, falla el slot entero y no se marca nada.
+      let onus = await this.getOnus(f, s, p);
+      if (onus === false) onus = await this.getOnus(f, s, p);
+      if (onus === false) {
+        this.error = `La lectura del puerto ${f}/${s}/${p} se cortó (sin respuesta de la OLT); el slot no se sincronizó.`;
+        return false;
+      }
+      if (!onus.length) continue;
       for (const o of onus) {
         o.frame = f; o.slot = s; o.port = p;
         todas.push(o);
@@ -115,6 +125,7 @@ export class OltHuawei extends OltDriver {
     const f = Number(frame) || 0, s = Number(slot), p = Number(port);
 
     const info = await this.sendCommand(`display ont info ${f} ${s} ${p} all`);
+    if (this.cortado) return false;
     const onus = this.parseOntInfo(info);
 
     // Potencia óptica (best-effort). En el MA5800 va dentro de interface gpon.

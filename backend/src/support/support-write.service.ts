@@ -41,11 +41,11 @@ import { ORDEN_CRONOLOGICO } from './orden-cronologico';
 import { EquipoReservaService, tipoConReserva } from './equipo-reserva.service';
 import { exigirSedeSuscriptor } from '../common/sede-scope';
 import { ivaDe, num, round2 } from '../common/money';
-import { puedeEmpezarOrden } from './turno';
+import { esOrdenPosterior, MOTIVO_AUN_NO_TOCA, ordenQueLeToca, puedeEmpezarOrden } from './turno';
 import { nextTid, TID_SEQ } from '../common/tid';
 import { AgendaService } from './agenda.service';
 import { autorDeOrden, autorDeSeguimiento, SEGUIMIENTO_DEL_SISTEMA, type FirmaDeSeguimiento } from './autor-orden';
-import { ETIQUETA_CLASE, esAgregarInternet, esCambioDeMegas, esCambioTitular, esClaseOrden, esReconexion, esReconexionPorDias, esRetiroVoluntario, esTrabajoDeConexion, esTraslado, MAX_DIAS_GRACIA, motivoDeRetiroCanonico, MOTIVOS_RETIRO, ordenLlevaPlanInternet, resolverClase, sentidoDeMegas, serviciosDeOrden, serviciosDeReconexion } from './order-types';
+import { ETIQUETA_CLASE, esAgregarInternet, esCambioDeMegas, esCambioTitular, esClaseOrden, esReconexion, esReconexionPorDias, esRetiroVoluntario, esTrabajoDeConexion, esTraslado, MAX_DIAS_GRACIA, TRASLADO, TRASLADO_INTERNO, motivoDeRetiroCanonico, MOTIVOS_RETIRO, ordenLlevaPlanInternet, resolverClase, sentidoDeMegas, serviciosDeOrden, serviciosDeReconexion } from './order-types';
 import type { SubscribersService } from '../subscribers/subscribers.service';
 import type { ProrrateoReconexionService } from '../billing/prorrateo-reconexion.service';
 import type { CargoOrdenService, ResultadoCargo } from '../billing/cargo-orden.service';
@@ -55,6 +55,7 @@ import { subName } from '../common/subscriber-name';
 import { armarTraslado, TrasladoDto, type FichaParaTraslado } from '../common/traslado';
 import { armarCambioTitular, NuevoTitularDto, SELECT_TITULAR, type FichaParaTitular } from '../common/cambio-titular';
 import { OrderScoreService } from './order-score.service';
+import { bonoPorTemprano } from './order-score.policy';
 
 /** Carpeta de firmas PNG dibujadas de las órdenes. */
 const SIGNATURE_ROOT = join(process.cwd(), 'uploads', 'signatures');
@@ -130,6 +131,18 @@ export class CreateTicketDto {
    * que se le cobra ni lo que la red le entrega.
    */
   @IsOptional() @IsString() planToId?: string;
+  /**
+   * El COMBO destino (`PlanBundle.id`) cuando la orden de megas cambia el paquete
+   * entero —internet + TV o streaming— y no sólo el internet. Si viene, manda sobre
+   * `planToId`: el plan de internet es el que trae el combo.
+   */
+  @IsOptional() @IsString() bundleToId?: string;
+  /**
+   * El PLAN DE TV con el que queda el cliente en una orden de megas. Junto con
+   * `planToId` (las megas) arma el combo: se busca el combo que reúne ese internet y
+   * esa TV (`comboPorPlanes`) y, si no hay ninguno armado, la orden se rechaza.
+   */
+  @IsOptional() @IsString() tvPlanToId?: string;
   /**
    * «Este trabajo YA está facturado»: el número (`SubInvoice.tid`) de la factura con
    * la que se le cobró en ventanilla.
@@ -207,6 +220,13 @@ export class UpdateTicketDto {
    * cuenta si el detalle final es de megas.
    */
   @IsOptional() @IsString() planToId?: string;
+  /**
+   * El COMBO destino (internet + TV / streaming). Manda sobre `planToId`. Para
+   * pasar de un combo a sólo internet se manda `planToId` con `bundleToId: ''`.
+   */
+  @IsOptional() @IsString() bundleToId?: string;
+  /** El plan de TV que, con las megas, arma el combo. `''` = sin TV: sólo internet. */
+  @IsOptional() @IsString() tvPlanToId?: string;
 }
 export class PriorityDto {
   @IsIn(TICKET_PRIORITIES) priority!: string;
@@ -423,6 +443,11 @@ export class SupportWriteService {
      * queda como estaba.
      */
     private readonly olt?: OltService,
+    /**
+     * Opcional: al cerrar un RETIRO se desautentican de la OLT las ONUs del cliente,
+     * para que el equipo se pueda autenticar en otro (ver `OnuAlDevolverService`).
+     */
+    private readonly onuAlDevolver?: import('../network/onu-al-devolver.service').OnuAlDevolverService,
   ) {}
 
   /**
@@ -454,10 +479,15 @@ export class SupportWriteService {
   private async resolverStaff(assigned?: string | null): Promise<string | null> {
     const a = assigned?.trim();
     if (!a) return null;
-    const s = await this.prisma.staff.findFirst({
-      where: { OR: [{ username: { equals: a, mode: 'insensitive' } }, { name: { equals: a, mode: 'insensitive' } }] },
-      select: { id: true },
-    });
+    // Recortado en los DOS lados: el legacy trae nombres con espacio al final
+    // (`'Luis Fabian Arevalo Lopez '`) y el selector los manda ya recortados, así que
+    // un `equals` de Prisma no casaba y la orden quedaba con el nombre pero sin
+    // `assignedStaffId` — o sea, fuera de la agenda del técnico (2026-09-28).
+    const [s] = await this.prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Staff"
+      WHERE lower(btrim(username)) = lower(${a}) OR lower(btrim(name)) = lower(${a})
+      ORDER BY banned ASC
+      LIMIT 1`;
     return s?.id ?? null;
   }
 
@@ -537,6 +567,11 @@ export class SupportWriteService {
     const megas = await this.prepararCambioDeMegas(dto, sub.id, opts.planOpcional === true);
     const asignadoA = dto.assigned?.trim() || null;
     const assignedStaffId = await this.resolverStaff(asignadoA);
+    // Un traslado que pide técnico o día al nacer NO se asigna todavía (2026-10-07):
+    // su factura se emite más abajo y hasta que se pague no se asigna ni se agenda.
+    // Se guarda lo pedido y se aplica después del cargo, si resulta pagado (la orden
+    // que nace del pago de su factura, o con `yaFacturadaTid` de una ya cobrada).
+    const retenerAsignacion = (dto.type === TRASLADO || dto.type === TRASLADO_INTERNO) && (!!asignadoA || !!dto.scheduledFor);
 
     // `subject` es la CLASE de la orden, no un titular libre: el legacy solo escribe
     // ahí servicio/reclamo/incidente y los reportes agrupan por eso.
@@ -567,9 +602,10 @@ export class SupportWriteService {
           // de al lado son los que responden "¿quién mandó esta visita?" sin adivinar.
           ...autorDeOrden(user),
           status: 'PENDIENTE', priority: dto.priority ?? 'Media', problem: motivo,
-          section: observacion, assigned: asignadoA,
+          section: observacion, assigned: retenerAsignacion ? null : asignadoA,
           // Solo se sella la hora si nace asignada; si no, la sella `assign()`.
-          assignedStaffId, assignedAt: asignadoA ? new Date() : null,
+          assignedStaffId: retenerAsignacion ? null : assignedStaffId,
+          assignedAt: asignadoA && !retenerAsignacion ? new Date() : null,
           // El plazo solo se guarda en el tipo de orden que lo usa: si viniera en
           // cualquier otra, quedaría un número que nadie va a aplicar al cerrar.
           graceDays: esReconexionPorDias(dto.type) ? (dto.graceDays ?? null) : null,
@@ -598,6 +634,8 @@ export class SupportWriteService {
           planToMegas: megas?.plan.megas ?? undefined,
           planFromName: megas?.actual?.nombre ?? undefined,
           planFromMegas: megas?.actual?.megas ?? undefined,
+          bundleToId: megas?.combo?.id ?? undefined,
+          bundleToName: megas?.combo?.name ?? undefined,
         },
       });
       // La dirección se cambia YA, al abrir la orden (decisión del usuario,
@@ -614,6 +652,23 @@ export class SupportWriteService {
             // diferencia del de las facturas, no lleva quién: quién la movió queda
             // en la orden, que es donde se puede preguntar por qué).
             editedAt: new Date(),
+          },
+        });
+      }
+      // MIGRACIÓN: el plan con que queda el cliente (la línea que el formulario pone
+      // en la observación) va también a las notas del pie de su ficha, que es donde
+      // cartera lo busca al validar el mes (pedido 2026-09-28). Es sólo el rastro:
+      // no le cambia el plan ni el cobro.
+      const planMigracion = (dto.type ?? '').trim().toLowerCase().startsWith('migraci')
+        ? (observacion ?? '').split('\n').find((l) => l.startsWith('Migración: queda con plan'))
+        : undefined;
+      if (planMigracion) {
+        await tx.subscriberNote.create({
+          data: {
+            subscriberId: sub.id,
+            kind: 'Migración',
+            body: `Orden #${code} · ${planMigracion.replace(/^Migración: /, '')}`,
+            authorName: user?.name || user?.email || 'sistema',
           },
         });
       }
@@ -655,13 +710,13 @@ export class SupportWriteService {
     // Agendar es un paso aparte y a propósito: lo hace `AgendaService.mover`, que es
     // quien sabe renumerar la cola del técnico. Duplicar esa lógica aquí era la forma
     // segura de que las dos se desincronizaran.
-    if (dto.scheduledFor) {
+    if (dto.scheduledFor && !retenerAsignacion) {
       await this.agenda.mover(user, { ticketId: creada.id, staffId: assignedStaffId, fecha: dto.scheduledFor });
     }
 
     // EL CARGO DE LA ORDEN. Hay tipos de orden que se cobran al abrirlos —un pago
-    // único, factura aparte de un renglón: el traslado (30.000) y agregar internet
-    // (30.000)—. La lista está en `billing/cargos-orden.ts`; aquí solo se pregunta
+    // único, factura aparte de un renglón: el traslado (50.000), el traslado
+    // interno (25.000) y agregar internet (30.000)—. La lista está en `billing/cargos-orden.ts`; aquí solo se pregunta
     // si este tipo lleva cargo.
     //
     // Va FUERA de la transacción y no puede tumbar la creación: si la factura
@@ -717,6 +772,25 @@ export class SupportWriteService {
       }
     }
 
+    // El traslado retenido: ya con su factura atada se sabe si está pagado. Si lo
+    // está, se le da el técnico y el día pedidos; si no, queda en espera y aparece
+    // en la bandeja de la agenda cuando el cliente pague.
+    let asignacionRetenida: string | null = null;
+    if (retenerAsignacion) {
+      const debe = (await this.agenda.trasladosSinPagar([creada.id])).length > 0;
+      if (debe) {
+        asignacionRetenida = 'El traslado no se asignó ni se agendó: se podrá cuando el cliente pague la factura del traslado.';
+      } else {
+        await this.prisma.ticket.update({
+          where: { id: creada.id },
+          data: { assigned: asignadoA, assignedStaffId, assignedAt: asignadoA ? new Date() : null },
+        });
+        if (dto.scheduledFor) {
+          await this.agenda.mover(user, { ticketId: creada.id, staffId: assignedStaffId, fecha: dto.scheduledFor });
+        }
+      }
+    }
+
     // La orden sale hacia el legacy AHORA: es donde el técnico la va a ver.
     this.events.emit(TICKET_CREADO_EVENT, {
       ticketId: creada.id, code: creada.code, subscriberId: sub.id,
@@ -725,6 +799,7 @@ export class SupportWriteService {
     return {
       ...creada,
       cambioTitular: titular ? { desde: titular.textoAnterior, hasta: titular.textoNuevo } : null,
+      asignacionRetenida,
       // Lo que hay que DECIRLE a quien la abrió: se le movió la dirección al cliente
       // y se le emitió (o no) la factura del traslado. Sin esto la cajera no sabe si
       // tiene que cobrar algo en ventanilla.
@@ -903,13 +978,22 @@ export class SupportWriteService {
    * un traslado dictado por chat.
    */
   private async prepararCambioDeMegas(
-    dto: { type?: string | null; planToId?: string },
+    dto: { type?: string | null; planToId?: string; bundleToId?: string; tvPlanToId?: string },
     subscriberId: string,
     planOpcional = false,
     origenFijo?: { planId: string | null; nombre: string | null; megas: number | null } | null,
   ) {
     if (!ordenLlevaPlanInternet(dto.type)) return null;
     const alta = esAgregarInternet(dto.type);
+    // Megas + TV → el combo que las reúne.
+    if (!dto.bundleToId && dto.tvPlanToId) {
+      if (!dto.planToId) throw new BadRequestException('Elige las megas: la TV sola no hace el combo.');
+      dto = { ...dto, bundleToId: await this.comboPorPlanes(dto.planToId, dto.tvPlanToId) };
+    }
+    // Un COMBO (internet + TV / streaming): el plan de internet es el que trae el
+    // combo y todo lo de abajo —sentido, megas, perfil— se mide contra él.
+    const combo = dto.bundleToId ? await this.comboDeLaOrden(dto.bundleToId) : null;
+    if (combo) dto = { ...dto, planToId: combo.internetPlanId };
     if (!dto.planToId) {
       if (planOpcional) return null;
       throw new BadRequestException(
@@ -990,13 +1074,69 @@ export class SupportWriteService {
       ? `con ${plan.megas != null ? `${plan.megas} Megas` : plan.name}`
       : `de ${actual?.megas != null ? `${actual.megas} Megas` : actual?.nombre ?? 'plan sin registrar'}`
         + ` a ${plan.megas != null ? `${plan.megas} Megas` : plan.name}`;
+    const conCombo = combo ? ` en combo «${combo.name}» (${combo.resumen})` : '';
     return {
       plan,
       actual,
+      combo,
       /** La frase que se lee en la orden y que viaja al legacy dentro de la observación. */
-      notaObservacion: `${dto.type}: ${deA} (plan «${plan.name}»).`,
-      resumen: deA,
+      notaObservacion: combo
+        ? `${dto.type}: ${deA}${conCombo}.`
+        : `${dto.type}: ${deA} (plan «${plan.name}»).`,
+      resumen: deA + conCombo,
     };
+  }
+
+  /**
+   * El combo que forman un plan de internet y uno de TV: el que trae EXACTAMENTE esos
+   * dos (los de streaming son otro producto). Si no hay ninguno armado se dice cuál
+   * falta: inventarle un precio de combo aquí sería vender a una tarifa que nadie fijó.
+   */
+  private async comboPorPlanes(internetId: string, tvId: string): Promise<string> {
+    const candidatos = await this.prisma.planBundle.findMany({
+      where: {
+        active: true,
+        AND: [
+          { items: { some: { kind: 'INTERNET', planId: internetId } } },
+          { items: { some: { kind: 'TV', planId: tvId } } },
+        ],
+      },
+      include: { items: { select: { kind: true } } },
+      orderBy: { name: 'asc' },
+    });
+    const combo = candidatos.find((b) => b.items.length === 2);
+    if (combo) return combo.id;
+    const [internet, tv] = await Promise.all([
+      this.prisma.plan.findUnique({ where: { id: internetId }, select: { name: true, megas: true } }),
+      this.prisma.plan.findUnique({ where: { id: tvId }, select: { name: true, kind: true } }),
+    ]);
+    if (!tv || tv.kind !== 'TV') throw new BadRequestException('El plan de TV elegido no es de televisión.');
+    const megas = internet?.megas != null ? `${internet.megas} Megas` : `«${internet?.name ?? 'ese internet'}»`;
+    throw new BadRequestException(
+      `No hay combo armado con ${megas} + «${tv.name}». Ármalo en Configuración → Planes → Combos, o deja la TV sin combo.`,
+    );
+  }
+
+  /**
+   * El COMBO destino de una orden de megas: tiene que estar a la venta y traer un
+   * plan de internet (de ahí salen las megas). Sus planes sueltos pueden estar
+   * ocultos: se vende el combo, no el plan. Las mismas guardas que `applyBundle`, dichas al ABRIR la orden y no al cerrarla,
+   * cuando el técnico ya dejó la velocidad puesta.
+   */
+  private async comboDeLaOrden(bundleId: string) {
+    const b = await this.prisma.planBundle.findUnique({
+      where: { id: bundleId },
+      include: { items: { include: { plan: { select: { id: true, name: true, kind: true, active: true } } } } },
+    });
+    if (!b) throw new NotFoundException('El combo elegido ya no está en el catálogo.');
+    if (!b.active) throw new BadRequestException(`El combo «${b.name}» está oculto en el catálogo: actívalo o elige otro.`);
+    const internet = b.items.find((i) => i.kind === 'INTERNET');
+    if (!internet) throw new BadRequestException(`El combo «${b.name}» no trae plan de internet: no sirve para una orden de megas.`);
+    const orden: Record<string, number> = { INTERNET: 0, TV: 1, PUNTOS: 2, STREAMING: 3 };
+    const partes = [...b.items]
+      .sort((x, y) => (orden[x.kind] ?? 9) - (orden[y.kind] ?? 9))
+      .map((i) => i.plan.name.trim());
+    return { id: b.id, name: b.name, internetPlanId: internet.planId, resumen: partes.join(' + ') };
   }
 
   /**
@@ -1037,7 +1177,9 @@ export class SupportWriteService {
     planId: string,
     code: number | null,
     user?: AuthUser,
+    bundleId?: string | null,
   ): Promise<{ aplicado: boolean; mensaje: string; factura?: ReprecioDeFactura }> {
+    if (bundleId) return this.aplicarComboDeLaOrden(ticketId, subscriberId, bundleId, code, user);
     const plan = await this.prisma.plan
       .findUnique({ where: { id: planId }, select: { id: true, name: true, megas: true, price: true, taxRate: true } })
       .catch(() => null);
@@ -1070,6 +1212,90 @@ export class SupportWriteService {
     partes.push(factura.detalle);
     // En PPPoE la velocidad ES el perfil del plan: si el empuje no salió hay que
     // decirlo, o el cliente paga el plan nuevo navegando con el viejo.
+    if (router && !router.ok) partes.push(`El router no tomó el perfil: ${router.message}`);
+    return { aplicado: true, mensaje: partes.join(' '), factura };
+  }
+
+  /**
+   * EL COMBO de una orden de megas, AL CERRARLA: lo mismo que `aplicarMegasDeLaOrden`
+   * pero con el paquete entero (internet + TV / streaming) vía `applyBundle`, el
+   * mismo del botón de combos de la ficha.
+   *
+   * La factura del mes: el renglón de internet se reprecia al precio que tiene
+   * DENTRO del combo. La TV que el cliente no tenía se le cobra por los días que
+   * quedan del mes (el mismo prorrateo de una reconexión, que no cobra dos veces);
+   * el resto de componentes entra en la próxima corrida y así se dice.
+   */
+  private async aplicarComboDeLaOrden(
+    ticketId: string | null,
+    subscriberId: string,
+    bundleId: string,
+    code: number | null,
+    user?: AuthUser,
+  ): Promise<{ aplicado: boolean; mensaje: string; factura?: ReprecioDeFactura }> {
+    const b = await this.prisma.planBundle
+      .findUnique({
+        where: { id: bundleId },
+        include: { items: { include: { plan: { select: { id: true, name: true, megas: true, taxRate: true } } } } },
+      })
+      .catch(() => null);
+    if (!b) {
+      return { aplicado: false, mensaje: 'El combo que traía la orden ya no está en el catálogo: aplícaselo al cliente desde su ficha.' };
+    }
+    if (!this.planes) {
+      return { aplicado: false, mensaje: `No se le aplicó el combo «${b.name}»: hazlo desde su ficha.` };
+    }
+    // Lo que tenía ACTIVO antes: la TV nueva se prorratea, la que ya tenía no.
+    const antes = await this.prisma.subscriberService.findMany({
+      where: { subscriberId, status: 'ACTIVO' },
+      select: { kind: true },
+    });
+    const teniaActivo = new Set(antes.map((s) => s.kind));
+    let router: { ok: boolean; message: string } | null = null;
+    try {
+      const r = await this.planes.applyBundle(subscriberId, b.id, user, { allowInactive: true });
+      const conRouter = r.results.find((x) => x.router);
+      router = conRouter?.router ? { ok: conRouter.router.ok, message: conRouter.router.message } : null;
+    } catch (e) {
+      return {
+        aplicado: false,
+        mensaje: `No se le pudo aplicar el combo «${b.name}»: ${(e as Error).message}. Hazlo desde su ficha.`,
+      };
+    }
+    if (ticketId) {
+      await this.prisma.ticket
+        .update({ where: { id: ticketId }, data: { planAppliedAt: new Date() } })
+        .catch(() => undefined);
+    }
+
+    const internet = b.items.find((i) => i.kind === 'INTERNET');
+    const partes = [`El cliente quedó en el combo «${b.name}»${internet?.plan.megas != null ? ` (${internet.plan.megas} Megas)` : ''}.`];
+    let factura: ReprecioDeFactura | undefined;
+    if (internet) {
+      factura = await this.reprecioDelPlanEnFactura(
+        subscriberId,
+        { id: internet.plan.id, name: internet.plan.name, price: internet.price, taxRate: internet.plan.taxRate },
+        code,
+        user,
+      );
+      partes.push(factura.detalle);
+    }
+    const tvNueva = b.items.some((i) => i.kind === 'TV') && !teniaActivo.has('TV');
+    if (tvNueva) {
+      if (this.prorrateo) {
+        const p = await this.prorrateo.aplicar(subscriberId, ['TV'], {
+          ctx: code ? `orden #${code}` : 'combo al cerrar la orden',
+          autor: user?.name || user?.email || 'Sistema',
+        });
+        partes.push(p.mensaje);
+      } else {
+        partes.push('Los días de TV que quedan del mes no se cobraron: revisa su factura.');
+      }
+    }
+    const otros = b.items.filter((i) => i.kind !== 'INTERNET' && !(i.kind === 'TV' && tvNueva));
+    if (otros.length) {
+      partes.push(`${otros.map((i) => i.plan.name.trim()).join(' + ')}: al precio del combo desde la próxima corrida.`);
+    }
     if (router && !router.ok) partes.push(`El router no tomó el perfil: ${router.message}`);
     return { aplicado: true, mensaje: partes.join(' '), factura };
   }
@@ -1327,7 +1553,7 @@ export class SupportWriteService {
    * escribe una persona ("solicita aumento a 100 megas"), que no se toca.
    */
   private conNotaDeMegas(section: string | null, nota: string): string {
-    const RASTRO = /\(plan «[^»]*»\)/i;
+    const RASTRO = /\(plan «[^»]*»\)|en combo «[^»]*»/i;
     const limpio = (section ?? '')
       .split('\n')
       .filter((l) => !(RASTRO.test(l) && /megas/i.test(l)))
@@ -1418,6 +1644,10 @@ export class SupportWriteService {
       if (ficha) {
         const v = await puedeEmpezarOrden(this.prisma, ficha.id, { id }, user);
         if (!v.permitido) throw new ForbiddenException({ message: v.motivo, code: 'ORDEN_EN_CURSO', enCurso: v.enCurso });
+        // Una a una (2026-10-01): el técnico de campo sólo empieza la que le toca.
+        if (esOrdenPosterior(await ordenQueLeToca(this.prisma, ficha.id, user), { id, status: 'PENDIENTE' })) {
+          throw new ForbiddenException({ message: MOTIVO_AUN_NO_TOCA, code: 'AUN_NO_TE_TOCA' });
+        }
       }
     }
 
@@ -1478,7 +1708,13 @@ export class SupportWriteService {
       // Puntaje del trabajo: se copia el valor que tiene el tipo AHORA, para que
       // un ajuste posterior de la tabla no reescriba lo ya abonado. Ver
       // `Ticket.score` y order-score.policy.ts.
-      data.score = await this.puntajes.puntajeDe(t.type);
+      //
+      // Más el bono por terminar temprano (2026-10-01): si del inicio al cierre
+      // duró menos que el tiempo estándar de su tipo. Sin hora de inicio —la
+      // cerraron sin haberla empezado— no hay con qué medir y no hay bono.
+      const bono = bonoPorTemprano(t.startedAt, data.resolvedAt as Date, await this.puntajes.minutosDe(t.type));
+      data.earlyBonus = bono;
+      data.score = (await this.puntajes.puntajeDe(t.type)) + bono;
       data.scoredAt = new Date();
     } else if (t.score != null) {
       // Reabrir o anular una orden le quita los puntos: se abonan por trabajo
@@ -1486,7 +1722,13 @@ export class SupportWriteService {
       // ese momento — que es lo correcto, porque es otro cierre.
       data.score = null;
       data.scoredAt = null;
+      data.earlyBonus = null;
     }
+    // Hora real de inicio: la sella el sistema al empezarla, no la escribe nadie.
+    // Devolverla a pendiente la borra; reabrir una cerrada directo a REALIZANDO
+    // es otro intento y vuelve a contar desde ahora.
+    if (dto.status === 'REALIZANDO' && t.status !== 'REALIZANDO') data.startedAt = new Date();
+    else if (dto.status === 'PENDIENTE') data.startedAt = null;
     // El estado y el cierre son cosas que el legacy también guarda: la orden pasa a
     // ser nuestra para que la ida no la revierta y el writeback la empuje. Ver
     // `Ticket.editedAt`.
@@ -1500,7 +1742,7 @@ export class SupportWriteService {
     // de orden (porta Tickets.php). Las operaciones Mikrotik respetan su gate dry-run.
     let cascade: any = {};
     if (dto.status === 'RESUELTO' && t.subscriberId) {
-      cascade = await this.applyCloseCascade({ ticketId: id, subscriberId: t.subscriberId, type: t.type, graceDays: t.graceDays, code: t.code, moveToText: t.moveToText, holderToText: t.holderToText, planToId: t.planToId, planToName: t.planToName, planToMegas: t.planToMegas }, user);
+      cascade = await this.applyCloseCascade({ ticketId: id, subscriberId: t.subscriberId, type: t.type, graceDays: t.graceDays, code: t.code, moveToText: t.moveToText, holderToText: t.holderToText, planToId: t.planToId, planToName: t.planToName, planToMegas: t.planToMegas, bundleToId: t.bundleToId }, user);
     }
 
     // Aviso para quien quiera reaccionar al cierre. Hoy lo escucha el chatbot, que le
@@ -1938,7 +2180,7 @@ export class SupportWriteService {
    * reconectaba el internet de quien seguía debiendo) y 'Corte Television' dejaba
    * sin internet a alguien que solo debía perder la TV.
    */
-  private async applyCloseCascade(t: { ticketId?: string; subscriberId: string; type: string | null; graceDays?: number | null; code?: number | null; moveToText?: string | null; holderToText?: string | null; planToId?: string | null; planToName?: string | null; planToMegas?: number | null }, user?: AuthUser) {
+  private async applyCloseCascade(t: { ticketId?: string; subscriberId: string; type: string | null; graceDays?: number | null; code?: number | null; moveToText?: string | null; holderToText?: string | null; planToId?: string | null; planToName?: string | null; planToMegas?: number | null; bundleToId?: string | null }, user?: AuthUser) {
     const cascade: any = {};
     const kind = (t.type || '').toLowerCase();
     const sid = t.subscriberId;
@@ -2049,6 +2291,14 @@ export class SupportWriteService {
       await tryCut();
       await setStatus('RETIRADO', 'Retiro');
       cascade.factura = await this.marcarBajaEnFactura(sid, servicios, 'RETIRADO', soloTv);
+      // Cliente retirado ⇒ su ONU sale de la OLT, para poder autenticarla en el
+      // siguiente cliente. En segundo plano (sesiones SSH de segundos); el
+      // resultado queda en la ficha y en la orden. Un retiro solo de TV no la toca.
+      if (cascade.statusSet === 'RETIRADO') {
+        void this.onuAlDevolver?.desautenticarDelCliente({
+          subscriberId: sid, motivo: `Retiro (orden #${t.code ?? ''})`, ticketCode: t.code ?? null, user,
+        });
+      }
     } else if (kind.includes('suspens')) {
       await tryCut();
       await setStatus('SUSPENDIDO', 'Suspensión');
@@ -2141,7 +2391,7 @@ export class SupportWriteService {
       // reprecia la factura del mes al valor del plan nuevo — sin eso, el cliente
       // navega a 100 Megas y paga las 5 hasta la corrida del mes siguiente.
       if (t.planToId) {
-        cascade.megas = await this.aplicarMegasDeLaOrden(t.ticketId ?? null, sid, t.planToId, t.code ?? null, user);
+        cascade.megas = await this.aplicarMegasDeLaOrden(t.ticketId ?? null, sid, t.planToId, t.code ?? null, user, t.bundleToId);
         cascade.note = cascade.megas.mensaje;
       } else {
         cascade.note = 'Cambio de plan/megas: aplica el nuevo plan al cliente desde su ficha (Cambiar plan); la orden no porta el plan destino.';
@@ -2458,6 +2708,11 @@ export class SupportWriteService {
   async assign(id: string, dto: AssignDto, user: AuthUser) {
     const t = await this.prisma.ticket.findUnique({ where: { id } });
     if (!t) throw new NotFoundException('Orden no encontrada');
+    // El traslado que debe su factura no se asigna (2026-10-07, regla del usuario:
+    // «no se puedan asignar o agendar si no se ha pagado el traslado»). Va ANTES del
+    // update: comprobarlo después —como hacía `mover`— dejaba la orden asignada y
+    // un error en pantalla. Desasignar sí se deja: es soltarla, no darla.
+    if (dto.assigned?.trim()) await this.agenda.exigirTrasladoPagado([id]);
     const assignedStaffId = await this.resolverStaff(dto.assigned);
     // `assignedAt` es el arranque del reloj del técnico. Se vuelve a sellar en
     // cada reasignación: el tiempo que la orden estuvo en manos de otro no es
@@ -2717,10 +2972,19 @@ export class SupportWriteService {
     // que permite rescatar las que ya se cerraron sin plan: se les pone el suyo y
     // se aplica desde la ficha, sin tener que anular y repetir la orden.
     let megas: Awaited<ReturnType<typeof this.prepararCambioDeMegas>> = null;
-    if (dto.planToId && ordenLlevaPlanInternet(tipoFinal) && dto.planToId !== t.planToId) {
+    // `bundleToId` / `tvPlanToId` vacío = se quita el combo y queda sólo el internet.
+    // Con TV, el combo sale de las megas + esa TV.
+    if (dto.tvPlanToId !== undefined && dto.bundleToId === undefined && ordenLlevaPlanInternet(tipoFinal)) {
+      const internetId = dto.planToId ?? t.planToId;
+      if (dto.tvPlanToId && !internetId) throw new BadRequestException('Elige las megas: la TV sola no hace el combo.');
+      dto.bundleToId = dto.tvPlanToId ? await this.comboPorPlanes(internetId!, dto.tvPlanToId) : '';
+    }
+    const comboPedido = dto.bundleToId === undefined ? undefined : (dto.bundleToId || null);
+    const cambiaCombo = comboPedido !== undefined && comboPedido !== (t.bundleToId ?? null);
+    if ((dto.planToId || comboPedido) && ordenLlevaPlanInternet(tipoFinal) && (cambiaCombo || (dto.planToId && dto.planToId !== t.planToId))) {
       if (!t.subscriberId) throw new BadRequestException('Esta orden no tiene cliente: no hay a quién cambiarle el plan.');
       megas = await this.prepararCambioDeMegas(
-        { type: tipoFinal, planToId: dto.planToId },
+        { type: tipoFinal, planToId: dto.planToId ?? t.planToId ?? undefined, bundleToId: comboPedido ?? undefined },
         t.subscriberId,
         false,
         // Si la orden YA se cerró y le cambió el plan al cliente, el "de cuánto
@@ -2734,14 +2998,18 @@ export class SupportWriteService {
       data.planToMegas = megas!.plan.megas;
       data.planFromName = megas!.actual?.nombre ?? null;
       data.planFromMegas = megas!.actual?.megas ?? null;
+      data.bundleToId = megas!.combo?.id ?? null;
+      data.bundleToName = megas!.combo?.name ?? null;
       // Si ya se había aplicado (orden cerrada que se corrige), el sello se cae: la
       // ficha tiene el plan viejo de esta orden, no el que acaba de elegirse. Se
       // vuelve a poner cuando se aplique — al cerrarla, o desde la ficha.
       data.planAppliedAt = null;
+      const destinoNuevo = megas!.combo ? `combo «${megas!.combo.name}»` : `«${megas!.plan.name}»`;
+      const destinoViejo = t.bundleToName ? `combo «${t.bundleToName}»` : `«${t.planToName}»`;
       cambios.push(
         t.planToName
-          ? `plan destino: «${t.planToName}» → «${megas!.plan.name}» (${megas!.resumen})`
-          : `se registró el plan destino: «${megas!.plan.name}» (${megas!.resumen})`,
+          ? `plan destino: ${destinoViejo} → ${destinoNuevo} (${megas!.resumen})`
+          : `se registró el plan destino: ${destinoNuevo} (${megas!.resumen})`,
       );
       // La frase también en la OBSERVACIÓN, que es lo que viaja al legacy y lo que
       // lee el técnico en la orden impresa. Se REEMPLAZA la que hubiera: dejar las
@@ -2760,7 +3028,8 @@ export class SupportWriteService {
     // legacy, pero por la observación —que es una de esas columnas.
     const SOLO_NUESTRO = ['graceDays', 'moveTo', 'moveToText', 'moveFromText', 'moveAppliedAt',
       'holderTo', 'holderToText', 'holderFrom', 'holderFromText', 'holderAppliedAt',
-      'planToId', 'planToName', 'planToMegas', 'planFromName', 'planFromMegas', 'planAppliedAt'];
+      'planToId', 'planToName', 'planToMegas', 'planFromName', 'planFromMegas', 'planAppliedAt',
+      'bundleToId', 'bundleToName'];
     const tocaAlLegacy = Object.keys(data).some((k) => !SOLO_NUESTRO.includes(k));
     if (tocaAlLegacy) {
       data.editedAt = new Date();
@@ -2788,7 +3057,7 @@ export class SupportWriteService {
       cambios.push(
         t.planAppliedAt
           ? `OJO: esta orden ya había dejado al cliente en «${t.planToName}». Aplícale «${megas.plan.name}» desde su ficha (Cambiar plan) si el cambio de verdad se hizo.`
-          : `El cliente pasa a «${megas.plan.name}» cuando se cierre la orden.`,
+          : `El cliente pasa a ${megas.combo ? `el combo «${megas.combo.name}»` : `«${megas.plan.name}»`} cuando se cierre la orden.`,
       );
     }
 

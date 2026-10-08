@@ -40,7 +40,11 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
     onusDelCliente?: any[];
     /** Lo que contesta la OLT al buscar un SN que no está en el autofind. */
     estadoPorSn?: any;
+    /** Autofind de una SEGUNDA OLT de la sede (Yopal: CASIMENA). */
+    autofindOtraOlt?: any[];
   }) => {
+    const olts = [{ id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1' }];
+    if (opts.autofindOtraOlt) olts.push({ id: 'olt-2', name: 'CASIMENA', ip: '10.0.0.1' });
     const prisma: any = {
       ticket: {
         findUnique: jest.fn().mockResolvedValue({
@@ -55,7 +59,8 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
           branch: { name: 'Yopal', legacyId: SEDE },
         }),
       },
-      olt: { findFirst: jest.fn().mockResolvedValue({ id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1' }) },
+      olt: { findFirst: jest.fn().mockResolvedValue({ id: 'olt-1', name: 'YOPAL', ip: '10.0.0.1' }),
+        findMany: jest.fn().mockResolvedValue(olts), },
       subscriberService: {
         findMany: jest.fn().mockResolvedValue([
           { planId: 'plan-100', planName: '100 Megas F-26', megas: 100, status: 'ACTIVO', plan: { megas: 100 } },
@@ -74,7 +79,7 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
     };
     const olt: any = {
       mode: jest.fn().mockResolvedValue({ live: true }),
-      autofind: jest.fn().mockResolvedValue({ ok: true, onus: opts.autofind }),
+      autofind: jest.fn(async (id: string) => ({ ok: true, onus: id === 'olt-2' ? opts.autofindOtraOlt ?? [] : opts.autofind })),
       estadoPorSn: jest.fn().mockResolvedValue(opts.estadoPorSn ?? { ok: false, estado: null }),
     };
     const planProfiles: any = {
@@ -105,6 +110,23 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
     expect(r.auto.sn).toBe('48575443A1B2C3D4');
     expect(r.auto.origen).toBe('DEL_ABONADO');
     expect(r.auto.equipo.code).toBe(5001);
+  });
+
+  it('sede con dos OLT: encuentra el equipo del cliente en la que NO es la de por defecto', async () => {
+    // 2026-10-06, traslado 511555: el ZTE del cliente se anunciaba en CASIMENA y la
+    // orden solo miraba YOPAL («la OLT todavía no lo ve»). El inventario lo rotula
+    // `ZTEGC6405372` y la OLT dice `5A544547C6405372`.
+    const svc = armar({
+      autofind: [onu('47504F4E0027CA88', 120, '0/7/8')],
+      autofindOtraOlt: [onu('5A544547C6405372', 30, '0/1/0')],
+      inventario: [equipo({ serial: 'ZTEGC6405372', code: 311537, subscriberId: SUB })],
+      equiposDelAbonado: [{ serial: 'ZTEGC6405372', mac: null }],
+    });
+    const r: any = await svc.estado('t1');
+    expect(r.olt).toEqual({ id: 'olt-2', name: 'CASIMENA' });
+    expect(r.auto.sn).toBe('5A544547C6405372');
+    const suya = r.candidatos.find((c: any) => c.sn === '5A544547C6405372');
+    expect(suya).toMatchObject({ oltId: 'olt-2', olt: 'CASIMENA', delAbonado: true });
   });
 
   it('el equipo del cliente manda aunque haya más ONUs anunciándose', async () => {
@@ -264,7 +286,7 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
     expect(r.equipoAsignado.anunciandose).toBe(false);
     expect(r.equipoAsignado.autenticada).toBe(true);
     expect(r.equipoAsignado.sn).toBe('58504F4E1D8D6564');
-    expect(r.equipoAsignado.autenticadaEn).toEqual({ fsp: '0/1/11', ontId: 45, runState: 'online', descripcion: '2378BARBARA_zone_PRINCIPAL' });
+    expect(r.equipoAsignado.autenticadaEn).toEqual({ olt: 'YOPAL', fsp: '0/1/11', ontId: 45, runState: 'online', descripcion: '2378BARBARA_zone_PRINCIPAL' });
   });
 
   it('si la OLT tampoco lo tiene dado de alta, se queda el aviso de siempre (sin autenticadaEn)', async () => {

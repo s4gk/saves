@@ -6,6 +6,7 @@ import { TopNav } from "@/components/TopNav";
 import { GeoGate } from "@/components/map/GeoGate";
 import { LatidoUbicacion } from "@/components/map/LatidoUbicacion";
 import { PantallaGate } from "@/components/PantallaGate";
+import { AvisoFotoPerfil } from "@/components/AvisoFotoPerfil";
 
 // Rutas públicas que NO llevan el chrome de staff (mismo criterio que el
 // middleware `PUBLIC_PATHS`): login y el portal del abonado.
@@ -27,6 +28,8 @@ export function AppFrame({ children }: { children: React.ReactNode }) {
           monta una sola vez, y no dentro de una pantalla: así late en toda la
           jornada y no solo mientras el técnico mira una página concreta. */}
       <LatidoUbicacion />
+      {/* Quien no tiene foto de perfil no puede hacer nada hasta subirla. */}
+      <AvisoFotoPerfil />
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <TopNav />

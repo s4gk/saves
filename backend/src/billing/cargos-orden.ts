@@ -18,7 +18,7 @@
  * trabajo sin cobrar.
  */
 
-import { AGREGAR_INTERNET, TRASLADO } from '../support/order-types';
+import { AGREGAR_INTERNET, TRASLADO, TRASLADO_INTERNO } from '../support/order-types';
 
 export type CargoDeOrden = {
   /** Clave corta, para el log y para pedirlo desde la web. */
@@ -38,16 +38,16 @@ export type CargoDeOrden = {
 };
 
 /**
- * TRASLADO de domicilio. 30.000 sin IVA, producto 'Traslado' del catálogo, como lo
- * lleva facturando el legacy (3.875 renglones). Lo dispara la orden 'Traslado' a
- * secas: el 'Traslado interno De Equipos Red en cliente final' mueve el equipo
- * dentro de la misma casa y no se cobra (ver `esTraslado`).
+ * TRASLADO de domicilio. Sin IVA, producto 'Traslado' del catálogo. El legacy lo
+ * facturó a 30.000 (3.875 renglones); desde el 2026-09-28 vale 50.000 (decisión del
+ * usuario: se subió el precio en `Material` y este respaldo). Lo dispara la orden
+ * 'Traslado' a secas; el traslado interno tiene su propio cargo, abajo.
  */
 export const CARGO_TRASLADO: CargoDeOrden = {
   clave: 'traslado',
   tipo: TRASLADO,
   producto: 'Traslado',
-  precioPorDefecto: 30_000,
+  precioPorDefecto: 50_000,
   etiqueta: 'Traslado',
   ajuste: 'billing.cargoTraslado',
   env: 'BILLING_CARGO_TRASLADO',
@@ -73,17 +73,38 @@ export const CARGO_AGREGAR_INTERNET: CargoDeOrden = {
   env: 'BILLING_CARGO_AGREGAR_INTERNET',
 };
 
-export const CARGOS_POR_ORDEN: readonly CargoDeOrden[] = [CARGO_TRASLADO, CARGO_AGREGAR_INTERNET];
+/**
+ * TRASLADO INTERNO: mover el equipo de sitio dentro de la misma vivienda (203
+ * órdenes en el histórico). Hasta el 2026-09-28 no se cobraba; desde entonces se
+ * cobra, y desde el 2026-10-01 vale 25.000 —la mitad del traslado de domicilio,
+ * decisión del usuario: el técnico no cambia la acometida—. No pide dirección nueva
+ * ni cambia la ficha: solo emite la factura.
+ *
+ * Producto propio ('Traslado interno') para que la factura diga qué trabajo fue y
+ * que su precio pueda separarse del traslado. Mientras contabilidad no lo cree en
+ * `Material`, sale del respaldo en código, como agregar internet.
+ */
+export const CARGO_TRASLADO_INTERNO: CargoDeOrden = {
+  clave: 'traslado-interno',
+  tipo: TRASLADO_INTERNO,
+  producto: 'Traslado interno',
+  precioPorDefecto: 25_000,
+  etiqueta: 'Traslado interno',
+  ajuste: 'billing.cargoTrasladoInterno',
+  env: 'BILLING_CARGO_TRASLADO_INTERNO',
+};
+
+export const CARGOS_POR_ORDEN: readonly CargoDeOrden[] = [CARGO_TRASLADO, CARGO_AGREGAR_INTERNET, CARGO_TRASLADO_INTERNO];
 
 const normalizar = (s?: string | null) => (s ?? '').trim().toLowerCase();
 
 /**
  * El cargo que lleva un tipo de orden, si lleva alguno. `null` es lo normal: de los
- * 45 detalles del catálogo solo dos se cobran al abrirlos.
+ * 45 detalles del catálogo solo tres se cobran al abrirlos.
  *
  * Se compara el texto ENTERO y no por `includes`, por lo mismo que `esTraslado`:
- * 'Traslado interno De Equipos Red en cliente final' contiene 'Traslado' y no se
- * cobra.
+ * 'Traslado interno De Equipos Red en cliente final' contiene 'Traslado' y lleva
+ * su propio cargo, no el del traslado.
  */
 export function cargoDeTipoDeOrden(tipo?: string | null): CargoDeOrden | null {
   const t = normalizar(tipo);

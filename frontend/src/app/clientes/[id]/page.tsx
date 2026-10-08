@@ -404,14 +404,17 @@ function ClienteDetalle() {
     }
   }
 
-  async function deleteNote(nid: string) {
+  async function deleteNote(nid: string, reason: string) {
     setConfirmBusy(true);
     try {
-      const res = await authFetch(`/subscribers/${id}/notes/${nid}`, { method: "DELETE" });
-      if (!res.ok) throw new Error();
+      const res = await authFetch(`/subscribers/${id}/notes/${nid}`, { method: "DELETE", body: JSON.stringify({ reason }) });
+      if (!res.ok) {
+        const m = await res.json().catch(() => null);
+        throw new Error(m?.message ?? "No se pudo eliminar");
+      }
       reload();
-    } catch {
-      toast("No se pudo eliminar", "alert-circle");
+    } catch (e) {
+      toast(mensajeDeError(e) ?? "No se pudo eliminar", "alert-circle");
     } finally {
       setConfirmBusy(false);
       setConfirmar(null);
@@ -440,10 +443,10 @@ function ClienteDetalle() {
     setEditInvoice(inv);
   }
 
-  async function deleteInvoice(inv: any) {
+  async function deleteInvoice(inv: any, reason: string) {
     setConfirmBusy(true);
     try {
-      const res = await authFetch(`/subscribers/${id}/invoices/${inv.id}`, { method: "DELETE" });
+      const res = await authFetch(`/subscribers/${id}/invoices/${inv.id}`, { method: "DELETE", body: JSON.stringify({ reason }) });
       if (!res.ok) {
         const m = await res.json().catch(() => null);
         throw new Error(m?.message ?? "No se pudo eliminar");
@@ -534,15 +537,18 @@ function ClienteDetalle() {
     }
   }
 
-  async function deleteFile(f: any) {
+  async function deleteFile(f: any, reason: string) {
     setConfirmBusy(true);
     try {
-      const res = await authFetch(`/subscribers/${id}/files/${f.id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error();
+      const res = await authFetch(`/subscribers/${id}/files/${f.id}`, { method: "DELETE", body: JSON.stringify({ reason }) });
+      if (!res.ok) {
+        const m = await res.json().catch(() => null);
+        throw new Error(m?.message ?? "No se pudo eliminar");
+      }
       toast("Archivo eliminado");
       loadFiles();
-    } catch {
-      toast("No se pudo eliminar", "alert-circle");
+    } catch (e) {
+      toast(mensajeDeError(e) ?? "No se pudo eliminar", "alert-circle");
     } finally {
       setConfirmBusy(false);
       setConfirmar(null);
@@ -1568,6 +1574,11 @@ function ClienteDetalle() {
                 empty="Sin movimientos."
                 columns={[
                   { key: "date", header: "Fecha", render: (m: any) => fmtDate(m.date) },
+                  // N° de la factura en los cargos y código del movimiento (el de
+                  // Tesorería) en los pagos. Pago sin código = aún no viaja al legacy.
+                  { key: "ref", header: "N°", render: (m: any) => m.ref
+                    ? <span className="font-mono text-[12px] text-text-secondary">{m.ref}</span>
+                    : <span className="text-text-tertiary">—</span> },
                   { key: "concept", header: "Concepto", render: (m: any) => (
                     <span className="flex items-center gap-1.5">
                       <Icon name={m.kind === "CARGO" ? "file-text" : "hand-coins"} size={13} className={m.kind === "CARGO" ? "text-text-tertiary" : "text-success-text"} />
@@ -1759,7 +1770,7 @@ function ClienteDetalle() {
                                 <b className="text-text-primary">
                                   {o.megas.a != null ? `${o.megas.a} Megas` : o.megas.plan}
                                 </b>
-                                {o.megas.plan && o.megas.a != null ? ` · plan «${o.megas.plan}»` : ""}
+                                {o.megas.combo ? ` · combo «${o.megas.combo}»` : o.megas.plan && o.megas.a != null ? ` · plan «${o.megas.plan}»` : ""}
                               </p>
                             )}
                             <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-tertiary">
@@ -1911,7 +1922,9 @@ function ClienteDetalle() {
           open
           busy={confirmBusy}
           onClose={() => setConfirmar(null)}
-          onConfirm={() => void deleteNote(confirmar.nota.id)}
+          onConfirm={(reason) => void deleteNote(confirmar.nota.id, reason)}
+          requireReason
+          reasonLabel="¿Por qué se elimina la nota?"
           tone="danger"
           icon="trash"
           title="Eliminar nota del cliente"
@@ -1934,7 +1947,10 @@ function ClienteDetalle() {
           open
           busy={confirmBusy}
           onClose={() => setConfirmar(null)}
-          onConfirm={() => void deleteInvoice(confirmar.inv)}
+          onConfirm={(reason) => void deleteInvoice(confirmar.inv, reason)}
+          requireReason
+          reasonLabel="¿Por qué se elimina la factura?"
+          reasonPlaceholder="Ej.: factura duplicada en la corrida, cliente retirado antes del corte…"
           tone="danger"
           icon="trash"
           title="Eliminar factura del cliente"
@@ -1968,7 +1984,9 @@ function ClienteDetalle() {
           open
           busy={confirmBusy}
           onClose={() => setConfirmar(null)}
-          onConfirm={() => void deleteFile(confirmar.file)}
+          onConfirm={(reason) => void deleteFile(confirmar.file, reason)}
+          requireReason
+          reasonLabel="¿Por qué se elimina el archivo?"
           tone="danger"
           icon="trash"
           title="Eliminar archivo adjunto"

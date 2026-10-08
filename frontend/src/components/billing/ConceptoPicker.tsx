@@ -16,6 +16,8 @@ export type CatalogoItem = {
   price: number;
   taxRate: number;
   usos: number;
+  /** Plan oculto o producto del legacy con nombre de plan (ver el catálogo). */
+  antiguo?: boolean;
 };
 
 /** Posición fija de la lista, calculada contra el campo. */
@@ -44,6 +46,7 @@ export function ConceptoPicker({
   onText,
   placeholder = "Buscar producto…",
   className = "",
+  excluir,
 }: {
   /** Descripción actual de la línea (lo que se ve en el campo). */
   value: string;
@@ -53,6 +56,12 @@ export function ConceptoPicker({
   onText: (text: string) => void;
   placeholder?: string;
   className?: string;
+  /**
+   * Entradas que este selector no ofrece. La nueva factura lo usa para no vender
+   * planes sueltos (en la venta solo van combos) y la edición para no ofrecer los
+   * planes antiguos; a quien ve los planes antiguos no se le pasa.
+   */
+  excluir?: (item: CatalogoItem) => boolean;
 }) {
   const { authFetch } = useAuth();
   const [items, setItems] = useState<CatalogoItem[]>([]);
@@ -69,9 +78,11 @@ export function ConceptoPicker({
     const t = setTimeout(async () => {
       setLoading(true);
       try {
-        const r = await authFetch(`/billing/catalog?search=${encodeURIComponent(value.trim())}&limit=30`);
+        // Con filtro se pide de más: lo que se descarta no debe dejar la lista corta.
+        const r = await authFetch(`/billing/catalog?search=${encodeURIComponent(value.trim())}&limit=${excluir ? 100 : 30}`);
         const d = await r.json();
-        setItems(d.items ?? []);
+        const lista: CatalogoItem[] = d.items ?? [];
+        setItems(excluir ? lista.filter((x) => !excluir(x)).slice(0, 30) : lista);
         setHi(0);
       } catch {
         setItems([]);
@@ -80,7 +91,7 @@ export function ConceptoPicker({
       }
     }, 250);
     return () => clearTimeout(t);
-  }, [value, open, authFetch]);
+  }, [value, open, authFetch, excluir]);
 
   /** Recalcula dónde y de qué alto va la lista (abre hacia el lado con más sitio). */
   const medir = useCallback(() => {
@@ -159,6 +170,9 @@ export function ConceptoPicker({
             className={`flex cursor-pointer items-center gap-2 px-3 py-2 text-[13px] ${i === hi ? "bg-brand-soft" : ""}`}
           >
             <span className="min-w-0 flex-1 truncate font-medium text-text-primary">{it.name}</span>
+            {it.antiguo && (
+              <span className="shrink-0 rounded-full bg-surface-subtle px-1.5 py-0.5 text-[10px] font-bold uppercase text-text-tertiary">Antiguo</span>
+            )}
             {it.kind === "PLAN" && (
               <span className="shrink-0 rounded-full bg-brand-soft px-1.5 py-0.5 text-[10px] font-bold uppercase text-brand">Plan</span>
             )}

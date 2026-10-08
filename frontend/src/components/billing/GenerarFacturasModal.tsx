@@ -23,6 +23,7 @@ const REASON_LABEL: Record<string, string> = {
   ALREADY_BILLED: "Ya tiene factura este mes",
   REACTIVATED: "Reactivado en el mes (lo cubre la reconexión)",
   NO_SERVICES: "Sin servicios activos con precio",
+  SERVICES_CUT: "Servicio cortado: no se factura",
   PROMO: "Mes de promoción gratis",
   PROMO2: "Mes de promoción gratis (2º contador)",
   ERROR: "Error al generar",

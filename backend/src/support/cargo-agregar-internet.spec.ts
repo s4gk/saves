@@ -57,9 +57,10 @@ describe('qué tipos de orden se cobran', () => {
     expect(cargoDeTipoDeOrden('AgregarTelevision')).toBeNull();
   });
 
-  it('el traslado sigue cobrando, y el de equipos dentro de la casa no', () => {
-    expect(cargoDeTipoDeOrden('Traslado')).toMatchObject({ clave: 'traslado' });
-    expect(cargoDeTipoDeOrden('Traslado interno De Equipos Red en cliente final')).toBeNull();
+  it('el traslado cobra 50.000 y el traslado interno 25.000', () => {
+    expect(cargoDeTipoDeOrden('Traslado')).toMatchObject({ clave: 'traslado', precioPorDefecto: 50_000 });
+    expect(cargoDeTipoDeOrden('Traslado interno De Equipos Red en cliente final'))
+      .toMatchObject({ clave: 'traslado-interno', producto: 'Traslado interno', precioPorDefecto: 25_000 });
   });
 
   it('el resto de los trabajos no cobra nada al abrirse', () => {

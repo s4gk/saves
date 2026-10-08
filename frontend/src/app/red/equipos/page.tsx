@@ -85,6 +85,7 @@ export default function EquiposPage() {
         <>
           <DataTable rows={data?.items ?? []} empty="No se encontraron equipos." sort={orden.sort} onSort={orden.onSort} columns={[
             { key: "code", header: "Código", sortable: true, render: (r) => <span className="font-mono text-text-secondary">{r.code}</span> },
+            { key: "tipo", header: "Tipo", render: (r) => r.equipmentType ? <span title={r.category ?? undefined}>{r.equipmentType}</span> : <span className="text-text-tertiary">—</span> },
             { key: "brand", header: "Marca", sortable: true, render: (r) => r.brand ?? "—" },
             { key: "mac", header: "MAC", sortable: true, render: (r) => <span className="font-mono text-text-secondary">{r.mac ?? "—"}</span> },
             { key: "serial", header: "Serial", sortable: true, render: (r) => <span className="font-mono text-text-tertiary">{r.serial ?? "—"}</span> },

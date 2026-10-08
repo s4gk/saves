@@ -18,6 +18,8 @@ export function StatCard({
   value,
   icon,
   tone = "text-text-primary",
+  onClick,
+  active = false,
 }: {
   label: string;
   /** Acepta número además de texto: varias pantallas pasan el conteo crudo. */
@@ -25,9 +27,14 @@ export function StatCard({
   icon: string;
   /** Clase Tailwind de color para el valor (no una variante). */
   tone?: string;
+  /** Si viene, la tarjeta es un botón (p. ej. filtra la tabla de abajo). */
+  onClick?: () => void;
+  /** Resalta la tarjeta cuando su filtro está puesto. */
+  active?: boolean;
 }) {
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface px-4 py-3 shadow-sm">
+  const base = "flex items-center gap-3 rounded-xl border bg-surface px-4 py-3 shadow-sm";
+  const cuerpo = (
+    <>
       <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
         <Icon name={icon} size={17} />
       </span>
@@ -35,6 +42,19 @@ export function StatCard({
         <span className="text-[11px] font-medium text-text-tertiary">{label}</span>
         <span className={`text-[18px] font-bold ${tone}`}>{value}</span>
       </div>
-    </div>
+    </>
+  );
+  if (!onClick) return <div className={`${base} border-border-subtle`}>{cuerpo}</div>;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`${base} cursor-pointer text-left transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${
+        active ? "border-brand ring-1 ring-brand" : "border-border-subtle"
+      }`}
+    >
+      {cuerpo}
+    </button>
   );
 }

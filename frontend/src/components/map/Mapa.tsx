@@ -13,6 +13,7 @@ export type { PuntoMapa, TipoPunto } from "./puntos";
 const COLOR_NAP = "#0e7490";
 const COLOR_TECNICO = "#7c3aed";
 const COLOR_YO = "#0ea5e9";
+const COLOR_OFICINA = "#1e3a8a";
 
 function esc(s: unknown): string {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -61,6 +62,8 @@ export function Mapa({
   ajustarA = true,
   onAbrir,
   onComoLlegar,
+  vista,
+  onClicMapa,
 }: {
   puntos: PuntoMapa[];
   /** Línea del trayecto a dibujar (origen → destino). */
@@ -76,6 +79,13 @@ export function Mapa({
   onAbrir?: (href: string) => void;
   /** Pulsación de "Cómo llegar" en un globo. */
   onComoLlegar?: (destino: { lat: number; lng: number }) => void;
+  /**
+   * Encuadre pedido desde fuera (p. ej. la oficina de la sede elegida). Se aplica
+   * cada vez que cambia y, mientras esté puesto, manda sobre `ajustarA`.
+   */
+  vista?: { lat: number; lng: number; zoom: number } | null;
+  /** Con esto puesto el mapa está "eligiendo un punto": el clic lo devuelve. */
+  onClicMapa?: (p: { lat: number; lng: number }) => void;
 }) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -85,9 +95,11 @@ export function Mapa({
   // siempre el último sin tener que recrearse cuando la página lo redefine.
   const onAbrirRef = useRef(onAbrir);
   const onComoLlegarRef = useRef(onComoLlegar);
+  const onClicMapaRef = useRef(onClicMapa);
   useEffect(() => {
     onAbrirRef.current = onAbrir;
     onComoLlegarRef.current = onComoLlegar;
+    onClicMapaRef.current = onClicMapa;
   });
 
   // Firma del conjunto: decide si hay que reencuadrar. Sin esto, el mapa vuelve
@@ -128,6 +140,10 @@ export function Mapa({
     rendererRef.current = L.canvas({ padding: 0.5 });
     capaRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
+
+    map.on("click", (e: L.LeafletMouseEvent) => {
+      onClicMapaRef.current?.({ lat: e.latlng.lat, lng: e.latlng.lng });
+    });
 
     // Los globos son HTML plano (los pinta Leaflet, no React): la navegación
     // interna se engancha por delegación al abrirse el globo.
@@ -214,7 +230,15 @@ export function Mapa({
     for (const p of puntos) {
       const color =
         p.color ??
-        (p.tipo === "nap" ? COLOR_NAP : p.tipo === "tecnico" ? COLOR_TECNICO : p.tipo === "yo" ? COLOR_YO : "#64748b");
+        (p.tipo === "nap"
+          ? COLOR_NAP
+          : p.tipo === "tecnico"
+            ? COLOR_TECNICO
+            : p.tipo === "yo"
+              ? COLOR_YO
+              : p.tipo === "oficina"
+                ? COLOR_OFICINA
+                : "#64748b");
 
       if (p.radioM && p.radioM > 0) {
         L.circle([p.lat, p.lng], {
@@ -227,7 +251,20 @@ export function Mapa({
         }).addTo(capa);
       }
 
-      if (p.tipo === "tecnico" || p.tipo === "yo") {
+      if (p.tipo === "oficina") {
+        // Pin de gota con un edificio: se distingue de los círculos de abonados y
+        // NAPs y queda por encima de ellos (marcador DOM, no canvas).
+        const icono = L.divIcon({
+          className: "",
+          html: `<div style="width:34px;height:34px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:${color};border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center"><svg style="transform:rotate(45deg)" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4M10 10h4M10 14h4M10 18h4"/></svg></div>`,
+          iconSize: [34, 34],
+          iconAnchor: [17, 34],
+          popupAnchor: [0, -30],
+        });
+        L.marker([p.lat, p.lng], { icon: icono, title: p.titulo, zIndexOffset: 1000 })
+          .bindPopup(popupHtml(p))
+          .addTo(capa);
+      } else if (p.tipo === "tecnico" || p.tipo === "yo") {
         // Pocos y hay que distinguirlos a simple vista: pin con la inicial.
         const inicial = esc(p.titulo.trim().charAt(0).toUpperCase() || "?");
         const icono = L.divIcon({
@@ -260,13 +297,29 @@ export function Mapa({
       ruta && ruta.length > 1
         ? ruta.map((p) => [p.lat, p.lng] as [number, number])
         : puntos.map((p) => [p.lat, p.lng] as [number, number]);
-    if (ajustarA && paraEncuadrar.length) {
+    if (ajustarA && !vista && paraEncuadrar.length) {
       map.fitBounds(L.latLngBounds(paraEncuadrar), { padding: [40, 40], maxZoom: 17 });
     }
     // `firma` es lo que decide un repintado real; `puntos` cambia de identidad en
     // cada render aunque el contenido sea idéntico.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firma, ajustarA, rutaAproximada]);
+
+  // --- Encuadre pedido desde fuera ---
+  const claveVista = vista ? `${vista.lat},${vista.lng},${vista.zoom}` : "";
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !vista) return;
+    map.flyTo([vista.lat, vista.lng], vista.zoom, { duration: 0.8 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claveVista]);
+
+  // Eligiendo un punto: cursor de mira para que se note que el clic cuenta.
+  const eligiendo = !!onClicMapa;
+  useEffect(() => {
+    const el = divRef.current;
+    if (el) el.style.cursor = eligiendo ? "crosshair" : "";
+  }, [eligiendo]);
 
   return (
     // `isolate` es lo que mantiene el mapa por debajo de los modales: Leaflet

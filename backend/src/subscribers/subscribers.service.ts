@@ -13,6 +13,7 @@ import { partirNotaDeEstado, sinEcosDelSync } from './motivo-estado';
 import { saldoAFavor } from '../billing/anticipos';
 import { mensualidadesCompletas, planDeUltimaFactura } from '../billing/plan-facturable';
 import { descuentosDePromocionPendientes } from '../promotions/descuento-al-cobrar';
+import { ESTADOS_ABONADO, metricaDeEstado } from '../reports/metrics.service';
 import { sedesDe, whereSedeSuscriptor, exigirSedeSuscriptor, exigirSedeDestino } from '../common/sede-scope';
 import { esClienteDeSuOrden, esTecnicoDeCampo } from '../common/tecnico-scope';
 import { traductorDeCajas } from '../common/nap-legacy';
@@ -36,6 +37,7 @@ import type { OrdenAbierta, OrdenesAutomaticasService } from '../support/ordenes
 import type { EmisorDeEventos } from '../core/eventos';
 import { afiliadoresDisponibles, afiliadorValido } from '../staff/afiliadores';
 import { canalVentaValido } from './canal-venta';
+import { SEDE_ACTIVA } from '../common/sedes-activas';
 
 /**
  * Enumera motivos en castellano: "A, B y C". Con un solo requisito daba igual, pero
@@ -921,7 +923,7 @@ export class SubscribersService {
             // A cuántas megas pasa la orden al cliente. Va en la lista y no solo en
             // la orden porque 'Subir megas' a secas no dice a cuánto: había que
             // abrir la orden una por una para saberlo.
-            planToName: true, planToMegas: true, planFromMegas: true,
+            planToName: true, planToMegas: true, planFromMegas: true, bundleToName: true,
           },
         },
         invoices: {
@@ -1147,7 +1149,7 @@ export class SubscribersService {
         // `null` en todo lo que no sea una orden de megas — y en las de megas que
         // nacieron sin decirlas (las del legacy y las que abre el chatbot).
         megas: t.planToName || t.planToMegas != null
-          ? { plan: t.planToName, a: t.planToMegas, de: t.planFromMegas }
+          ? { plan: t.planToName, a: t.planToMegas, de: t.planFromMegas, combo: t.bundleToName }
           : null,
       })),
       /** Cuántas tiene en total: `workOrders` va topado (ver el `take` de arriba). */
@@ -1219,7 +1221,7 @@ export class SubscribersService {
   async branches(user?: AuthUser) {
     const sedes = await sedesDe(this.prisma, user);
     return this.prisma.branch.findMany({
-      where: sedes ? { legacyId: { in: sedes } } : undefined,
+      where: { ...SEDE_ACTIVA, ...(sedes ? { legacyId: { in: sedes } } : {}) },
       orderBy: { name: 'asc' },
       select: { id: true, name: true },
     });
@@ -1585,7 +1587,7 @@ export class SubscribersService {
     const sedes = await sedesDe(this.prisma, user);
     const [branches, grouped] = await Promise.all([
       this.prisma.branch.findMany({
-        where: sedes ? { legacyId: { in: sedes } } : undefined,
+        where: { ...SEDE_ACTIVA, ...(sedes ? { legacyId: { in: sedes } } : {}) },
         orderBy: { name: 'asc' },
         select: { id: true, name: true },
       }),
@@ -1614,6 +1616,66 @@ export class SubscribersService {
     });
   }
 
+  /**
+   * Clientes ACTIVOS mes a mes, para la gráfica de /clientes.
+   *
+   * Sale de las fotos diarias (`MetricPoint`, ver `MetricsService.fotoDelDia`) y no
+   * de `SubscriberStatusHistory`: el historial de estados no registra todos los
+   * cambios y reconstruir "cuántos activos había" con él da ~12% de desvío. Por eso
+   * la serie empieza donde empiezan las fotos (28-jul-2026) y no antes.
+   *
+   * Cada mes cerrado vale lo que decía la foto de su ÚLTIMO día medido; el mes en
+   * curso es el conteo de este instante, no la foto de anoche. Quien está acotado a
+   * su sede ve la suma de sus sedes, igual que en el listado. `branchId` deja mirar
+   * una sola sede; si no es de las suyas se ignora y ve lo de siempre.
+   *
+   * `dias` es la misma serie sin agrupar, para la vista día a día de la gráfica.
+   */
+  async activosPorMes(branchId?: string, status?: string, user?: AuthUser) {
+    // Sin estado (o con uno que no existe) es el total de clientes. Sólo activos,
+    // cortados, cartera, retirados y el total —y sólo de la empresa entera— tienen
+    // fotos desde julio; lo demás se fotografía desde el 2026-10-02.
+    const estado = status && ESTADOS_ABONADO.includes(status) ? status : undefined;
+    const sedes = await sedesDe(this.prisma, user);
+    let ramas = sedes
+      ? (await this.prisma.branch.findMany({ where: { legacyId: { in: sedes } }, select: { id: true } })).map((b) => b.id)
+      : null;
+    if (branchId && (!ramas || ramas.includes(branchId))) ramas = [branchId];
+    // Hora de Colombia: a las 20:00 del 31 el servidor (UTC) ya está en el mes siguiente.
+    const hoy = new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 10);
+    const [fotos, ahora] = await Promise.all([
+      this.prisma.metricPoint.findMany({
+        where: { metrica: metricaDeEstado(estado), periodo: 'D', sede: ramas ? { in: ramas } : '' },
+        orderBy: { fecha: 'asc' },
+        select: { fecha: true, valor: true },
+      }),
+      this.prisma.subscriber.count({ where: { ...(estado ? { status: estado as Prisma.SubscriberWhereInput['status'] } : {}), ...(ramas ? { branchId: { in: ramas } } : {}) } }),
+    ]);
+    // Varias sedes: se suman las fotos del mismo día.
+    const porDia = new Map<string, number>();
+    for (const f of fotos) {
+      const d = f.fecha.toISOString().slice(0, 10);
+      porDia.set(d, (porDia.get(d) ?? 0) + f.valor);
+    }
+    // Las fotos vienen en orden, así que la última de cada mes pisa a las anteriores.
+    const porMes = new Map<string, { mes: string; fecha: string; valor: number; enCurso: boolean }>();
+    for (const [fecha, valor] of porDia) {
+      const mes = fecha.slice(0, 7);
+      if (mes < hoy.slice(0, 7)) porMes.set(mes, { mes, fecha, valor, enCurso: false });
+    }
+    porMes.set(hoy.slice(0, 7), { mes: hoy.slice(0, 7), fecha: hoy, valor: ahora, enCurso: true });
+    // Hoy va con el conteo vivo, como el mes en curso: las dos vistas terminan igual.
+    porDia.set(hoy, ahora);
+    // Este mes y los tres anteriores: es contra lo que se compara.
+    const [y, m] = hoy.split('-').map(Number);
+    const corte = new Date(Date.UTC(y, m - 4, 1)).toISOString().slice(0, 10);
+    return {
+      desde: [...porDia.keys()][0] ?? hoy,
+      meses: [...porMes.values()].filter((x) => x.mes >= corte.slice(0, 7)),
+      dias: [...porDia.entries()].filter(([f]) => f >= corte && f <= hoy).map(([fecha, valor]) => ({ fecha, valor })),
+    };
+  }
+
   /** Campos crudos editables (para precargar el wizard en modo edición). */
   async editForm(id: string, user?: AuthUser) {
     // Devuelve pppPassword en claro: sin este guard, un usuario acotado a la sede A
@@ -1627,6 +1689,10 @@ export class SubscribersService {
         phone1: true, phone2: true, birthDate: true, estrato: true, suscripcion: true, contractDate: true,
         departmentRef: true, cityRef: true, localityRef: true, neighborhood: true, addressLine: true,
         nomenclature: true, clausula: true, gpsLat: true, gpsLng: true, branchId: true,
+        // El NOMBRE de la sede, además del id: si es una sede desactivada ya no sale en
+        // el catálogo del selector (`branches`), y sin esto el formulario de los
+        // clientes que quedan en ella mostraría la sede en blanco como si no tuvieran.
+        branch: { select: { name: true, isActive: true } },
         // Conectividad: sin esto el wizard mostraría los campos PPP vacíos al editar y
         // parecería que el cliente no los tiene.
         pppUsername: true, pppPassword: true, pppProfile: true, ipRemote: true, installTech: true,
@@ -1636,7 +1702,13 @@ export class SubscribersService {
     if (!s) throw new NotFoundException('Suscriptor no encontrado');
     // La VLAN se sirve aparte, ya leída del comentario, para que el formulario la
     // enseñe en su propia casilla: dentro del texto nadie la corrige sin equivocarse.
-    return { ...s, vlan: vlanDeComentario(s.netComment) };
+    const { branch, ...campos } = s;
+    return {
+      ...campos,
+      branchName: branch?.name ?? null,
+      branchInactive: branch ? !branch.isActive : false,
+      vlan: vlanDeComentario(s.netComment),
+    };
   }
 
   /** Editar el perfil del cliente (pasos 1 y 2). Devuelve la ficha fresca. */
@@ -2185,28 +2257,29 @@ export class SubscribersService {
     subscriberId: string,
     bundleId: string,
     user?: AuthUser,
-    opts: { pushRouter?: boolean } = {},
+    /**
+     * `allowInactive`: lo usa el cierre de una orden de megas con combo — el combo se
+     * validó a la venta al ABRIR la orden; si entre tanto lo ocultaron, la venta ya
+     * se hizo y el técnico ya dejó la velocidad puesta.
+     */
+    opts: { pushRouter?: boolean; allowInactive?: boolean } = {},
   ) {
     await exigirSedeSuscriptor(this.prisma, user, subscriberId);
     const bundle = await this.prisma.planBundle.findUnique({
       where: { id: bundleId },
-      include: { items: { include: { plan: { select: { active: true, name: true } } } } },
+      include: { items: true },
     });
     if (!bundle) throw new NotFoundException('Combo no encontrado');
-    if (!bundle.active) throw new BadRequestException('El combo está oculto; muéstralo antes de venderlo.');
+    if (!bundle.active && !opts.allowInactive) throw new BadRequestException('El combo está oculto; muéstralo antes de venderlo.');
     if (!bundle.items.length) throw new BadRequestException('El combo no tiene planes dentro.');
-    const oculto = bundle.items.find((i) => !i.plan.active);
-    if (oculto) {
-      throw new BadRequestException(
-        `El combo incluye el plan “${oculto.plan.name}”, que está oculto. Corrige el combo antes de venderlo.`,
-      );
-    }
 
     const results: Awaited<ReturnType<SubscribersService['changePlan']>>[] = [];
     for (const item of bundle.items) {
       results.push(
         await this.changePlan(subscriberId, item.planId, user, {
-          ...opts, price: num(item.price), bundleId: bundle.id,
+          // `allowInactive`: el plan suelto puede estar oculto (se vende solo por
+          // combo); lo que se valida a la venta es el combo, arriba.
+          ...opts, allowInactive: true, price: num(item.price), bundleId: bundle.id,
         }),
       );
     }
@@ -2314,7 +2387,11 @@ export class SubscribersService {
           } as any);
           const res = await this.mikrotikAdmin.secrets(mk.id, { search: name, pageSize: 200 });
           if (!res.ok) router = 'unreachable';
-          else router = res.items.some((s: { name: string }) => s.name.toLowerCase() === name.toLowerCase()) ? 'taken' : 'free';
+          else {
+            const mismo = res.items.find((s: { name: string }) => s.name.toLowerCase() === name.toLowerCase()) as
+              { name: string; comment?: string } | undefined;
+            router = !mismo ? 'free' : (await this.esSuPropioSecret(mismo, excludeId)) ? 'free' : 'taken';
+          }
         }
       } catch {
         // Sin router para la sede / sede sin resolver: no podemos afirmar nada.
@@ -2322,6 +2399,23 @@ export class SubscribersService {
       }
     }
     return { db: inDb, router };
+  }
+
+  /**
+   * ¿El secret que ya lleva ese nombre en el router es del MISMO abonado que se edita?
+   *
+   * Pasa cuando alguien renombra el secret directo en Winbox y luego quiere poner la
+   * ficha igual: el guard de colisión veía el nombre ocupado —por el propio cliente— y
+   * no dejaba guardar (abonada 52324, 2026-09-30: router con
+   * KELLYJOHANASAAVEDRASALDARRIAGA, ficha con KELLYJOHANASAAVEDRA). Se reconoce por el
+   * número de abonado en el comentario del secret, que es como lo escribe `comment()`.
+   * La IP no sirve de prueba: la ficha arrastra IPs repetidas entre abonados.
+   */
+  private async esSuPropioSecret(secret: { comment?: string }, subscriberId?: string) {
+    if (!subscriberId || !secret.comment) return false;
+    const sub = await this.prisma.subscriber.findUnique({ where: { id: subscriberId }, select: { abonado: true } });
+    if (!sub?.abonado) return false;
+    return new RegExp(`(^|\\D)${sub.abonado}(\\D|$)`).test(secret.comment);
   }
 
   /**
@@ -2335,6 +2429,7 @@ export class SubscribersService {
   async checkDuplicates(dto: {
     docNumber?: string; branchId?: string; pppUsername?: string; installTech?: string;
     departmentRef?: string; cityRef?: string; localityRef?: string; neighborhood?: string; addressLine?: string;
+    excludeId?: string;
   }) {
     const out: any = { document: null, address: null, pppUsername: null };
 
@@ -2370,7 +2465,7 @@ export class SubscribersService {
     }
 
     if (dto.pppUsername?.trim()) {
-      const { db, router } = await this.pppUsernameTaken(dto.pppUsername, dto.branchId, dto.installTech);
+      const { db, router } = await this.pppUsernameTaken(dto.pppUsername, dto.branchId, dto.installTech, dto.excludeId);
       const taken = !!db || router === 'taken';
       out.pppUsername = {
         taken, blocking: true, router,
@@ -2466,6 +2561,12 @@ export class SubscribersService {
     if (data.abonado == null) {
       // Secuencia de Postgres, no MAX+1: dos altas simultáneas obtenían el mismo
       // número y, al no haber restricción única en la columna, se duplicaba sin ruido.
+      // Y la secuencia no ve las altas del legacy que baja la ida: se sube primero por
+      // encima del máximo ya importado, o reparte números de otro (pasó 27-08 → 28-09).
+      await this.prisma.$queryRaw`
+        SELECT setval('"Subscriber_abonado_seq"',
+          GREATEST((SELECT last_value FROM "Subscriber_abonado_seq"),
+                   (SELECT COALESCE(MAX(abonado), 0) FROM "Subscriber")))`;
       data.abonado = await nextTid(this.prisma, TID_SEQ.subscriberAbonado);
     }
     data.fullName = composeName(dto.firstName, dto.secondName, dto.lastName1, dto.lastName2) ?? dto.companyName ?? null;
@@ -2577,7 +2678,7 @@ export class SubscribersService {
    * Eliminar una factura. Por seguridad SOLO si no tiene movimientos de dinero
    * asociados (pagos, servicios adicionales o e-factura). Los ítems caen en cascada.
    */
-  async deleteInvoice(subscriberId: string, invoiceId: string, user?: AuthUser) {
+  async deleteInvoice(subscriberId: string, invoiceId: string, reason: string, user?: AuthUser) {
     await exigirSedeSuscriptor(this.prisma, user, subscriberId);
     const inv = await this.prisma.subInvoice.findFirst({
       where: { id: invoiceId, subscriberId },
@@ -2600,7 +2701,12 @@ export class SubscribersService {
       );
     }
 
-    await anotarBorradoLegacy(this.prisma, 'subInvoice', inv, { label: `Factura #${inv.tid}` });
+    // El motivo va también en la lápida: es lo que se lee al revisar qué se borró
+    // aquí antes de propagarlo al legacy. La bitácora lo guarda por su lado.
+    await anotarBorradoLegacy(this.prisma, 'subInvoice', inv, {
+      label: `Factura #${inv.tid} — ${reason}`.slice(0, 300),
+      deletedBy: user?.name ?? user?.email ?? null,
+    });
     await this.prisma.subInvoice.delete({ where: { id: inv.id } });
     return { ok: true, tid: inv.tid };
   }
@@ -2648,7 +2754,7 @@ export class SubscribersService {
       }),
       this.prisma.transaction.findMany({
         where: { subscriberId: id, type: 'INCOME', status: 'VIGENTE' },
-        select: { id: true, date: true, credit: true, method: true, invoiceId: true },
+        select: { id: true, legacyId: true, date: true, credit: true, method: true, invoiceId: true },
       }),
       // Equipo aún a nombre del cliente. `subscriberId` es lo que suelta la devolución
       // (`returnEquipment`) y la desasignación; mientras haya filas, el equipo está afuera.
@@ -2682,7 +2788,10 @@ export class SubscribersService {
     type Mov = { date: Date; kind: 'CARGO' | 'ABONO'; concept: string; ref: string | null; debit: number; credit: number };
     const movs: Mov[] = [];
     for (const i of invoices) movs.push({ date: i.invoiceDate, kind: 'CARGO', concept: `Factura #${i.tid}`, ref: String(i.tid), debit: num(i.total), credit: 0 });
-    for (const p of payments) movs.push({ date: p.date, kind: 'ABONO', concept: `Pago${p.method ? ` (${p.method})` : ''}`, ref: null, debit: 0, credit: num(p.credit) });
+    // `ref` del pago = el código del movimiento (su id en el legacy), el mismo que
+    // muestra Tesorería: es el número con el que la cajera lo busca. Null = pago
+    // nacido aquí que todavía no ha viajado al legacy.
+    for (const p of payments) movs.push({ date: p.date, kind: 'ABONO', concept: `Pago${p.method ? ` (${p.method})` : ''}`, ref: p.legacyId != null ? String(p.legacyId) : null, debit: 0, credit: num(p.credit) });
 
     // Orden cronológico ascendente + saldo acumulado.
     movs.sort((a, b) => a.date.getTime() - b.date.getTime());
@@ -2964,10 +3073,6 @@ export class SubscribersService {
       });
     });
 
-    // Devolución POR RETIRO: el equipo vuelve porque el cliente se va, así que la
-    // devolución arrastra la baja. Mismo orden que la cascada de cierre de una orden
-    // de retiro (`SupportWriteService.applyCloseCascade`): primero el corte —que por
-    // su cuenta deja CORTADO— y después el estado definitivo RETIRADO.
     // El equipo salió de la casa: sale también de la OLT. En segundo plano (es una
     // sesión telnet/SSH de segundos) y sin poder deshacer la devolución; el resultado
     // queda anotado en la ficha. Ver `OnuAlDevolverService`.
@@ -2975,7 +3080,10 @@ export class SubscribersService {
       serial: eq.serial, code: eq.code, subscriberId, motivo: `Devolución: ${motivo}`, user,
     });
 
-    const withdrawal = retiro ? await this.retirarPorDevolucion(sub, motivo, quien, restantes.length, recogido, user) : undefined;
+    // Devolución POR RETIRO: sólo cambia el EQUIPO (queda anotado en la ficha). El
+    // estado del cliente NO se toca aquí —pedido de Soporte 24-sep—: la baja del
+    // cliente se da con la orden de retiro o a mano desde la ficha.
+    const withdrawal = retiro ? { equiposPendientes: restantes.length } : undefined;
 
     return {
       ok: true,
@@ -2984,57 +3092,5 @@ export class SubscribersService {
       macEquipo: macNueva,
       withdrawal,
     };
-  }
-
-  /**
-   * Baja del cliente que acompaña a una devolución por retiro: corte en el router
-   * (best-effort: sin PPPoE, sin router o con el router caído la devolución NO se
-   * pierde) + RETIRADO con su fila de historial. Si ya estaba RETIRADO/DEPURADO no
-   * se vuelve a tocar el estado, sólo se informa.
-   */
-  private async retirarPorDevolucion(
-    sub: { id: string; status: SubscriberStatus | null },
-    motivo: string,
-    quien: string,
-    equiposPendientes: number,
-    recogido: Date,
-    user?: AuthUser,
-  ) {
-    const res: {
-      statusSet?: string; yaRetirado?: boolean; mikrotik?: unknown; note?: string; equiposPendientes: number;
-    } = { equiposPendientes };
-
-    try {
-      res.mikrotik = await this.mikrotik.cut(sub.id, user);
-    } catch (e) {
-      res.note = `No se pudo cortar en el router: ${(e as Error).message}`;
-    }
-
-    if (sub.status === 'RETIRADO' || sub.status === 'DEPURADO') {
-      res.yaRetirado = true;
-      return res;
-    }
-
-    const now = new Date();
-    await this.prisma.$transaction([
-      this.prisma.subscriber.update({
-        where: { id: sub.id },
-        data: { previousStatus: sub.status ?? undefined, status: 'RETIRADO' as SubscriberStatus, statusChangedAt: now },
-      }),
-      this.prisma.subscriberStatusHistory.create({
-        data: {
-          subscriberId: sub.id,
-          status: 'RETIRADO',
-          date: now,
-          // La fecha de la fila es la de HOY (es cuando se da la baja), y la de la
-          // recogida va en el texto: si se fecha atrás, el estado del cliente no
-          // puede empezar a contar desde un día en el que aún tenía servicio.
-          note: `Retiro por devolución de equipo recogido el ${diaEnTexto(recogido)}`
-            + `${quien ? ` (${quien})` : ''}: ${motivo}`,
-        },
-      }),
-    ]);
-    res.statusSet = 'RETIRADO';
-    return res;
   }
 }
