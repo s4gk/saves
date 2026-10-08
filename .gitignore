@@ -44,3 +44,16 @@ coverage/
 backend/uploads/
 __pycache__/
 /mobile/
+
+# builds alternativos, temporales y datos de producción (2026-10-08)
+.next-*/
+**/.next-*/
+*.bak-*
+backend/_e2e.js
+backend/scripts/_*
+backend/scripts/*.csv
+backend/scripts/salidas/
+backend/prisma/_respaldo-*.json
+backend/informes/
+exports/
+frontend/public/informes/
