@@ -1,4 +1,5 @@
-import { OltDriver, type PuertoConVlans } from './olt-ssh.client';
+import { OltDriver, type PuertoConVlans, type ServicePortDeVlan } from './olt-ssh.client';
+import { marcaDeSn, perfilesValenParaVlan, vlansDelDetalleOnt, type ReferenciaDeMarca } from './olt-referencia-marca';
 
 /**
  * OltHuawei - Driver para OLTs Huawei (MA5608T / MA5680T / MA5800...).
@@ -184,6 +185,15 @@ export class OltHuawei extends OltDriver {
    */
   async vlansPorPuerto(): Promise<PuertoConVlans[]> {
     return vlansPorPuertoDeSalida(await this.sendCommand('display service-port all'));
+  }
+
+  /** ONTs que usan una VLAN: `display service-port vlan N` (un comando, solo lectura). */
+  async servicePortsDeVlan(vlan: number): Promise<ServicePortDeVlan[] | false> {
+    const n = Number(vlan);
+    if (!Number.isInteger(n) || n < 1 || n > 4094) { this.error = `VLAN inválida: ${vlan}`; return false; }
+    const out = await this.sendCommand(`display service-port vlan ${n}`);
+    if (this.cortado) return false;
+    return servicePortsDeVlanDeSalida(out);
   }
 
   /**
@@ -529,7 +539,14 @@ export class OltHuawei extends OltDriver {
     frame: number,
     slot: number,
     port: number,
-    opts: { model?: string | null; vlanCatalogo?: number[] } = {},
+    opts: {
+      model?: string | null;
+      vlanCatalogo?: number[];
+      /** SN de la ONU que se va a dar de alta: decide la marca de las vecinas que se copian. */
+      sn?: string | null;
+      /** ONUs de la misma OLT en `config normal` (del inventario), por si en el puerto no hay ninguna de su marca. */
+      referenciasOlt?: { fsp: string; ont_id: string; sn: string }[];
+    } = {},
   ): Promise<any> {
     const out = await this.sendCommand(`display service-port port ${frame}/${slot}/${port}`);
     const votos = { vlan: new Map<string, number>(), gem: new Map<string, number>(), rx: new Map<string, number>(), tx: new Map<string, number>() };
@@ -607,6 +624,69 @@ export class OltHuawei extends OltDriver {
     // autenticar: el resultado se verifica después y se avisa si queda failed.
     let srvprofile = top(votosSpOk) ?? top(votosSp);
 
+    // MISMA MARCA (17-oct-2026, MONTERREY 0/1/5:15): la mayoría de arriba no mira
+    // la marca y mezcla el line-profile de unas vecinas con el srv-profile de
+    // otras. Una Huawei en un puerto de ZTE quedaba `config failed`, en línea y
+    // sin que el PPPoE saliera de la casa. Si hay una vecina de la misma marca
+    // que funciona (`config normal`, online) y cuyos perfiles valen para esta
+    // VLAN, se copian SUS DOS perfiles, juntos. Si no la hay en el puerto, se
+    // busca en el resto de la OLT (lo pasa el servicio desde el inventario).
+    let referencia: ReferenciaDeMarca | null = null;
+    const marca = marcaDeSn(opts.sn);
+    let referenciaMotivo: string | null = null;
+    if (marca && listado.length > 0) {
+      const quiereCatv = tieneCatvPorModelo(opts.model);
+      const vlanNum = vlan !== null && Number.isFinite(Number(vlan)) ? Number(vlan) : null;
+      const candidatas: ReferenciaDeMarca[] = [];
+      const examinar = async (fsp: string, oid: string, sn: string, origen: 'PUERTO' | 'OLT') => {
+        const [f, s, p] = fsp.split('/').map(Number);
+        const raw = await this.sendCommand(`display ont info ${f} ${s} ${p} ${oid}`);
+        const det = this.parseKvBlock(raw);
+        if (!/normal/i.test(String(det['config state'] ?? '')) || !/online/i.test(String(det['run state'] ?? ''))) return null;
+        const lp = String(det['line profile id'] ?? '').trim();
+        const sp = String(det['service profile id'] ?? '').trim();
+        if (!lp || !sp || !perfilesValenParaVlan(vlansDelDetalleOnt(raw), vlanNum)) return null;
+        const ref: ReferenciaDeMarca = {
+          fsp, ont_id: String(oid), sn, lineprofile: lp, srvprofile: sp,
+          srvprofileNombre: String(det['service profile name'] ?? '').trim() || null, origen,
+          // El GEM del service-port tiene que ser uno que declare SU line-profile.
+          gemport: this.gemsDeOnt(raw).length ? String(this.gemsDeOnt(raw)[0]) : null,
+        };
+        candidatas.push(ref);
+        return { ref, catv: parseSrvProfileDetalle(raw).catv };
+      };
+      // Basta UNA que sirva; con una combo se busca además una cuyo perfil traiga
+      // TV. Cada vecina es un comando SSH: como mucho 3 del puerto y 3 de la OLT.
+      const sirve = (x: { catv: string | null } | null) => !!x && (!quiereCatv || (!!x.catv && x.catv !== '0'));
+      let elegida: ReferenciaDeMarca | null = null;
+      const delPuerto = listado
+        .filter((o: any) => marcaDeSn(o.sn) === marca && /normal/i.test(String(o.config_state ?? '')) && /online/i.test(String(o.run_state ?? '')))
+        .slice(0, 3);
+      for (const o of delPuerto) {
+        const x = await examinar(`${frame}/${slot}/${port}`, String(o.ont_id), String(o.sn), 'PUERTO');
+        if (sirve(x)) { elegida = x!.ref; break; }
+      }
+      if (!elegida) {
+        const deLaOlt = (opts.referenciasOlt ?? [])
+          .filter((r) => marcaDeSn(r.sn) === marca && r.fsp !== `${frame}/${slot}/${port}`)
+          .slice(0, 3);
+        for (const r of deLaOlt) {
+          const x = await examinar(r.fsp, String(r.ont_id), r.sn, 'OLT');
+          if (sirve(x)) { elegida = x!.ref; break; }
+        }
+      }
+      // Sin ninguna con TV, la primera que funciona: el CATV lo arregla después
+      // `srvProfileConCatv`, como antes.
+      referencia = elegida ?? candidatas[0] ?? null;
+      if (referencia) {
+        lineprofile = referencia.lineprofile;
+        srvprofile = referencia.srvprofile;
+      } else {
+        referenciaMotivo = `no hay ninguna ONU ${marca} funcionando (config normal) con perfiles para la VLAN ${vlan ?? '?'}`
+          + ' ni en el puerto ni en la OLT: los perfiles se copiaron de ONUs de otra marca.';
+      }
+    }
+
     /**
      * PUERTO VACÍO (2026-09-22, VILLANUEVA 0/2/13, traslado 506510): el primer
      * abonado de un PON no tiene vecinas que copiar y el alta moría sin salida.
@@ -658,18 +738,41 @@ export class OltHuawei extends OltDriver {
       };
     }
 
+    // CATV (15-oct-2026): en Huawei la salida de TV la declara el srv-profile. El
+    // mayoritario del puerto (YOPAL: `srv-profile_10`, 996 ONTs) trae `CATV 0` y
+    // dejaba muertas las combo Huawei (EG8143A5, HG8247H5…). Si la ONU tiene
+    // coaxial y el perfil elegido no, se cambia por uno que sí lo traiga.
+    let catv: { de: string | null; a: string; nombre: string } | null = null;
+    if (srvprofile && tieneCatvPorModelo(opts.model)) {
+      const leer = async (id: string) =>
+        parseSrvProfileDetalle(await this.sendCommand(`display ont-srvprofile gpon profile-id ${id}`));
+      if ((await leer(srvprofile)).catv === '0') {
+        const destino = await srvProfileConCatv((await this.getProfiles()).srv, leer, opts.model);
+        if (destino) {
+          catv = { de: srvprofile, a: destino.id, nombre: destino.name };
+          srvprofile = destino.id;
+        }
+      }
+    }
+
     return {
       basadoEn: filas,
       puertoVacio,
+      /** srv-profile cambiado porque el del puerto apagaba el CATV de la ONU. */
+      catv,
       /** Cuántas de las ONTs muestreadas estaban en `config: normal`. */
       muestraNormal: [...votosSpOk.values()].reduce((a, b) => a + b, 0),
       vlan: vlanFinal,
       user_vlan: vlanFinal,
-      gemport: top(votos.gem) ?? (puertoVacio ? '1' : null),
+      gemport: referencia?.gemport ?? top(votos.gem) ?? (puertoVacio ? '1' : null),
       traffic_in: top(votos.rx),
       traffic_out: top(votos.tx),
       lineprofile,
       srvprofile,
+      /** La vecina de la misma marca de la que salieron los dos perfiles (null = mayoría del puerto). */
+      referencia,
+      /** Por qué no hubo vecina de la misma marca: el alta va a ciegas y puede quedar `config failed`. */
+      referenciaMotivo,
       // Los srv-profile de las vecinas (todas), para orientar si hay que elegir.
       srvVecinos: [...srvVistos.entries()].map(([id, name]) => ({ id, name })),
     };
@@ -1345,6 +1448,46 @@ export class OltHuawei extends OltDriver {
 }
 
 /**
+ * ¿La ONU tiene salida de TV (RF/coaxial)? Por el EquipmentID de Huawei: las
+ * combo de la planta son EG8143A5, EG8141A5, HG8247H/H5 y EG8247H5.
+ */
+export function tieneCatvPorModelo(model?: string | null): boolean {
+  return /^(EG|HG|HS)8(14[13]|247)/i.test(String(model ?? '').trim());
+}
+
+/** Detalle de `display ont-srvprofile gpon profile-id N`: cuántos CATV/ETH/POTS declara. */
+export function parseSrvProfileDetalle(out: string): { catv: string | null; eth: string | null; pots: string | null } {
+  const col = (tipo: string) => out.match(new RegExp(`^\\s*${tipo}\\s+(adaptive|\\d+)\\s`, 'im'))?.[1]?.toLowerCase() ?? null;
+  return { catv: col('CATV'), eth: col('ETH'), pots: col('POTS') };
+}
+
+/**
+ * srv-profile con CATV para una ONU combo. Orden: el que se llama como el
+ * modelo (si trae CATV); luego el más usado con CATV y ETH adaptive (no da
+ * mismatch con ningún equipo); luego el más usado con CATV. Solo se leen el del
+ * modelo y los 15 más usados: cada detalle es un comando SSH.
+ */
+export async function srvProfileConCatv(
+  srv: { id: string; name: string; binds?: number | null }[],
+  leer: (id: string) => Promise<{ catv: string | null; eth: string | null }>,
+  model?: string | null,
+): Promise<{ id: string; name: string } | null> {
+  const m = String(model ?? '').trim().toUpperCase();
+  const conCatv = (d: { catv: string | null }) => !!d.catv && d.catv !== '0';
+  const delModelo = m ? srv.find((p) => p.name.toUpperCase() === m) : undefined;
+  if (delModelo && conCatv(await leer(delModelo.id))) return delModelo;
+  const top = [...srv].sort((a, b) => (b.binds ?? 0) - (a.binds ?? 0)).slice(0, 15);
+  let respaldo: { id: string; name: string } | null = null;
+  for (const p of top) {
+    const d = await leer(p.id);
+    if (!conCatv(d)) continue;
+    if (d.eth === 'adaptive') return p;
+    respaldo = respaldo ?? p;
+  }
+  return respaldo;
+}
+
+/**
  * Perfiles para el PRIMER alta de un puerto PON (sin vecinas que copiar).
  * line-profile: el FLEXIBLE GPON de SmartOLT (no el XGPON/XGSPON) que más ONTs
  * usen. srv-profile: el que se llama exactamente como el EquipmentID de la ONU.
@@ -1409,6 +1552,26 @@ export function vlansPorPuertoDeSalida(out: string): PuertoConVlans[] {
       frame: e.frame, slot: e.slot, port: e.port, servicios: e.servicios,
       vlans: [...e.vlans.entries()].sort((a, b) => b[1] - a[1]).map(([vlan, servicios]) => ({ vlan, servicios })),
     }));
+}
+
+/**
+ * Salida de `display service-port vlan N` (o `all`) → una fila por service-port.
+ * En GPON/EPON la columna VPI es el ONT-ID y VCI el GEM-port:
+ *   INDEX VLAN ATTR  TYPE F/ S/ P VPI VCI FLOW-TYPE FLOW-PARA RX TX STATE
+ *     335  590 common gpon 0/2 /13 0   1   vlan      590       37 47 up
+ */
+export function servicePortsDeVlanDeSalida(out: string): ServicePortDeVlan[] {
+  const filas: ServicePortDeVlan[] = [];
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+\S+\s+(?:gpon|epon)\s+(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)\s+(\d+)\s+(\S+)(?:.*\s(up|down)\s*$)?/i);
+    if (!m) continue;
+    filas.push({
+      index: Number(m[1]), vlan: Number(m[2]),
+      frame: Number(m[3]), slot: Number(m[4]), port: Number(m[5]),
+      ontId: Number(m[6]), gem: m[7], estado: (m[8] ?? '').toLowerCase(),
+    });
+  }
+  return filas;
 }
 
 /** Una fila de `display vlan all`. */

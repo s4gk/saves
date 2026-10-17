@@ -16,6 +16,7 @@ import type { OrdenesAutomaticasService } from '../support/ordenes-automaticas.s
 import type { EmisorDeEventos } from '../core/eventos';
 import { ESTADO_SERVICIO_EVENT, type EstadoServicioEvent } from '../subscribers/subscribers.events';
 import { subName } from '../common/subscriber-name';
+import { fusionarSecret, fotoDe, type FotoSecret } from './secret-tres-vias';
 import { lecturaMikrotikDeFilas, pasoRouterOsComoTexto, type LecturaMikrotikVlans, type PasoRouterOs } from './vlan-salud';
 
 /**
@@ -49,6 +50,28 @@ const ADDRESS_LIST_DEBTOR = 'MOROSOS';
  * de verdad — que es justo lo que los deja sin poder cortarse.
  */
 const esIpValida = (v?: string | null): boolean => /^\d{1,3}(\.\d{1,3}){3}$/.test((v ?? '').trim());
+
+/**
+ * Qué IPs de la ficha sobreviven cuando el abonado se MUDA de router (EOC → GPON,
+ * GPON → EPON, otra sede...). Las de antes son de la red del router viejo: si se
+ * quedan, el alta en el nuevo las reutiliza y el secret nace con una dirección que
+ * allí no enruta (abonado 64794, 15-oct: secret EPON con IP GPON).
+ *
+ * Solo se respeta la que la persona ACABA de teclear en este mismo guardado (válida
+ * y distinta de la que había): es la forma de elegir a mano una IP del router nuevo
+ * (abonado 5143, 17-oct: 10.20.0.36). Lo demás vuelve a null y el alta reparte.
+ * La local se vacía también cuando la remota cambia sin local nueva: la de la red
+ * vieja (80.0.0.1 en EOC) no sirve como puerta en la GPON (10.20.0.1).
+ */
+export function ipsTrasCambioDeRouter(
+  antes: { ipRemote?: string | null; ipLocal?: string | null },
+  ahora: { ipRemote?: string | null; ipLocal?: string | null },
+): { ipRemote: string | null; ipLocal: string | null } {
+  const norm = (v?: string | null) => (v ?? '').trim();
+  const tecleada = (k: 'ipRemote' | 'ipLocal') =>
+    esIpValida(ahora[k]) && norm(ahora[k]) !== norm(antes[k]) ? norm(ahora[k]) : null;
+  return { ipRemote: tecleada('ipRemote'), ipLocal: tecleada('ipLocal') };
+}
 
 /**
  * La IP local (`local-address`) que le toca a un secret nuevo, sacada de sus
@@ -129,7 +152,9 @@ export type MikrotikAction =
   /** Interruptor manual del legacy: sólo la address-list MOROSOS (ver `toggleMoroso`). */
   | 'MOROSO_ON' | 'MOROSO_OFF'
   /** Alta de interfaz VLAN + servidor PPPoE (`configurarVlanEnRouter`). */
-  | 'VLAN';
+  | 'VLAN'
+  /** Cambio hecho directamente en el router y traído a la ficha (`traerCambiosDelRouter`). */
+  | 'DESDE_ROUTER';
 
 /**
  * Datos de conexión del abonado ANTES de guardar la ficha. Es lo que permite
@@ -300,6 +325,32 @@ export type SnapshotConexion = {
   netComment?: string | null;
 };
 
+/** Lo que la sincronización router → ficha necesita de cada abonado. */
+const SELECT_FICHA_SECRET = {
+  id: true, abonado: true, legacyId: true, pppUsername: true, pppPassword: true, pppProfile: true,
+  ipRemote: true, ipLocal: true, netComment: true, installTech: true, status: true,
+  branch: { select: { legacyId: true } },
+} as const;
+type FichaSecret = SnapshotConexion & { id: string; abonado: number | null; legacyId: number | null };
+
+export interface ResumenRouterAFicha {
+  dryRun: boolean;
+  total: number;
+  leidos: number;
+  sinSecret: number;
+  sinRouter: number;
+  fotosNuevas: number;
+  traidos: number;
+  campos: Record<string, number>;
+  conflictos: number;
+  pendientesAlRouter: number;
+  routers: { name: string; leidos: number; traidos: number; error?: string }[];
+  muestra: { abonado: number | null; usuario: string; router: string; cambios: string }[];
+  /** Abonados que fallaron (el resto del router sigue). */
+  errores: string[];
+  message: string;
+}
+
 export interface MikrotikActionResult {
   ok: boolean;
   dryRun: boolean;
@@ -318,6 +369,8 @@ export interface MikrotikActionResult {
     inMorosos?: boolean;
     /** Routers donde la IP (o su comment) sigue en MOROSOS; puede ser otro router de la sede. */
     morososEn?: string[];
+    /** Cambios hechos en el router y traídos a la ficha al consultar (ver `traerCambiosDelRouter`). */
+    traidoDelRouter?: string[];
   };
   message: string;
   error?: string;
@@ -489,6 +542,40 @@ export class MikrotikService {
       }
     }
     return { routers, errores };
+  }
+
+  /**
+   * Usuarios PPPoE con sesión activa en los Mikrotik de una sede (para contar
+   * quién está en línea por VLAN). SOLO LECTURA (`/ppp/active/print`, solo el
+   * nombre). Mismo criterio que `vlansDeRoutersDeSede`: IP:puerto repetido se
+   * lee una vez y en dry-run no se lee nada. Nombres en minúscula y sin espacios,
+   * como se comparan los secrets en el resto del servicio.
+   */
+  async sesionesPppDeSede(branchId: string): Promise<{ activos: Set<string>; routers: number; errores: string[] }> {
+    await this.syncLive();
+    const activos = new Set<string>();
+    if (!this.live) return { activos, routers: 0, errores: ['Mikrotik en dry-run: no se leyó ningún router.'] };
+    const filas = await this.prisma.mikrotik.findMany({ where: { branchId }, orderBy: [{ isDefault: 'desc' }, { name: 'asc' }] });
+    const vistos = new Set<string>();
+    const errores: string[] = [];
+    let leidos = 0;
+    for (const r of filas) {
+      const clave = `${r.ip}:${r.port}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      const api = new RouterosClient();
+      try {
+        await api.connect(r.ip, Number(r.port), r.username, decryptSecret(r.password), { timeoutMs: 10000 });
+        const filasActivas = await api.comm('/ppp/active/print', { '.proplist': 'name' }, 30000);
+        for (const a of filasActivas) if (a['name']) activos.add(a['name'].replace(/\s+/g, '').toLowerCase());
+        leidos++;
+      } catch (e) {
+        errores.push(`${r.name}: ${(e as Error).message}`);
+      } finally {
+        api.close();
+      }
+    }
+    return { activos, routers: leidos, errores };
   }
 
   /**
@@ -2027,7 +2114,15 @@ export class MikrotikService {
     try {
       await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 8000 });
       res.steps.push(`conectado a ${routerInfo.host}`);
+      // La última foto del secret: dice qué cambiaron EN EL ROUTER desde que lo leímos.
+      const foto = await this.prisma.secretEnRouter.findUnique({ where: { subscriberId } });
+      const base = foto && foto.mikrotikId === router.id ? (foto.datos as FotoSecret) : null;
       let filas = await api.comm('/ppp/secret/getall', { '?name': nombreAntes });
+      if (!filas[0]?.['.id'] && foto && base) {
+        // Lo renombraron en el router: se sigue por su `.id`.
+        filas = await api.comm('/ppp/secret/getall', { '?.id': foto.secretId });
+        if (filas[0]?.['.id']) res.steps.push(`el secret se llama ${filas[0].name} en el router`);
+      }
       if (!filas[0]?.['.id'] && nombreAhora && nombreAhora !== nombreAntes) {
         // Reintento idempotente: si el renombrado ya se había aplicado, el secret
         // vive con el nombre nuevo y buscarlo por el viejo no encuentra nada.
@@ -2040,6 +2135,25 @@ export class MikrotikService {
           `No existe /ppp/secret para "${nombreAntes}" en ${router.name}: la ficha quedó guardada, `
           + 'pero para que el router la refleje hay que darlo de alta (Provisionar).',
         );
+      }
+
+      /**
+       * Lo que cambiaron en el router desde la última lectura NO se pisa con la ficha:
+       * se trae a la ficha (ver `secret-tres-vias.ts`). Lo que se acaba de editar aquí
+       * sí gana. Sin esto, guardar cualquier dato de la ficha devolvía al router las IPs
+       * viejas (abonada 57372, 2026-10-17). El usuario PPP no se trae por aquí: lo hace
+       * la sincronización, que comprueba antes que no sea de otro abonado.
+       */
+      if (base) {
+        const fus = fusionarSecret(full, enElRouter, base);
+        const traer = Object.fromEntries(
+          Object.entries(fus.aFicha).filter(([k]) => k !== 'pppUsername' && !editados.includes(k as any)),
+        );
+        if (Object.keys(traer).length) {
+          await this.prisma.subscriber.update({ where: { id: subscriberId }, data: { ...traer, editedAt: new Date() } });
+          Object.assign(full, traer);
+          res.steps.push(`traído del router (lo habían cambiado allá): ${fus.detalle.filter((d) => !d.startsWith('usuario')).join(' · ')}`);
+        }
       }
 
       const { set, unset, avisos } = conciliarSecret(full, enElRouter, editados);
@@ -2077,6 +2191,17 @@ export class MikrotikService {
         }
       }
 
+      // La foto queda con lo que el router tiene AHORA: es la base de la próxima comparación.
+      const [despues] = await api.comm('/ppp/secret/getall', { '?.id': enElRouter['.id'] });
+      if (despues?.['.id']) {
+        const datos = fotoDe(despues);
+        await this.prisma.secretEnRouter.upsert({
+          where: { subscriberId },
+          create: { subscriberId, mikrotikId: router.id, secretId: despues['.id'], datos },
+          update: { mikrotikId: router.id, secretId: despues['.id'], datos },
+        });
+      }
+
       /**
        * La sesión PPP viva se reinicia sólo cuando el cambio no puede tomar efecto
        * sin reconectar (nombre, perfil o direcciones). Por un comentario no se le
@@ -2109,6 +2234,285 @@ export class MikrotikService {
   }
 
   // ------------------------------------------------------------------
+  // FORMULARIO «Plan y conexión»: perfiles e IP del router que le tocaría
+  // ------------------------------------------------------------------
+  /** El router de una sede (por id de `Branch`) para una tecnología. */
+  private async routerDeSedeYTech(branchId: string, installTech: string | null): Promise<Mikrotik> {
+    const branch = await this.prisma.branch.findUnique({ where: { id: branchId }, select: { legacyId: true } });
+    if (!branch) throw new NotFoundException('Sede no encontrada');
+    const router = this.elegirRouter(installTech, await this.prisma.mikrotik.findMany({ where: { sedeLegacy: branch.legacyId } }));
+    if (!router) throw new BadRequestException('No hay Mikrotik configurado para esa sede.');
+    return router;
+  }
+
+  private perfilesCache = new Map<string, { at: number; perfiles: string[] }>();
+
+  /**
+   * Los perfiles PPP que existen en el router que le toca al cliente (sede +
+   * tecnología): el desplegable «Perfil / velocidad» ofrece solo eso, porque un
+   * perfil que el router no tiene deja el alta sin aplicar. Caché de 5 min por
+   * router físico. Solo lectura: no depende de MIKROTIK_LIVE.
+   */
+  async perfilesParaFormulario(branchId: string, installTech: string | null) {
+    const router = await this.routerDeSedeYTech(branchId, installTech);
+    const info = { id: router.id, name: router.name, tech: router.tech };
+    const clave = `${router.ip}:${router.port}`;
+    const hit = this.perfilesCache.get(clave);
+    if (hit && Date.now() - hit.at < 5 * 60_000) return { router: info, perfiles: hit.perfiles };
+    const api = new RouterosClient();
+    try {
+      await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 8000 });
+      const filas = await api.comm('/ppp/profile/getall', { '.proplist': 'name' });
+      const perfiles = [...new Set(filas.map((f) => String(f.name ?? '').trim()).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b, 'es', { numeric: true }));
+      this.perfilesCache.set(clave, { at: Date.now(), perfiles });
+      return { router: info, perfiles };
+    } catch (e) {
+      return { router: info, perfiles: [] as string[], error: `No se pudo leer ${router.name}: ${(e as Error).message}` };
+    } finally {
+      api.close();
+    }
+  }
+
+  /**
+   * IP remota libre + IP local de su red en el router que le tocaría al cliente con
+   * esa sede y tecnología. NO reserva: la reserva va al guardar (`cambiarDeRouter`).
+   * Si el abonado ya está en ese mismo equipo físico (EOC ↔ EPON de Villanueva), se
+   * le devuelven sus IPs de siempre: no hay mudanza.
+   */
+  async sugerirIpParaFormulario(branchId: string, installTech: string | null, subscriberId?: string) {
+    const router = await this.routerDeSedeYTech(branchId, installTech);
+    const info = { id: router.id, name: router.name, tech: router.tech };
+    if (subscriberId) {
+      const sub = await this.prisma.subscriber.findUnique({
+        where: { id: subscriberId },
+        select: { ipRemote: true, ipLocal: true, installTech: true, branch: { select: { legacyId: true } } },
+      });
+      if (sub?.branch && esIpValida(sub.ipRemote)) {
+        const actual = this.elegirRouter(sub.installTech, await this.prisma.mikrotik.findMany({ where: { sedeLegacy: sub.branch.legacyId } }));
+        if (actual && `${actual.ip}:${actual.port}` === `${router.ip}:${router.port}`) {
+          return { router: info, mismoRouter: true, ipRemote: sub.ipRemote!.trim(), ipLocal: sub.ipLocal?.trim() || null };
+        }
+      }
+    }
+    const r = await this.ips.sugerir(router);
+    if (!r.ip) return { router: info, mismoRouter: false, ipRemote: null, ipLocal: null, motivo: r.motivo };
+    const api = new RouterosClient();
+    let ipLocal: string | null = null;
+    try {
+      await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 8000 });
+      ipLocal = await this.ipLocalParaAlta(api, r.ip);
+    } catch { /* sin local: el alta la pondrá */ } finally {
+      api.close();
+    }
+    return { router: info, mismoRouter: false, ipRemote: r.ip, ipLocal, libres: r.libres };
+  }
+
+  // ------------------------------------------------------------------
+  // MUDANZA DE ROUTER (cambio de tecnología o de sede)
+  // ------------------------------------------------------------------
+  /**
+   * La ficha cambió de tecnología (o de sede) y eso la manda a OTRO router físico:
+   * EOC y GPON viven en equipos distintos, y el secret no se muda solo.
+   *
+   * Hasta 17-oct el guardado solo hacía `/ppp/secret/set` en el router NUEVO, donde
+   * el secret no existía: fallaba con «No existe /ppp/secret… (Provisionar)», la
+   * ficha quedaba con la IP de la red vieja y el cliente sin alta (abonados 5143,
+   * 63487, 64794, 286). Ahora:
+   *   1. Las IPs de la red vieja se vacían (salvo una tecleada en este guardado,
+   *      ver `ipsTrasCambioDeRouter`), con `editedAt` para que el sync no las devuelva.
+   *   2. `provision()` en el router nuevo: crea el secret (o pone al día uno que ya
+   *      estuviera), con IP remota de su red e IP local de sus vecinos.
+   *   3. Si estaba CORTADO, se le corta también allá (si no, en el nuevo navegaría).
+   *   4. El secret del router viejo se quita si nadie navega con él. Si tiene sesión
+   *      (migración pendiente: sigue por EOC hasta que llegue el técnico) se deja y
+   *      se avisa; lo quita la autenticación de la ONU (`retirarDelRouterAnterior`).
+   *
+   * Devuelve null si los dos routers son el MISMO equipo físico (EOC y EPON de
+   * Villanueva son la misma caja dada de alta dos veces): ahí basta la edición normal.
+   */
+  async cambiarDeRouter(
+    subscriberId: string,
+    antes: { installTech: string | null; sedeLegacy: number | null; ipRemote?: string | null; ipLocal?: string | null },
+    user?: AuthUser,
+  ): Promise<MikrotikActionResult | null> {
+    await this.syncLive();
+    const full = await this.prisma.subscriber.findUnique({
+      where: { id: subscriberId },
+      select: {
+        id: true, legacyId: true, pppUsername: true, ipRemote: true, ipLocal: true,
+        installTech: true, status: true, branch: { select: { legacyId: true } },
+      },
+    });
+    if (!full) throw new NotFoundException('Cliente no encontrado');
+    const sub = full as unknown as SubForNet;
+    const nuevo = await this.resolveRouter(sub);
+    const viejo = antes.sedeLegacy != null
+      ? this.elegirRouter(antes.installTech, await this.prisma.mikrotik.findMany({ where: { sedeLegacy: antes.sedeLegacy } }))
+      : undefined;
+    const host = (r: Mikrotik) => `${r.ip}:${r.port}`;
+    if (!viejo || host(viejo) === host(nuevo)) return null;
+
+    const res: MikrotikActionResult = {
+      ok: false, dryRun: !this.live, action: 'PROVISION', subscriberId,
+      mikrotik: { id: nuevo.id, name: nuevo.name, host: host(nuevo), tech: nuevo.tech },
+      steps: [`cambia de router: ${viejo.name} → ${nuevo.name}`], message: '',
+    };
+
+    if (!this.live) {
+      res.ok = true;
+      res.steps.push(
+        `ficha: IP remota/local de la red de ${viejo.name} → vacías (salvo las tecleadas ahora)`,
+        `alta en ${nuevo.name} con IP de su red`,
+        `secret en ${viejo.name}: se quita si no tiene sesión`,
+      );
+      res.message = `DRY-RUN: el cliente pasaría de ${viejo.name} a ${nuevo.name}. Sin cambios reales.`;
+      return res;
+    }
+
+    // 1) Fuera las IPs de la red vieja. La tecleada (o la que propuso el formulario)
+    // se reserva: si otra alta se la llevó entre medias, se deja que el alta reparta.
+    const ips = ipsTrasCambioDeRouter(antes, full);
+    if (ips.ipRemote && !(await this.ips.reservar(nuevo, ips.ipRemote, subscriberId))) {
+      res.steps.push(`⚠ la IP ${ips.ipRemote} ya la tomó otro abonado: se asigna otra`);
+      ips.ipRemote = null;
+      ips.ipLocal = null;
+    }
+    if (ips.ipRemote !== full.ipRemote || ips.ipLocal !== full.ipLocal) {
+      await this.prisma.subscriber.update({ where: { id: subscriberId }, data: { ...ips, editedAt: new Date() } });
+      res.steps.push(`ficha: IP remota ${full.ipRemote ?? '—'} → ${ips.ipRemote ?? '(la reparte el router nuevo)'}, local ${full.ipLocal ?? '—'} → ${ips.ipLocal ?? '(la de su red)'}`);
+    }
+    this.olvidarEstado(subscriberId);
+
+    if (!full.pppUsername?.trim()) {
+      res.ok = true;
+      res.message = 'La ficha cambió de router, pero no tiene usuario PPPoE: no hay secret que crear.';
+      return res;
+    }
+
+    // 2) Alta en el router nuevo.
+    const alta = await this.provision(subscriberId, user);
+    res.steps.push(...alta.steps);
+    if (!alta.ok) {
+      res.error = alta.error;
+      res.message = `La ficha quedó guardada, pero no se pudo dar de alta en ${nuevo.name}: ${alta.error ?? alta.message}`;
+      return res;
+    }
+
+    if (ips.ipRemote) await this.ips.confirmar(nuevo, ips.ipRemote);
+
+    // 3) Cortado sigue cortado.
+    if (full.status === 'CORTADO') {
+      const corte = await this.cut(subscriberId, user);
+      res.steps.push(corte.ok ? `estaba CORTADO: también cortado en ${nuevo.name}` : `⚠ estaba CORTADO y no se pudo cortar en ${nuevo.name}: ${corte.error}`);
+    }
+
+    // 4) El secret del router viejo.
+    const retiro = await this.retirarDelRouterAnterior(subscriberId, viejo, { pppUsername: full.pppUsername, ipRemote: antes.ipRemote ?? null }, false, user);
+    res.steps.push(...retiro.steps);
+
+    const ficha = await this.prisma.subscriber.findUnique({ where: { id: subscriberId }, select: { ipRemote: true, ipLocal: true } });
+    res.ok = true;
+    res.message = `Pasado a ${nuevo.name}: IP ${ficha?.ipRemote ?? '—'} / local ${ficha?.ipLocal ?? '—'}.`
+      + (retiro.dejado ? ` El secret de ${viejo.name} se dejó porque sigue conectado: se quita al autenticar la ONU.` : '');
+    return res;
+  }
+
+  /**
+   * Migración terminada (ONU autenticada en la tecnología nueva): el secret que
+   * quedó en el router de la tecnología ANTERIOR ya no sirve y, si se queda, el
+   * corte por deuda solo le llega al nuevo. Se quita de todo equipo de la sede que
+   * no sea el suyo, aunque tenga sesión: el técnico está cambiando el equipo.
+   * Vale aunque la ficha ya se hubiera pasado de tecnología antes (desde la oficina).
+   */
+  async retirarSecretDeOtrosRouters(subscriberId: string, user?: AuthUser): Promise<string[]> {
+    try {
+      const sub = await this.loadSubscriber(subscriberId);
+      if (!sub.branch || !sub.pppUsername) return [];
+      const nuevo = await this.resolveRouter(sub);
+      const suyo = `${nuevo.ip}:${nuevo.port}`;
+      const vistos = new Set<string>([suyo]);
+      const pasos: string[] = [];
+      for (const r of await this.prisma.mikrotik.findMany({ where: { sedeLegacy: sub.branch.legacyId } })) {
+        const h = `${r.ip}:${r.port}`;
+        if (vistos.has(h)) continue;
+        vistos.add(h);
+        const out = await this.retirarDelRouterAnterior(subscriberId, r, { pppUsername: sub.pppUsername, ipRemote: null }, true, user);
+        if (out.quitado || out.steps.some((p) => p.startsWith('⚠'))) pasos.push(...out.steps);
+      }
+      return pasos;
+    } catch (e) {
+      return [`⚠ no se pudieron revisar los otros routers de la sede: ${(e as Error).message}`];
+    }
+  }
+
+  /**
+   * Quita el secret del abonado (y sus entradas de ACTIVOS/MOROSOS) de un router que
+   * ya no le toca. Sin `forzar`, si tiene sesión PPP viva lo deja: es un cliente que
+   * todavía navega por la tecnología vieja y quitarlo lo dejaría sin servicio.
+   * Nunca lanza: lo que pase viaja en `steps`. Auditado como `EDIT` en el router viejo.
+   */
+  async retirarDelRouterAnterior(
+    subscriberId: string,
+    router: Mikrotik,
+    datos: { pppUsername: string | null; ipRemote: string | null },
+    forzar: boolean,
+    user?: AuthUser,
+  ): Promise<{ steps: string[]; quitado: boolean; dejado: boolean }> {
+    const out = { steps: [] as string[], quitado: false, dejado: false };
+    const name = (datos.pppUsername ?? '').replace(/\s+/g, '');
+    if (!name) return out;
+    await this.syncLive();
+    const sub = await this.loadSubscriber(subscriberId).catch(() => null);
+    if (!sub) return out;
+    const comentario = this.comment(sub);
+    if (!this.live) {
+      out.steps.push(`[${router.name}] /ppp/secret/remove ?name=${name} (si no tiene sesión)`);
+      return out;
+    }
+    const res: MikrotikActionResult = {
+      ok: false, dryRun: false, action: 'EDIT', subscriberId,
+      mikrotik: { id: router.id, name: router.name, host: `${router.ip}:${router.port}`, tech: router.tech },
+      steps: [], message: '',
+    };
+    const api = new RouterosClient();
+    try {
+      await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 8000 });
+      const secret = (await api.comm('/ppp/secret/getall', { '.proplist': '.id,remote-address', '?name': name }))[0];
+      if (!secret?.['.id']) {
+        out.steps.push(`[${router.name}] no tenía secret: nada que quitar`);
+        api.close();
+        return out;
+      }
+      const activa = (await api.comm('/ppp/active/getall', { '.proplist': '.id', '?name': name }))[0];
+      if (activa?.['.id'] && !forzar) {
+        out.dejado = true;
+        out.steps.push(`⚠ [${router.name}] el secret viejo se deja: sigue conectado por ahí (se quita al autenticar la ONU de la migración)`);
+        api.close();
+        return out;
+      }
+      if (activa?.['.id']) await api.comm('/ppp/active/remove', { '.id': activa['.id'] });
+      await api.comm('/ppp/secret/remove', { '.id': secret['.id'] });
+      const ip = secret['remote-address'] || datos.ipRemote || undefined;
+      const n = (await this.sacarDeLista(api, ADDRESS_LIST_ACTIVE, comentario, ip))
+        + (await this.sacarDeLista(api, ADDRESS_LIST_DEBTOR, comentario, ip));
+      api.close();
+      out.quitado = true;
+      res.steps.push(`secret ${name} quitado de ${router.name} (ya no le toca)${n ? `, ${n} entrada(s) de address-list` : ''}`);
+      out.steps.push(`[${router.name}] secret viejo quitado${n ? ` + ${n} entrada(s) de ACTIVOS/MOROSOS` : ''}`);
+      res.ok = true;
+      res.message = `Secret retirado de ${router.name}.`;
+    } catch (e) {
+      api.close();
+      res.error = e instanceof RouterosError ? e.message : (e as Error).message;
+      res.message = `No se pudo quitar el secret de ${router.name}: ${res.error}`;
+      out.steps.push(`⚠ [${router.name}] no se pudo quitar el secret viejo: ${res.error}`);
+    }
+    if (res.steps.length || res.error) await this.audit('EDIT', sub, router, res, user);
+    return out;
+  }
+
+  // ------------------------------------------------------------------
   // ESTADO EN VIVO
   // ------------------------------------------------------------------
   /**
@@ -2134,6 +2538,48 @@ export class MikrotikService {
     } finally {
       api.close();
     }
+  }
+
+  /**
+   * MAC (caller-id) → usuarios PPPoE con sesión activa, de TODOS los routers.
+   * Lo usa el vínculo ONU↔abonado por MAC: la OLT dice qué MAC sale por cada
+   * ONU y esto dice quién navega con ella. Solo lectura; caché de 5 min porque
+   * un sync de OLT lo pide una vez por slot. MAC en hex mayúscula sin separadores.
+   */
+  async sesionesPppPorMac(): Promise<Map<string, string[]>> {
+    if (this.pppPorMacCache && Date.now() - this.pppPorMacCache.at < 5 * 60_000) return this.pppPorMacCache.mapa;
+    await this.syncLive();
+    const mapa = new Map<string, string[]>();
+    if (!this.live) return mapa;
+    const vistos = new Set<string>();
+    for (const r of await this.prisma.mikrotik.findMany()) {
+      const clave = `${r.ip}:${r.port}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+      const api = new RouterosClient();
+      try {
+        await api.connect(r.ip, Number(r.port), r.username, decryptSecret(r.password), { timeoutMs: 10000 });
+        for (const a of await api.comm('/ppp/active/print', { '.proplist': 'name,caller-id' }, 60000)) {
+          const mac = String(a['caller-id'] ?? '').replace(/[^0-9a-f]/gi, '').toUpperCase();
+          if (mac.length !== 12 || !a['name']) continue;
+          const arr = mapa.get(mac) ?? [];
+          arr.push(a['name'].replace(/\s+/g, '').toLowerCase());
+          mapa.set(mac, arr);
+        }
+      } catch (e) {
+        this.logger.warn(`Sesiones PPP de ${r.name}: ${(e as Error).message}`);
+      } finally {
+        api.close();
+      }
+    }
+    this.pppPorMacCache = { at: Date.now(), mapa };
+    return mapa;
+  }
+  private pppPorMacCache: { at: number; mapa: Map<string, string[]> } | null = null;
+
+  /** Descarta la foto guardada de `liveStatus` (p. ej. cuando el abonado cambia de router). */
+  olvidarEstado(subscriberId: string): void {
+    this.statusCache.delete(subscriberId);
   }
 
   async liveStatus(subscriberId: string): Promise<MikrotikActionResult> {
@@ -2175,6 +2621,21 @@ export class MikrotikService {
       const ip = secrets[0]?.['remote-address'] || active[0]?.['address'] || sub.ipRemote || '';
       const morososEn: string[] = [];
       if (await this.enMorosos(api, comment, ip)) morososEn.push(router.name);
+      // Al abrir la ficha se trae lo que hayan cambiado en el router (Winbox) desde la
+      // última lectura. Nunca tumba la consulta de estado.
+      let traidoDelRouter: string[] = [];
+      if (secrets[0]?.['.id']) {
+        try {
+          const ficha = await this.prisma.subscriber.findUnique({ where: { id: subscriberId }, select: SELECT_FICHA_SECRET });
+          const foto = await this.prisma.secretEnRouter.findUnique({ where: { subscriberId } });
+          const base = foto && foto.mikrotikId === router.id ? (foto.datos as FotoSecret) : null;
+          if (ficha) {
+            traidoDelRouter = (await this.fusionarConFicha(api, router, ficha, secrets[0], base, { aplicar: true, sinFoto: 'router' })).cambios;
+          }
+        } catch (e) {
+          this.logger.warn(`router→ficha (${name}): ${(e as Error).message}`);
+        }
+      }
       api.close();
       // El corte también marca la IP en los OTROS routers de la sede, y la reconexión la
       // saca de todos (`replicateMorosoOnSede`). Mirar sólo el principal daba "al aire" a
@@ -2189,6 +2650,7 @@ export class MikrotikService {
         inActivos: inAct.length > 0,
         inMorosos: morososEn.length > 0,
         morososEn,
+        ...(traidoDelRouter.length ? { traidoDelRouter } : {}),
       };
       res.ok = true;
       res.message = 'Estado leído del router.';
@@ -2201,6 +2663,34 @@ export class MikrotikService {
     // cada ficha abierta se quede otros 6 s esperando el mismo timeout.
     this.statusCache.set(subscriberId, { at: Date.now(), res });
     return res;
+  }
+
+  /**
+   * ¿Llegan intentos PPPoE de este abonado al router? Lee el log (memoria del
+   * Mikrotik) y cuenta los «authentication failed» y los «logged in» de su
+   * usuario. Separa dos fallas que antes salían con el mismo aviso
+   * («revisar usuario/clave»): con rechazos la clave está mal; sin ningún intento
+   * el PPPoE no está saliendo de la casa (ONU sin WAN PPPoE, VLAN equivocada en
+   * la ONU, o la OLT no le aplicó la configuración — 17-oct, MONTERREY 0/1/5:15).
+   * Solo lectura. Nunca lanza: si no se puede leer, `leido: false`.
+   */
+  async intentosPppoe(subscriberId: string): Promise<{ leido: boolean; rechazos: number; ingresos: number; ultimoRechazo: string | null; error?: string }> {
+    const vacio = { leido: false, rechazos: 0, ingresos: 0, ultimoRechazo: null as string | null };
+    if (!this.live) return vacio;
+    const api = new RouterosClient();
+    try {
+      const sub = await this.loadSubscriber(subscriberId);
+      const name = String(sub.pppUsername ?? '').replace(/\s+/g, '');
+      if (!name) return vacio;
+      const router = await this.resolveRouter(sub);
+      await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 6000 });
+      const log = await api.comm('/log/print', {}, 15000);
+      return { leido: true, ...contarIntentosPppoe(log as any[], name) };
+    } catch (e) {
+      return { ...vacio, error: e instanceof RouterosError ? e.message : (e as Error).message };
+    } finally {
+      api.close();
+    }
   }
 
   /** ¿Está en MOROSOS en este router? Por comment o por IP, como la busca `sacarDeLista`. */
@@ -2329,6 +2819,198 @@ export class MikrotikService {
    *     mal escrito (MIRAMCUBIDESCUESTA / MIRIAMCUBIDESCUESTA). Crear el
    *     segundo deja dos secrets peleándose la misma dirección.
    */
+  // ------------------------------------------------------------------
+  // ROUTER → FICHA (lo que cambian en Winbox vuelve a saves)
+  // ------------------------------------------------------------------
+  /**
+   * Trae a la ficha lo que alguien cambió directamente en el `/ppp/secret`.
+   *
+   * Fusión a tres bandas contra la última foto del secret (`SecretEnRouter`, ver
+   * `secret-tres-vias.ts`): sólo se trae lo que cambió EN EL ROUTER desde la última
+   * lectura; lo que cambió en la ficha se queda para que lo lleven el guardado o el
+   * barrido. La ficha queda sellada con `editedAt` para que la ida del legacy no la
+   * pise y el writeback le lleve el cambio también al legacy.
+   *
+   * Corre cada 15 min (tarea `secrets-desde-router`), al abrir la ficha (`liveStatus`)
+   * y antes del barrido de madrugada, que si no devolvería el comentario viejo.
+   */
+  async traerCambiosDelRouter(
+    opts: { aplicar?: boolean; mikrotikId?: string; sinFoto?: 'router' | 'nada' } = {},
+    user?: AuthUser,
+  ): Promise<ResumenRouterAFicha> {
+    await this.syncLive();
+    const aplicar = opts.aplicar !== false;
+    const resumen: ResumenRouterAFicha = {
+      dryRun: !this.live || !aplicar, total: 0, leidos: 0, sinSecret: 0, sinRouter: 0, fotosNuevas: 0,
+      traidos: 0, campos: {}, conflictos: 0, pendientesAlRouter: 0, routers: [], muestra: [], errores: [], message: '',
+    };
+    if (!this.live) {
+      resumen.message = 'DRY-RUN: no se contacta ningún router.';
+      return resumen;
+    }
+    const routers = await this.prisma.mikrotik.findMany({ where: { ...(opts.mikrotikId ? { id: opts.mikrotikId } : {}) } });
+    const subs = await this.prisma.subscriber.findMany({
+      where: { pppUsername: { not: null }, status: { in: [...ESTADOS_CON_SERVICIO] as any } },
+      select: SELECT_FICHA_SECRET,
+    });
+    resumen.total = subs.length;
+    const fotos = new Map((await this.prisma.secretEnRouter.findMany()).map((f) => [f.subscriberId, f]));
+
+    const grupos = new Map<string, { router: Mikrotik; subs: typeof subs }>();
+    for (const sub of subs) {
+      const deLaSede = sub.branch ? routers.filter((r) => r.sedeLegacy === sub.branch!.legacyId) : [];
+      const router = deLaSede.length ? this.elegirRouter(sub.installTech, deLaSede) : undefined;
+      if (!router || (opts.mikrotikId && router.id !== opts.mikrotikId)) { resumen.sinRouter++; continue; }
+      const g = grupos.get(router.id) ?? { router, subs: [] as typeof subs };
+      g.subs.push(sub);
+      grupos.set(router.id, g);
+    }
+
+    const clave = (v?: string | null) => (v ?? '').replace(/\s+/g, '').toLowerCase();
+    for (const { router, subs: delRouter } of grupos.values()) {
+      const parte = { name: router.name, leidos: 0, traidos: 0, error: undefined as string | undefined };
+      const api = new RouterosClient();
+      try {
+        await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 10000 });
+        const filas = await api.comm(
+          '/ppp/secret/getall',
+          { '.proplist': '.id,name,profile,password,remote-address,local-address,comment' },
+          30000,
+        );
+        const porId = new Map(filas.filter((f) => f['.id']).map((f) => [f['.id'], f]));
+        const porNombre = new Map(filas.filter((f) => f.name).map((f) => [clave(f.name), f]));
+        for (const sub of delRouter) {
+          const foto = fotos.get(sub.id);
+          const base = foto && foto.mikrotikId === router.id ? (foto.datos as FotoSecret) : null;
+          // Primero por el `.id` de la foto: así se sigue al secret aunque lo renombren
+          // en el router. Se acepta si conserva el nombre de la foto o trae el número de
+          // abonado en el comentario (un `.id` puede reciclarse tras borrar y crear).
+          let secret = base && foto ? porId.get(foto.secretId) : undefined;
+          if (secret && !(clave(secret.name) === clave(base!.name)
+            || (sub.abonado && (secret.comment ?? '').includes(String(sub.abonado))))) secret = undefined;
+          secret ??= porNombre.get(clave(sub.pppUsername));
+          if (!secret?.['.id']) { resumen.sinSecret++; continue; }
+          parte.leidos++; resumen.leidos++;
+          let r: Awaited<ReturnType<MikrotikService['fusionarConFicha']>>;
+          try {
+            r = await this.fusionarConFicha(api, router, sub, secret, base, {
+              aplicar, sinFoto: opts.sinFoto ?? 'router', user,
+            });
+          } catch (e) {
+            // Uno que falla no frena al resto del router.
+            resumen.errores.push(`${sub.abonado ?? sub.id} (${router.name}): ${(e as Error).message}`);
+            continue;
+          }
+          if (!base) resumen.fotosNuevas++;
+          resumen.conflictos += r.conflictos;
+          resumen.pendientesAlRouter += r.pendientes;
+          if (r.cambios.length) {
+            parte.traidos++; resumen.traidos++;
+            for (const c of r.campos) resumen.campos[c] = (resumen.campos[c] ?? 0) + 1;
+            if (resumen.muestra.length < (process.env.MUESTRA_TODO ? 1e6 : 60)) {
+              resumen.muestra.push({ abonado: sub.abonado ?? null, usuario: sub.pppUsername ?? '', router: router.name, cambios: r.cambios.join(' · ') });
+            }
+          }
+        }
+        api.close();
+      } catch (e) {
+        api.close();
+        parte.error = e instanceof RouterosError ? e.message : (e as Error).message;
+      }
+      resumen.routers.push(parte);
+    }
+    const fallidos = resumen.routers.filter((r) => r.error).length;
+    resumen.message = `${aplicar ? 'Traídos' : 'Por traer'} del router a la ficha: ${resumen.traidos} abonado(s)`
+      + ` de ${resumen.leidos} leídos (${Object.entries(resumen.campos).map(([k, v]) => `${k} ${v}`).join(', ') || 'sin cambios'})`
+      + `${resumen.conflictos ? ` · ${resumen.conflictos} campo(s) cambiados en los dos lados (ganó el router)` : ''}`
+      + `${resumen.fotosNuevas ? ` · ${resumen.fotosNuevas} leídos por primera vez` : ''}`
+      + `${resumen.errores.length ? ` · ${resumen.errores.length} con error` : ''}`
+      + `${fallidos ? ` · ${fallidos} router(es) sin responder` : ''}.`;
+    return resumen;
+  }
+
+  /**
+   * Un abonado: fusiona su secret con la ficha, escribe lo que cambió en el router,
+   * mueve sus entradas de ACTIVOS/MOROSOS si cambió la IP y deja la foto al día.
+   */
+  private async fusionarConFicha(
+    api: RouterosClient,
+    router: Mikrotik,
+    sub: FichaSecret,
+    secret: Record<string, string>,
+    base: FotoSecret | null,
+    opts: { aplicar: boolean; sinFoto: 'router' | 'nada'; user?: AuthUser },
+  ): Promise<{ cambios: string[]; campos: string[]; conflictos: number; pendientes: number }> {
+    const fus = fusionarSecret(sub, secret, base, opts.sinFoto);
+    const aFicha = { ...fus.aFicha };
+    const cambios = [...fus.detalle];
+
+    // Un nombre que ya usa OTRO abonado no se copia: dejaría dos fichas con el mismo
+    // usuario PPP y el corte de uno le caería al otro.
+    if (aFicha.pppUsername) {
+      const otro = await this.prisma.subscriber.findFirst({
+        where: { id: { not: sub.id }, pppUsername: { equals: aFicha.pppUsername, mode: 'insensitive' } },
+        select: { abonado: true },
+      });
+      if (otro) {
+        delete aFicha.pppUsername;
+        const i = cambios.findIndex((c) => c.startsWith('usuario PPP'));
+        if (i >= 0) cambios.splice(i, 1);
+        cambios.push(`⚠ el router lo llama ${secret.name}, que ya es el usuario del abonado ${otro.abonado ?? '?'}: no se copió`);
+      }
+    }
+    const campos = Object.keys(aFicha);
+
+    if (opts.aplicar) {
+      if (campos.length) {
+        await this.prisma.subscriber.update({ where: { id: sub.id }, data: { ...aFicha, editedAt: new Date() } });
+        // El corte busca la IP por estas listas: si se quedan con la vieja, cortar a
+        // este abonado bloquearía la dirección equivocada.
+        if (aFicha.ipRemote && sub.legacyId) {
+          for (const lista of [ADDRESS_LIST_ACTIVE, ADDRESS_LIST_DEBTOR]) {
+            const entradas = await api.comm('/ip/firewall/address-list/print', { '?list': lista, '?comment': `activo_${sub.legacyId}` });
+            const yaEsta = (await api.comm('/ip/firewall/address-list/print', { '?list': lista, '?address': aFicha.ipRemote }))
+              .some((e) => e['.id']);
+            for (const e of entradas) {
+              if (!e['.id'] || e.address === aFicha.ipRemote) continue;
+              if (yaEsta) {
+                // La IP nueva ya está en la lista: la entrada vieja sobra, y dejarla
+                // bloquearía (o liberaría) al que herede la dirección vieja.
+                await api.comm('/ip/firewall/address-list/remove', { '.id': e['.id'] });
+                cambios.push(`${lista}: quitada ${e.address} (ya estaba ${aFicha.ipRemote})`);
+              } else {
+                await api.comm('/ip/firewall/address-list/set', { '.id': e['.id'], address: aFicha.ipRemote });
+                cambios.push(`${lista}: ${e.address} → ${aFicha.ipRemote}`);
+              }
+            }
+          }
+        }
+        this.statusCache.delete(sub.id);
+        await this.prisma.mikrotikActionLog.create({
+          data: {
+            subscriberId: sub.id, mikrotikId: router.id, mikrotikName: router.name, action: 'DESDE_ROUTER',
+            ok: true, dryRun: false, pppUsername: secret.name ?? null,
+            detail: `Cambiado en el router, traído a la ficha: ${cambios.join(' · ')}`
+              + (fus.conflictos.length ? ` (también se había cambiado en la ficha: ganó el router)` : ''),
+            userId: opts.user?.id ?? null, userName: opts.user?.name ?? 'Sincronización con el router',
+          },
+        }).catch(() => undefined);
+      }
+      const datos = fotoDe(secret);
+      await this.prisma.secretEnRouter.upsert({
+        where: { subscriberId: sub.id },
+        create: { subscriberId: sub.id, mikrotikId: router.id, secretId: secret['.id'], datos },
+        update: { mikrotikId: router.id, secretId: secret['.id'], datos },
+      });
+    }
+    return {
+      cambios: campos.length ? cambios : [],
+      campos,
+      conflictos: fus.conflictos.length,
+      pendientes: fus.pendientesAlRouter.length,
+    };
+  }
+
   /**
    * Qué nombres existen ya en CADA sede, mirando todos sus routers.
    *
@@ -2473,6 +3155,13 @@ export class MikrotikService {
     if (!this.live) {
       resumen.message = 'DRY-RUN: no se contacta ningún router. Active MIKROTIK_LIVE=true (o el interruptor de Configuración).';
       return resumen;
+    }
+
+    // Primero lo que cambiaron en los routers: si no, el barrido devolvería allá el
+    // comentario y las direcciones viejas que todavía tiene la ficha.
+    if (aplicar) {
+      await this.traerCambiosDelRouter({ aplicar: true, mikrotikId: opts.mikrotikId }, user)
+        .catch((e) => this.logger.warn(`router→ficha antes del barrido: ${(e as Error).message}`));
     }
 
     const routers = await this.prisma.mikrotik.findMany({
@@ -3074,4 +3763,35 @@ export class MikrotikService {
       },
     }).catch((e) => this.logger.warn(`No se pudo actualizar estado del cliente: ${e.message}`));
   }
+}
+
+/**
+ * Intentos PPPoE de `usuario` en el log del Mikrotik. RouterOS escribe
+ * «<pppoe-USUARIO>: user USUARIO authentication failed» al rechazar la clave y
+ * «USUARIO logged in, IP from MAC» al entrar. Se compara sin mayúsculas: el
+ * router no las distingue en el nombre del secret.
+ */
+export function contarIntentosPppoe(
+  log: { time?: string; topics?: string; message?: string }[],
+  usuario: string,
+): { rechazos: number; ingresos: number; ultimoRechazo: string | null } {
+  const u = usuario.trim().toLowerCase();
+  let rechazos = 0;
+  let ingresos = 0;
+  let ultimoRechazo: string | null = null;
+  if (!u) return { rechazos, ingresos, ultimoRechazo };
+  const esc = u.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const reRechazo = new RegExp(`user\\s+${esc}\\s+authentication failed`);
+  const reIngreso = new RegExp(`(^|\\s)${esc}\\s+logged in\\b`);
+  for (const l of log ?? []) {
+    const m = String(l?.message ?? '').toLowerCase();
+    if (!m.includes(u)) continue;
+    if (reRechazo.test(m)) {
+      rechazos++;
+      ultimoRechazo = l.time ?? ultimoRechazo;
+    } else if (reIngreso.test(m)) {
+      ingresos++;
+    }
+  }
+  return { rechazos, ingresos, ultimoRechazo };
 }

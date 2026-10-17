@@ -5,7 +5,7 @@
  * controlador. Cablea HTTP -> método: extrae los argumentos de `req` y llama.
  * La lógica sigue viviendo en OltController, que ya no lleva decoradores.
  *
- * Endpoints: 42
+ * Endpoints: 45
  */
 import { crearRouter, manejar } from '../core/http/ruta';
 import { validar } from '../core/http/validar';
@@ -303,7 +303,7 @@ oltRouter.get(
   autenticar,
   exigirArea('tecnicos', 'administracion'),
   moduloRed,
-  manejar((req) => olt.sugerencia(req.params.id, req.query.frame as string, req.query.slot as string, req.query.port as string, req.query.model as string)),
+  manejar((req) => olt.sugerencia(req.params.id, req.query.frame as string, req.query.slot as string, req.query.port as string, req.query.model as string, req.query.sn as string)),
 );
 
 oltRouter.post(
@@ -339,6 +339,22 @@ oltRouter.get(
 );
 
 oltRouter.get(
+  '/olt/:id/vlans',
+  autenticar,
+  exigirArea('tecnicos', 'administracion'),
+  moduloRed,
+  manejar((req) => olt.vlans(req.params.id, req.query.refresh as string)),
+);
+
+oltRouter.get(
+  '/olt/:id/vlans/:vlan/onus',
+  autenticar,
+  exigirArea('tecnicos', 'administracion'),
+  moduloRed,
+  manejar((req) => olt.onusDeVlan(req.params.id, req.params.vlan)),
+);
+
+oltRouter.get(
   '/vlans/olt-mapa',
   autenticar,
   exigirArea('tecnicos', 'administracion'),
@@ -360,6 +376,14 @@ oltRouter.get(
   exigirArea('tecnicos', 'administracion'),
   moduloRed,
   manejar((req) => olt.sugerirVlan(req.query.oltId as string, req.query.slot as string, req.query.port as string)),
+);
+
+oltRouter.get(
+  '/vlans/usuarios',
+  autenticar,
+  exigirArea('tecnicos', 'administracion'),
+  moduloRed,
+  manejar((req) => olt.usuariosVlans(req.query.branchId as string, req.query.refresh as string)),
 );
 
 oltRouter.post(

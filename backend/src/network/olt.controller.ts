@@ -202,6 +202,10 @@ export class OltController {
   saludVlans(branchId?: string, refresh?: string) {
     return this.vlanEquipos.salud(String(branchId ?? ''), refresh === '1' ? true : refresh === 'vlans' ? 'vlans' : false);
   }
+  /** Clientes por VLAN de la sede y cuántos tienen sesión PPPoE ahora. `refresh=1` relee los Mikrotik. */
+  usuariosVlans(branchId?: string, refresh?: string) {
+    return this.vlanEquipos.usuarios(String(branchId ?? ''), refresh === '1');
+  }
   /** Número de VLAN sugerido para un PON sin VLAN, según el patrón de su tarjeta. */
   sugerirVlan(oltId?: string, slot?: string, port?: string) {
     return this.vlanEquipos.sugerir(String(oltId ?? ''), 0, Number(slot), Number(port));
@@ -219,9 +223,14 @@ export class OltController {
     slot?: string,
     port?: string,
     model?: string,
+    sn?: string,
   ) {
-    return this.olt.sugerencia(id, Number(frame) || 0, Number(slot), Number(port), model);
+    return this.olt.sugerencia(id, Number(frame) || 0, Number(slot), Number(port), model, sn);
   }
+  /** VLANs que usa la OLT (de sus service-ports), con sus puertos PON y el nombre del catálogo. */
+  vlans(id: string, refresh?: string) { return this.olt.vlansDeOlt(id, refresh === '1'); }
+  /** ONUs de una VLAN de la OLT, con estado y señal. */
+  onusDeVlan(id: string, vlan: string) { return this.olt.onusDeVlan(id, Number(vlan)); }
   onus(id: string, dto: OnusQueryDto) {
     return this.olt.onus(id, Number(dto.frame) || 0, Number(dto.slot), Number(dto.port));
   }

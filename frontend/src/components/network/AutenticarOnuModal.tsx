@@ -85,7 +85,14 @@ export function AutenticarOnuModal({
     basadoEn: number;
     /** Puerto sin ONUs: lo precargado sale del catálogo de VLANs y del perfil flexible. */
     puertoVacio?: { vlanDeCatalogo: string | null; vlanMotivo: string | null; srvMotivo: string | null; lineMotivo: string | null } | null;
+    /** La vecina de la MISMA marca de la que salieron los dos perfiles. */
+    referencia?: { fsp: string; ont_id: string; origen: "PUERTO" | "OLT" } | null;
+    /** Por qué no hubo vecina de la misma marca: los perfiles salen de otras marcas. */
+    referenciaMotivo?: string | null;
   } | null>(null);
+  // Con el SN la OLT copia los perfiles de una ONU de su misma marca. Solo se
+  // manda un SN completo, para no abrir una sesión SSH por cada tecla.
+  const snSugerencia = /^[0-9A-Fa-f]{16}$|^[A-Za-z0-9]{4}[0-9A-Fa-f]{8}$/.test(form.sn.trim()) ? form.sn.trim().toUpperCase() : "";
   useEffect(() => {
     if (!open || form.slot === "" || form.port === "") { setSugerencia(null); return; }
     let vigente = true;
@@ -94,7 +101,8 @@ export function AutenticarOnuModal({
     // escribir en vez de disparar una consulta por tecla.
     const timer = setTimeout(() => {
       const qModel = preset?.model ? `&model=${encodeURIComponent(preset.model)}` : "";
-      void authFetch(`/network/olt/${oltId}/sugerencia?frame=${Number(form.frame) || 0}&slot=${form.slot}&port=${form.port}${qModel}`)
+      const qSn = snSugerencia ? `&sn=${encodeURIComponent(snSugerencia)}` : "";
+      void authFetch(`/network/olt/${oltId}/sugerencia?frame=${Number(form.frame) || 0}&slot=${form.slot}&port=${form.port}${qModel}${qSn}`)
         .then((r) => r.json())
         .then((d) => {
           if (!vigente || !(d?.sugerencia?.basadoEn || d?.sugerencia?.puertoVacio)) return;
@@ -117,7 +125,7 @@ export function AutenticarOnuModal({
         .catch(() => {});
     }, 500);
     return () => { vigente = false; clearTimeout(timer); };
-  }, [open, oltId, form.frame, form.slot, form.port, authFetch]);
+  }, [open, oltId, form.frame, form.slot, form.port, snSugerencia, authFetch]);
 
   const submit = async () => {
     if (!form.sn.trim()) { toast("Indique el SN de la ONU", "x"); return; }
@@ -260,7 +268,17 @@ export function AutenticarOnuModal({
         <p className="text-[12px] text-text-tertiary">
           <Icon name="wand-sparkles" size={13} className="mr-1 inline text-brand" />
           Precargado con la configuración de los <b>{sugerencia.basadoEn}</b> servicios que ya hay en este puerto.
-          Puede cambiar cualquier campo.
+          {sugerencia.referencia && (
+            <> Perfiles copiados de la ONU de la misma marca en <b>{sugerencia.referencia.fsp}:{sugerencia.referencia.ont_id}</b>
+              {sugerencia.referencia.origen === "OLT" ? " (otro puerto de esta OLT)" : ""}, que funciona.</>
+          )}
+          {" "}Puede cambiar cualquier campo.
+        </p>
+      )}
+      {sugerencia?.referenciaMotivo && (
+        <p className="text-[12px] text-warning-text">
+          <Icon name="alert-circle" size={13} className="mr-1 inline" />
+          Ojo: {sugerencia.referenciaMotivo} Si queda en «config failed», la ONU no tendrá internet.
         </p>
       )}
       {sugerencia?.puertoVacio && (

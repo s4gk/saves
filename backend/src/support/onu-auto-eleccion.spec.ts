@@ -93,10 +93,12 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
   };
 
   /** Fila cruda de `Equipment` como la devuelve `equiposPorSn`. */
-  const equipo = (x: { serial: string; code: number; subscriberId?: string | null; bodega?: string | null; sede?: number | null }) => ({
+  const equipo = (x: { serial: string; code: number; subscriberId?: string | null; bodega?: string | null; sede?: number | null; disponible?: boolean }) => ({
     id: `eq-${x.code}`, code: x.code, serial: x.serial, status: 'Bueno', brand: 'Bestcom',
     norma: x.serial.toUpperCase().replace(/[^A-Z0-9]/g, ''),
     bodega: x.bodega ?? null, bodega_sede: x.sede ?? null,
+    // Cargado en Equipos disponibles de su sede (por defecto sí, si tiene sede).
+    disponible: x.disponible ?? x.sede != null,
     subscriberId: x.subscriberId ?? null,
     sub_abonado: null, sub_full: null, sub_n1: null, sub_a1: null, sub_emp: null,
   });
@@ -148,6 +150,16 @@ describe('OnuProvisionService · qué ONU se autentica sin preguntar', () => {
     const r: any = await svc.estado('t1');
     expect(r.auto.origen).toBe('BODEGA_SEDE');
     expect(r.auto.equipo.code).toBe(6002);
+  });
+
+  it('cliente nuevo: si la unidad de su sede NO está en Equipos disponibles, no decide sola', async () => {
+    const svc = armar({
+      autofind: [onu('48575443A1B2C3D4')],
+      inventario: [equipo({ serial: '48575443A1B2C3D4', code: 6002, bodega: 'Yopal', sede: SEDE, disponible: false })],
+    });
+    const r: any = await svc.estado('t1');
+    expect(r.auto.sn).toBeNull();
+    expect(r.auto.motivo).toMatch(/no está en Equipos disponibles/);
   });
 
   it('cliente nuevo con una ONU que el inventario no conoce: le carga una unidad del stock', async () => {
@@ -363,9 +375,9 @@ describe('modoDeOrden · qué órdenes tocan la OLT', () => {
    * (2026-09-08): el equipo ya está en la casa y ya está de alta en la OLT, así
    * que en esas órdenes el bloque de la ONU no tiene nada que hacer.
    */
-  it('la REINSTALACIÓN no autentica, aunque calce con «instalac»', () => {
+  it('la REINSTALACIÓN autentica (desde 2026-10-15, orden 512117)', () => {
     for (const tipo of ['Reinstalación', 'Reinstalacion', 'REINSTALACIÓN', ' reinstalación ']) {
-      expect([tipo, modoDeOrden(tipo)]).toEqual([tipo, null]);
+      expect([tipo, modoDeOrden(tipo)]).toEqual([tipo, 'AUTENTICAR']);
     }
     // Y no se lleva por delante a la instalación de verdad.
     expect(modoDeOrden('Instalacion')).toBe('AUTENTICAR');

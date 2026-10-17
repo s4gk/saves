@@ -358,6 +358,11 @@ export abstract class OltDriver {
     this.error = `Leer las VLANs por puerto aún no está implementado para ${this.getMarca()}.`;
     return false;
   }
+  /** Service-ports de una VLAN (`display service-port vlan N`): de qué ONT es cada uno. */
+  async servicePortsDeVlan(_vlan: number): Promise<ServicePortDeVlan[] | false> {
+    this.error = `Leer los service-ports de una VLAN aún no está implementado para ${this.getMarca()}.`;
+    return false;
+  }
   /**
    * VLANs de la OLT y por qué puerto de red (uplink) sale cada una. Es la mitad
    * OLT de la salud de VLANs (`vlan-salud.ts`); los service-ports por PON van
@@ -392,7 +397,12 @@ export abstract class OltDriver {
     _frame: number,
     _slot: number,
     _port: number,
-    _opts?: { model?: string | null; vlanCatalogo?: number[] },
+    _opts?: {
+      model?: string | null;
+      vlanCatalogo?: number[];
+      sn?: string | null;
+      referenciasOlt?: { fsp: string; ont_id: string; sn: string }[];
+    },
   ): Promise<any> {
     return { basadoEn: 0 };
   }
@@ -728,3 +738,6 @@ export abstract class OltDriver {
 
 /** Un puerto PON con las VLANs que usan sus service-ports (y cuántos cada una). */
 export type PuertoConVlans = { frame: number; slot: number; port: number; servicios: number; vlans: { vlan: number; servicios: number }[] };
+
+/** Un service-port de `display service-port vlan N`: la ONT (F/S/P + id) que lo usa. */
+export type ServicePortDeVlan = { index: number; vlan: number; frame: number; slot: number; port: number; ontId: number; gem: string; estado: string };

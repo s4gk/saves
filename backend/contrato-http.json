@@ -12807,6 +12807,56 @@
   },
   {
     "metodo": "GET",
+    "ruta": "/api/network/vlans/usuarios",
+    "controlador": "OltController",
+    "fichero": "src/network/olt.controller.ts",
+    "handler": "usuariosVlans",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard",
+      "ModuloRedGuard"
+    ],
+    "areas": [
+      "tecnicos",
+      "administracion"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'tecnicos'",
+      "'administracion'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [],
+    "query": [
+      "branchId",
+      "refresh"
+    ],
+    "parametros": [
+      {
+        "clase": "Query",
+        "llave": "branchId",
+        "tipo": "string",
+        "nombre": "branchId"
+      },
+      {
+        "clase": "Query",
+        "llave": "refresh",
+        "tipo": "string",
+        "nombre": "refresh"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
     "ruta": "/api/network/vlans/sugerir",
     "controlador": "OltController",
     "fichero": "src/network/olt.controller.ts",
@@ -13652,7 +13702,8 @@
       "frame",
       "slot",
       "port",
-      "model"
+      "model",
+      "sn"
     ],
     "parametros": [
       {
@@ -13684,6 +13735,12 @@
         "llave": "model",
         "tipo": "string",
         "nombre": "model"
+      },
+      {
+        "clase": "Query",
+        "llave": "sn",
+        "tipo": "string",
+        "nombre": "sn"
       }
     ],
     "usaRes": false,
@@ -13790,6 +13847,107 @@
         "llave": "refresh",
         "tipo": "string",
         "nombre": "refresh"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/network/olt/:id/vlans",
+    "controlador": "OltController",
+    "fichero": "src/network/olt.controller.ts",
+    "handler": "vlans",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard",
+      "ModuloRedGuard"
+    ],
+    "areas": [
+      "tecnicos",
+      "administracion"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'tecnicos'",
+      "'administracion'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id"
+    ],
+    "query": [
+      "refresh"
+    ],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Query",
+        "llave": "refresh",
+        "tipo": "string",
+        "nombre": "refresh"
+      }
+    ],
+    "usaRes": false,
+    "subeFichero": false,
+    "subidaFuente": null,
+    "httpCode": null,
+    "publico": false
+  },
+  {
+    "metodo": "GET",
+    "ruta": "/api/network/olt/:id/vlans/:vlan/onus",
+    "controlador": "OltController",
+    "fichero": "src/network/olt.controller.ts",
+    "handler": "onusDeVlan",
+    "guards": [
+      "JwtAuthGuard",
+      "AreaGuard",
+      "ModuloRedGuard"
+    ],
+    "areas": [
+      "tecnicos",
+      "administracion"
+    ],
+    "permisos": [],
+    "orPermission": [],
+    "areasFuente": [
+      "'tecnicos'",
+      "'administracion'"
+    ],
+    "permisosFuente": [],
+    "orPermissionFuente": [],
+    "scopesFuente": [],
+    "dto": null,
+    "params": [
+      "id",
+      "vlan"
+    ],
+    "query": [],
+    "parametros": [
+      {
+        "clase": "Param",
+        "llave": "id",
+        "tipo": "string",
+        "nombre": "id"
+      },
+      {
+        "clase": "Param",
+        "llave": "vlan",
+        "tipo": "string",
+        "nombre": "vlan"
       }
     ],
     "usaRes": false,

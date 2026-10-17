@@ -101,7 +101,10 @@ export class OltService {
      * encuentre el equipo por la MAC con que navega cuando el inventario no cuadra.
      * Sin él (scripts, smokes) todo lo demás funciona igual.
      */
-    private readonly mikrotik?: { callerIdDeAbonado(subscriberId: string): Promise<string | null> },
+    private readonly mikrotik?: {
+      callerIdDeAbonado(subscriberId: string): Promise<string | null>;
+      sesionesPppPorMac?(): Promise<Map<string, string[]>>;
+    },
   ) {}
 
   get isLive(): boolean {
@@ -432,13 +435,94 @@ export class OltService {
     const olt = await this.resolveOlt(id);
     const r = await this.withDriver(olt, (d) => d.getOnus(frame, slot, port));
     const onus = (r.data ?? []) as any[];
+    await this.cruzarOnusConInventario(olt.id, onus);
+    return { ok: r.ok, error: r.error, onus, raw: r.raw };
+  }
+
+  /**
+   * VLANs que usa la OLT según sus service-ports, con los puertos PON donde
+   * aparece cada una (`principal` = es la VLAN mayoritaria de ese puerto) y el
+   * nombre que le da el catálogo de `/red/vlans`. Sale del mismo mapa cacheado
+   * 10 min que usa el catálogo; `refresh` lo relee (~20 s).
+   */
+  async vlansDeOlt(id: string, refresh = false) {
+    const olt = await this.resolveOlt(id);
+    const r = await this.mapaDeOlt(olt, refresh);
+    const porVlan = new Map<number, { vlan: number; servicios: number; puertos: { fsp: string; servicios: number; principal: boolean }[] }>();
+    for (const p of (r.data?.puertos ?? []) as { frame: number; slot: number; port: number; vlans: { vlan: number; servicios: number }[] }[]) {
+      p.vlans.forEach((v, i) => {
+        const e = porVlan.get(v.vlan) ?? { vlan: v.vlan, servicios: 0, puertos: [] };
+        e.servicios += v.servicios;
+        e.puertos.push({ fsp: `${p.frame}/${p.slot}/${p.port}`, servicios: v.servicios, principal: i === 0 });
+        porVlan.set(v.vlan, e);
+      });
+    }
+    // Una fila del catálogo sin OLT asignada cuenta si es de la sede de esta OLT
+    // y la OLT tiene ese número (mismo criterio que la salud de VLANs).
+    const catalogo = await this.prisma.vlan.findMany({
+      where: { vlan: { in: [...porVlan.keys()] }, OR: [{ oltId: olt.id }, ...(olt.branchId ? [{ oltId: null, branchId: olt.branchId }] : [])] },
+      select: { vlan: true, detail: true, oltId: true },
+    });
+    const vlans = [...porVlan.values()].sort((a, b) => a.vlan - b.vlan).map((v) => {
+      const filas = catalogo.filter((c) => c.vlan === v.vlan);
+      const propias = filas.filter((c) => c.oltId === olt.id);
+      const nombres = [...new Set((propias.length ? propias : filas).map((c) => String(c.detail || '').trim()).filter(Boolean))];
+      return { ...v, catalogo: nombres };
+    });
+    return { ok: r.ok, error: r.ok ? '' : r.error, vlans, leidoEn: (r as any).leidoEn ?? null, cached: !!(r as any).cached };
+  }
+
+  /**
+   * ONUs de una VLAN en esta OLT: `display service-port vlan N` dice qué ONT
+   * (F/S/P + id) usa cada service-port, y se lista cada puerto implicado para
+   * traer estado y señal. Una ONU aparece una vez aunque tenga dos
+   * service-ports en la VLAN. Solo lectura.
+   */
+  async onusDeVlan(id: string, vlan: number) {
+    if (!Number.isInteger(vlan) || vlan < 1 || vlan > 4094) throw new BadRequestException('VLAN inválida.');
+    const olt = await this.resolveOlt(id);
+    const r = await this.withDriver(olt, async (d) => {
+      const sps = await d.servicePortsDeVlan(vlan);
+      if (sps === false) return false as const;
+      const grupos = new Map<string, { frame: number; slot: number; port: number; ids: Set<number> }>();
+      for (const sp of sps) {
+        const k = `${sp.frame}/${sp.slot}/${sp.port}`;
+        const g = grupos.get(k) ?? { frame: sp.frame, slot: sp.slot, port: sp.port, ids: new Set<number>() };
+        g.ids.add(sp.ontId);
+        grupos.set(k, g);
+      }
+      const onus: any[] = [];
+      const puertos: { fsp: string; onus: number; error: string | null }[] = [];
+      const orden = [...grupos.entries()].sort(([, a], [, b]) => a.frame - b.frame || a.slot - b.slot || a.port - b.port);
+      for (const [fsp, g] of orden) {
+        const lista = await d.getOnus(g.frame, g.slot, g.port);
+        if (lista === false) {
+          puertos.push({ fsp, onus: g.ids.size, error: d.getError() || 'Sin respuesta del puerto.' });
+          continue;
+        }
+        const delPuerto = lista.filter((o: any) => g.ids.has(Number(o.ont_id)));
+        onus.push(...delPuerto);
+        puertos.push({ fsp, onus: delPuerto.length, error: null });
+      }
+      return { onus, puertos, servicePorts: sps.length };
+    });
+    const onus = (r.data ? r.data.onus : []) as any[];
+    await this.cruzarOnusConInventario(olt.id, onus);
+    return {
+      ok: r.ok, error: r.error, vlan, onus,
+      puertos: r.data ? r.data.puertos : [], servicePorts: r.data ? r.data.servicePorts : 0,
+    };
+  }
+
+  /** Completa cada ONU leída de la OLT con su abonado del inventario local (por SN). */
+  private async cruzarOnusConInventario(oltId: string, onus: any[]) {
     // La OLT solo devuelve serial y estados; el abonado detrás de cada ONU vive
     // en el inventario local (sync/vínculo). Se cruza por SN para que la lista
     // diga de quién es cada ONU sin tener que abrir la ficha una por una.
     if (onus.length) {
       const sns = [...new Set(onus.map((o) => String(o.sn || '')).filter(Boolean))];
       const locales = await this.prisma.oltOnu.findMany({
-        where: { oltId: olt.id, sn: { in: sns } },
+        where: { oltId, sn: { in: sns } },
         select: { sn: true, description: true, clientName: true, subscriberId: true },
       });
       const porSn = new Map(locales.map((l) => [String(l.sn).toUpperCase(), l]));
@@ -452,7 +536,6 @@ export class OltService {
         o.description = o.description || l?.description || null;
       }
     }
-    return { ok: r.ok, error: r.error, onus, raw: r.raw };
   }
 
   async autofind(id: string) {
@@ -489,7 +572,7 @@ export class OltService {
    * Qué VLAN / perfil / velocidad usan los abonados que ya están en ese puerto.
    * Sirve para precargar el alta sin que el técnico se sepa la planta de memoria.
    */
-  async sugerencia(id: string, frame: number, slot: number, port: number, model?: string | null) {
+  async sugerencia(id: string, frame: number, slot: number, port: number, model?: string | null, sn?: string | null) {
     // OJO: con vecinas NO se elige el srv-profile por el nombre del modelo. Se
     // probó y en esta planta el perfil "del modelo" (F680V9.0) deja la ONU en
     // `config: failed`; el que sí aplica es el que usan las ONTs que están en
@@ -498,10 +581,37 @@ export class OltService {
     // y el catálogo de VLANs solo entran cuando el puerto está VACÍO.
     const olt = await this.resolveOlt(id);
     const vlanCatalogo = await this.vlansDeCatalogo(olt, slot, port);
+    // Con el SN se copian los perfiles de una vecina de su MISMA marca (ver
+    // `olt-referencia-marca.ts`). Si en el puerto no hay ninguna, el driver mira
+    // estas: las de esa marca que el inventario da en `config normal` en otros
+    // puertos de la OLT, primero las del mismo slot. El driver las relee en vivo.
+    const referenciasOlt = await this.referenciasDeMarca(olt.id, sn, frame, slot, port);
     const r = await this.withDriver(olt, (d) =>
-      d.sugerenciaDePuerto(frame, slot, port, { model: model || null, vlanCatalogo }),
+      d.sugerenciaDePuerto(frame, slot, port, { model: model || null, vlanCatalogo, sn: sn || null, referenciasOlt }),
     );
     return { ok: r.ok, error: r.error, sugerencia: r.data ?? null };
+  }
+
+  /** ONUs de la marca de `sn` que funcionan en otros puertos de la OLT, según el inventario. */
+  private async referenciasDeMarca(oltId: string, sn: string | null | undefined, frame: number, slot: number, port: number) {
+    const hex = String(sn ?? '').trim().toUpperCase();
+    // El inventario guarda el SN en hexadecimal (485754433058BEAD): el prefijo
+    // de 8 caracteres ES la marca. Con un SN en otro formato no se filtra.
+    if (!/^[0-9A-F]{16}$/.test(hex)) return [];
+    const filas = await this.prisma.oltOnu.findMany({
+      where: {
+        oltId, sn: { startsWith: hex.slice(0, 8) }, configState: 'normal', runState: 'online',
+        syncState: { not: 'ausente' },
+        NOT: { frame, slot, port },
+      },
+      select: { frame: true, slot: true, port: true, ontId: true, sn: true },
+      orderBy: { lastSync: 'desc' },
+      take: 40,
+    }).catch(() => []);
+    return filas
+      .sort((a, b) => Number(b.slot === slot) - Number(a.slot === slot))
+      .slice(0, 6)
+      .map((o) => ({ fsp: `${o.frame}/${o.slot}/${o.port}`, ont_id: String(o.ontId), sn: o.sn ?? '' }));
   }
 
   /**
@@ -1454,7 +1564,7 @@ export class OltService {
    * ÚNICO e inequívoco; lo demás se reporta. No toca vínculos ya existentes.
    * Requiere descripciones sincronizadas (correr sync de slots antes).
    */
-  async autoLinkOnus(oltId?: string, user?: AuthUser) {
+  async autoLinkOnus(oltId?: string, user?: AuthUser, opts: { dryRun?: boolean } = {}) {
     const where: Prisma.OltOnuWhereInput = {
       subscriberId: null,
       description: { not: null },
@@ -1464,15 +1574,21 @@ export class OltService {
       where, select: { id: true, sn: true, description: true, oltId: true },
     })).filter((o) => (o.description || '').trim() !== '');
 
+    // Sede de cada OLT: el número de abonado se repite entre sedes (herencia
+    // del legacy), así que primero se busca en la sede de la OLT.
+    const sedeDeOlt = new Map((await this.prisma.olt.findMany({ select: { id: true, branchId: true } })).map((o) => [o.id, o.branchId]));
+
     const subs = await this.prisma.subscriber.findMany({
       // fullName es un caché que puede venir null: para validar nombres se
       // concatenan también las piezas reales (nombres/apellidos/razón social).
       select: {
-        id: true, abonado: true, pppUsername: true, fullName: true,
+        id: true, abonado: true, branchId: true, pppUsername: true, fullName: true,
         firstName: true, secondName: true, lastName1: true, lastName2: true, companyName: true,
       },
     });
-    const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9Ñ]/g, '');
+    // Sin tildes: la OLT no las trae ("MARIA") y la base sí ("MARÍA"); quitarlas
+    // con el [^A-Z] las borraba y dejaba "MARA".
+    const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9Ñ]/g, '');
     const push = (m: Map<string, string[]>, k: string, id: string) => {
       if (!k) return;
       const arr = m.get(k) ?? [];
@@ -1490,9 +1606,16 @@ export class OltService {
       if (s.pppUsername) push(byPpp, norm(s.pppUsername), s.id);
       if (s.fullName) push(byName, norm(s.fullName), s.id);
     }
+    // Abonados que ya tienen una ONU vinculada y viva: otra ONU con su número
+    // es un equipo reemplazado o un error de descripción, no se le cuelga.
+    const conOnuViva = new Set((await this.prisma.oltOnu.findMany({
+      where: { subscriberId: { not: null }, syncState: 'presente', runState: { contains: 'online', mode: 'insensitive' } },
+      select: { subscriberId: true },
+    })).map((o) => o.subscriberId!));
 
-    let vinculadas = 0, ambiguas = 0, sinMatch = 0;
+    let vinculadas = 0, ambiguas = 0, sinMatch = 0, yaTienen = 0;
     const muestraSinMatch: string[] = [];
+    const propuestas: { sn: string | null; descripcion: string; subscriberId: string; abonado: number }[] = [];
     for (const o of onus) {
       // Identidad = lo que va antes de `_zone_...` (sufijo de SmartOLT/authd).
       let ident = (o.description || '').trim();
@@ -1501,32 +1624,33 @@ export class OltService {
       ident = ident.trim();
       if (!ident) { sinMatch++; continue; }
 
-      let candidatos: string[] | undefined;
-      if (/^\d{2,7}$/.test(ident)) {
-        candidatos = byAbonado.get(ident);
-      } else {
-        candidatos = byPpp.get(norm(ident)) ?? byName.get(norm(ident));
-        // Formato dominante del legacy: `<abonado><nombre>` pegados
-        // ("1893Julieth", "52086Andrea"). Se toma el número y se VALIDA que el
-        // nombre que sigue aparezca en el nombre del abonado — sin esa
-        // validación un número cualquiera vincularía a ciegas.
-        if (!candidatos) {
-          const m = ident.match(/^(\d{2,7})(\D.+)$/);
-          if (m) {
-            // El número de abonado viene DUPLICADO en la BD (herencia del
-            // legacy, se repite entre sedes): el nombre que sigue al número es
-            // el desempate — se exige que UN solo candidato lo contenga.
-            const porNumero = byAbonado.get(m[1]) ?? [];
-            const frag = norm(m[2]);
-            if (porNumero.length >= 1 && frag) {
-              const validos = [...new Set(porNumero)].filter((id) => {
-                const sub = subById.get(id);
-                const nombre = sub ? nombreCompleto(sub) : '';
-                return nombre.includes(frag) || (frag.length >= 4 && nombre.includes(frag.slice(0, 6)));
-              });
-              if (validos.length === 1) candidatos = validos;
-            }
-          }
+      let candidatos: string[] | undefined = byPpp.get(norm(ident)) ?? byName.get(norm(ident));
+      if (!candidatos) {
+        // Formatos del legacy/SmartOLT: `<abonado><nombre>` pegados o con
+        // espacio/guion ("1893Julieth", "5669 DIELA RAMIREZ", "56867_Hector"),
+        // el número pelado ("2871", "0121lilia") o el nombre delante
+        // ("JULIO ALVAREZ 8186").
+        const a = ident.match(/^0*(\d{2,7})[\s_.-]*(\D.*)?$/);
+        const b = a ? null : ident.match(/^(\D.*?)[\s_.-]*(\d{2,7})$/);
+        const num = a?.[1] ?? b?.[2];
+        const frag = norm((a ? a[2] : b?.[1]) ?? '');
+        if (num) {
+          const porNumero = [...new Set(byAbonado.get(num) ?? [])];
+          const sede = sedeDeOlt.get(o.oltId);
+          const deSede = porNumero.filter((id) => subById.get(id)?.branchId === sede);
+          // El nombre que acompaña al número VALIDA el match (sin eso un número
+          // cualquiera vincularía a ciegas): basta con su comienzo, porque en
+          // la OLT suele ir un solo nombre o un apodo recortado ("MARY1").
+          const tok = frag.replace(/\d+$/, '').slice(0, 4);
+          const casaNombre = (id: string) => !tok || nombreCompleto(subById.get(id)!).includes(tok);
+          let validos = deSede.filter(casaNombre);
+          // Sin match en la sede, otra sede solo con nombre que confirme (hay
+          // OLTs que atienden barrios de la sede vecina).
+          if (validos.length === 0 && tok) validos = porNumero.filter(casaNombre);
+          // Número pelado: solo si es único en la sede de la OLT.
+          if (!tok && validos.length !== 1) validos = [];
+          if (validos.length > 1) { ambiguas++; continue; }
+          candidatos = validos;
         }
       }
 
@@ -1536,19 +1660,76 @@ export class OltService {
         continue;
       }
       if (candidatos.length > 1 || new Set(candidatos).size > 1) { ambiguas++; continue; }
-      await this.prisma.oltOnu.update({
-        where: { id: o.id },
-        data: { subscriberId: candidatos[0], clientName: ident },
-      });
+      if (conOnuViva.has(candidatos[0])) { yaTienen++; continue; }
+      propuestas.push({ sn: o.sn, descripcion: ident, subscriberId: candidatos[0], abonado: subById.get(candidatos[0])!.abonado });
+      if (!opts.dryRun) {
+        await this.prisma.oltOnu.update({
+          where: { id: o.id },
+          data: { subscriberId: candidatos[0], clientName: ident },
+        });
+      }
+      conOnuViva.add(candidatos[0]);
       vinculadas++;
     }
+    if (opts.dryRun) return { ok: true, dryRun: true, examinadas: onus.length, vinculadas, ambiguas, sinMatch, yaTienen, propuestas };
 
     const olt = oltId ? await this.resolveOlt(oltId) : null;
-    const detalle = `Auto-vínculo ONU↔abonado: ${vinculadas} vinculadas, ${ambiguas} ambiguas, ${sinMatch} sin match de ${onus.length} con descripción` +
+    const detalle = `Auto-vínculo ONU↔abonado: ${vinculadas} vinculadas, ${ambiguas} ambiguas, ${yaTienen} con el abonado ya vinculado a otra ONU, ${sinMatch} sin match de ${onus.length} con descripción` +
       (muestraSinMatch.length ? ` — sin match ej.: ${muestraSinMatch.join(', ')}` : '');
     await this.audit('LINK', olt, true, false, detalle, { user });
     this.logger.log(detalle);
-    return { ok: true, examinadas: onus.length, vinculadas, ambiguas, sinMatch };
+    return { ok: true, examinadas: onus.length, vinculadas, ambiguas, sinMatch, yaTienen };
+  }
+
+  /**
+   * Vínculo ONU↔abonado por la MAC con que navega: la OLT dice qué MAC sale
+   * por cada ONU (`display mac-address port`, VPI = ont-id) y los Mikrotik qué
+   * usuario PPPoE tiene esa MAC de caller-id. Va ANTES que el de la descripción
+   * porque es la prueba de quién está conectado: la descripción a menudo lleva
+   * el número de abonado viejo ("2164yenny" es hoy el 61432). Solo ONUs online
+   * sin abonado del slot, y solo match único con un abonado sin otra ONU viva.
+   * El 16-oct vinculó así 375 que la descripción no resolvía.
+   */
+  async vincularPorMac(olt: any, frame: number, slot: number, user?: AuthUser) {
+    if (!this.mikrotik?.sesionesPppPorMac) return { vinculadas: 0 };
+    const onus = await this.prisma.oltOnu.findMany({
+      where: { oltId: olt.id, frame, slot, subscriberId: null, syncState: 'presente', runState: { contains: 'online', mode: 'insensitive' }, ontId: { not: null } },
+      select: { id: true, port: true, ontId: true, sn: true },
+    });
+    if (!onus.length) return { vinculadas: 0 };
+    const pppPorMac = await this.mikrotik.sesionesPppPorMac();
+    if (!pppPorMac.size) return { vinculadas: 0 };
+    const subs = await this.prisma.subscriber.findMany({ where: { pppUsername: { not: null } }, select: { id: true, pppUsername: true } });
+    const subPorPpp = new Map<string, string[]>();
+    for (const s of subs) {
+      const k = s.pppUsername!.replace(/\s+/g, '').toLowerCase();
+      subPorPpp.set(k, [...(subPorPpp.get(k) ?? []), s.id]);
+    }
+    const conOnuViva = new Set((await this.prisma.oltOnu.findMany({
+      where: { subscriberId: { not: null }, syncState: 'presente', runState: { contains: 'online', mode: 'insensitive' } },
+      select: { subscriberId: true },
+    })).map((o) => o.subscriberId!));
+
+    let vinculadas = 0;
+    for (const port of [...new Set(onus.map((o) => o.port))]) {
+      const r = await this.withDriver(olt, (d: any) => d.sendCommand(`display mac-address port ${frame}/${slot}/${port}`));
+      if (!r.ok) continue;
+      const macsPorOnt = new Map<number, string[]>();
+      for (const l of String(r.data ?? '').split('\n')) {
+        const m = l.match(/gpon\s+([0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4})\s+\S+\s+\d+\s*\/\s*\d+\s*\/\s*\d+\s+(\d+)/i);
+        if (m) macsPorOnt.set(Number(m[2]), [...(macsPorOnt.get(Number(m[2])) ?? []), m[1].replace(/-/g, '').toUpperCase()]);
+      }
+      for (const o of onus.filter((x) => x.port === port)) {
+        const ppps = (macsPorOnt.get(o.ontId!) ?? []).flatMap((m) => pppPorMac.get(m) ?? []);
+        const cands = [...new Set(ppps.flatMap((p) => subPorPpp.get(p) ?? []))];
+        if (cands.length !== 1 || conOnuViva.has(cands[0])) continue;
+        await this.prisma.oltOnu.update({ where: { id: o.id }, data: { subscriberId: cands[0], clientName: ppps[0] } });
+        conOnuViva.add(cands[0]);
+        vinculadas++;
+      }
+    }
+    if (vinculadas) await this.audit('LINK', olt, true, false, `Vínculo por MAC (PPPoE) slot ${slot}: ${vinculadas} ONUs`, { user });
+    return { vinculadas };
   }
 
   async syncSlot(id: string, frame = 0, slot: number, user?: AuthUser) {
@@ -1579,6 +1760,11 @@ export class OltService {
       data: { syncState: 'ausente' },
     });
     await this.audit('SYNC', olt, true, false, `Sync slot ${slot}: ${onus.length} ONUs`, { user });
+    // Las ONUs recién vistas quedan vinculadas a su abonado sin que nadie tenga
+    // que acordarse del botón «Auto-vincular» (se corrió a mano hasta el 02-oct
+    // y para el 16-oct había 1.160 ONUs navegando sin abonado).
+    await this.vincularPorMac(olt, frame, Number(slot), user).catch((e) => this.logger.warn(`Vínculo por MAC tras sync de ${olt.name}: ${e?.message ?? e}`));
+    await this.autoLinkOnus(olt.id, user).catch((e) => this.logger.warn(`Auto-vínculo tras sync de ${olt.name}: ${e?.message ?? e}`));
     return { ok: true, synced: onus.length, raw };
   }
 

@@ -83,6 +83,78 @@ export class VlanEquiposService {
     return { branchId, olts: salida, mikrotikErrores: errores };
   }
 
+  /** Sesiones PPPoE activas por sede: 2 min, como la lectura de VLANs de los routers. */
+  private static readonly cacheSesiones = new Map<string, { at: number; data: { activos: Set<string>; routers: number; errores: string[] } }>();
+
+  /**
+   * `GET /network/vlans/usuarios?branchId=` — por cada VLAN de la sede, cuántos
+   * clientes tiene (los asignados a un puerto de sus cajas NAP, sin RETIRADO ni
+   * DEPURADO) y cuántos tienen ahora sesión PPPoE en los Mikrotik de la sede.
+   * La diferencia son los que están sin internet. SOLO LECTURA.
+   */
+  async usuarios(branchId: string, refresh = false) {
+    if (!branchId) throw new BadRequestException('Falta la sede.');
+    const sinSede = branchId === 'none';
+    const puertos = await this.prisma.port.findMany({
+      where: {
+        subscriberId: { not: null },
+        nap: { vlan: sinSede ? { branchId: null } : { branchId } },
+        subscriber: { OR: [{ status: null }, { status: { notIn: ['RETIRADO', 'DEPURADO'] } }] },
+      },
+      select: { nap: { select: { vlanId: true } }, subscriber: { select: { id: true, status: true, pppUsername: true } } },
+    });
+
+    let sesiones: { activos: Set<string>; routers: number; errores: string[] } = { activos: new Set(), routers: 0, errores: [] };
+    let leidoEn: string | null = null;
+    if (!sinSede) {
+      const hit = VlanEquiposService.cacheSesiones.get(branchId);
+      if (!refresh && hit && Date.now() - hit.at < VlanEquiposService.ROUTERS_TTL_MS) {
+        sesiones = hit.data;
+        leidoEn = new Date(hit.at).toISOString();
+      } else {
+        sesiones = await this.mikrotik.sesionesPppDeSede(branchId);
+        const at = Date.now();
+        if (sesiones.routers) VlanEquiposService.cacheSesiones.set(branchId, { at, data: sesiones });
+        leidoEn = new Date(at).toISOString();
+      }
+    }
+    const enVivo = sesiones.routers > 0;
+
+    // Un cliente cuenta una vez por VLAN aunque ocupe dos puertos.
+    const porVlan = new Map<string, Map<string, { status: string | null; ppp: string }>>();
+    for (const p of puertos) {
+      const vlanId = p.nap?.vlanId;
+      if (!vlanId || !p.subscriber) continue;
+      const m = porVlan.get(vlanId) ?? new Map();
+      m.set(p.subscriber.id, { status: p.subscriber.status, ppp: (p.subscriber.pppUsername ?? '').replace(/\s+/g, '').toLowerCase() });
+      porVlan.set(vlanId, m);
+    }
+    const vlans: Record<string, { total: number; enLinea: number | null; cortados: number; sinUsuarioPpp: number }> = {};
+    for (const [vlanId, subs] of porVlan) {
+      let enLinea = 0, cortados = 0, sinUsuarioPpp = 0;
+      for (const s of subs.values()) {
+        if (s.status === 'CORTADO' || s.status === 'SUSPENDIDO') cortados++;
+        if (!s.ppp) sinUsuarioPpp++;
+        else if (sesiones.activos.has(s.ppp)) enLinea++;
+      }
+      vlans[vlanId] = { total: subs.size, enLinea: enVivo ? enLinea : null, cortados, sinUsuarioPpp };
+    }
+
+    // Clientes de la sede SIN puerto de caja NAP: no caen en ninguna VLAN, y sin
+    // este número la suma de la tabla parecería todo lo que hay en la sede
+    // (Villanueva, 15-oct: ~490 en línea sin caja asignada).
+    let sinCaja: { total: number; enLinea: number | null } | null = null;
+    if (!sinSede) {
+      const huerfanos = await this.prisma.subscriber.findMany({
+        where: { branchId, ports: { none: {} }, OR: [{ status: null }, { status: { notIn: ['RETIRADO', 'DEPURADO'] } }] },
+        select: { pppUsername: true },
+      });
+      const enLinea = huerfanos.filter((s) => s.pppUsername && sesiones.activos.has(s.pppUsername.replace(/\s+/g, '').toLowerCase())).length;
+      sinCaja = { total: huerfanos.length, enLinea: enVivo ? enLinea : null };
+    }
+    return { branchId, enVivo, leidoEn, routers: sesiones.routers, errores: sesiones.errores, vlans, sinCaja };
+  }
+
   /**
    * `POST /network/vlans/:id/configurar-equipos` — deja la VLAN del catálogo en
    * la OLT (creada + uplink) y en el Mikrotik (interfaz + PPPoE). Con `dryRun`

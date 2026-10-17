@@ -15,7 +15,7 @@ describe('ONU ya autenticada · desautenticar y volver a autenticar', () => {
   const armar = (opts: {
     enAutofindAlInicio?: boolean;
     reaparece?: boolean;
-    vinculadaA?: { status: string } | null;
+    vinculadaA?: { status: string; syncState?: string } | null;
     borradoFalla?: boolean;
   } = {}) => {
     const notas: string[] = [];
@@ -52,8 +52,9 @@ describe('ONU ya autenticada · desautenticar y volver a autenticar', () => {
         ]),
       },
       oltOnu: {
-        findFirst: jest.fn().mockResolvedValue(
-          opts.vinculadaA ? { subscriberId: 'sub-viejo', clientName: '54128sandra' } : null),
+        findFirst: jest.fn(async ({ where }: any = {}) => (
+          opts.vinculadaA && !(opts.vinculadaA.syncState && where?.NOT?.syncState === opts.vinculadaA.syncState)
+            ? { subscriberId: 'sub-viejo', clientName: '54128sandra' } : null)),
         findMany: jest.fn().mockResolvedValue([]),
         update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn().mockResolvedValue({}),
@@ -154,5 +155,25 @@ describe('ONU ya autenticada · desautenticar y volver a autenticar', () => {
     const { svc, olt } = armar({ vinculadaA: { status: 'ACTIVO' } });
     await expect(svc.autenticar('t1', { sn: SN })).rejects.toThrow(/sigue con servicio/);
     expect(olt.remove).not.toHaveBeenCalled();
+  });
+
+  // 17-oct-2026 (MONTERREY 4857544397661A9A y 444633306A0F5F1B): la ONU seguía
+  // dada de alta, apagada, en la casa del cliente anterior y se anunciaba en el
+  // puerto nuevo. El técnico quedaba bloqueado hasta que alguien la borrara a mano.
+  it('vinculada a un ACTIVO pero SE ANUNCIA aquí (está enchufada en esta casa): la libera, la autentica y avisa', async () => {
+    const { svc, olt, orden, notas } = armar({ vinculadaA: { status: 'ACTIVO' }, enAutofindAlInicio: true });
+    const r: any = await svc.autenticar('t1', { sn: SN });
+    expect(r.ok).toBe(true);
+    expect(orden).toEqual(['provision olt-1 0/1/0 (rechazada)', 'remove olt-1 0/1/3:12', 'provision olt-1 0/1/0']);
+    const nota = notas.find((n) => n.startsWith('ONU REUTILIZADA'));
+    expect(nota).toContain('54128sandra (ACTIVO)');
+    expect(nota).toContain('Revisar el servicio del abonado 54128');
+    expect(olt.adoptar).not.toHaveBeenCalled();
+  });
+
+  it('vinculada a un ACTIVO pero la fila está ausente (ya le cambiaron la ONU): no frena', async () => {
+    const { svc } = armar({ vinculadaA: { status: 'ACTIVO', syncState: 'ausente' } });
+    const r: any = await svc.autenticar('t1', { sn: SN });
+    expect(r.ok).toBe(true);
   });
 });

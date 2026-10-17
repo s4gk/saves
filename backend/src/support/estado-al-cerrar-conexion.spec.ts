@@ -33,15 +33,15 @@ describe('los cinco trabajos de conexión', () => {
     for (const tipo of ['MIGRACION', 'migraci', 'agregarinternet']) {
       expect([tipo, puedeAutenticar(modoDeOrden(tipo))]).toEqual([tipo, true]);
     }
-    // La REINSTALACIÓN es la excepción (2026-09-08): cierra dejando al cliente
-    // conectado —por eso sigue siendo trabajo de conexión, abajo— pero no
-    // autentica nada, porque el equipo ya está de alta en la OLT.
-    expect(puedeAutenticar(modoDeOrden('Reinstalación'))).toBe(false);
+    // La REINSTALACIÓN también (2026-10-15): tras un corte largo la ONU puede no
+    // estar en la OLT. Del 08-09 al 15-10 estuvo fuera (orden 512117).
+    expect(puedeAutenticar(modoDeOrden('Reinstalación'))).toBe(true);
+    expect(puedeAutenticar(modoDeOrden('Reinstalacion'))).toBe(true);
   });
 
   it('los reconoce el mismo predicado que usa el cierre', () => {
     for (const tipo of CINCO) expect([tipo, esTrabajoDeConexion(tipo)]).toEqual([tipo, true]);
-    // La reinstalación no autentica, pero cerrarla tampoco puede dejar al abonado
+    // Cerrar una reinstalación tampoco puede dejar al abonado
     // en 'INSTALAR': el trabajo se hizo y el cliente quedó conectado.
     expect(esTrabajoDeConexion('Reinstalación')).toBe(true);
     // Y no arrastra a las que no son: esas tienen su propia rama en la cascada.

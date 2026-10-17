@@ -25,6 +25,18 @@ import { decryptSecret } from '../common/secret-box';
  *   2. `IpAssignment`: lo reservado por otra alta que va a medio camino
  *   3. `Subscriber.ipRemote` en la BD, por si el secret aún no está escrito
  * Más .0, .1 y .255 de cada /24, que por convención son red / gateway / broadcast.
+ *
+ * PLAN POR POOLS (2026-10-17, pedido de soporte). Si el router tiene `poolOctet`
+ * (la X), el reparto ya no sale de "la red con más clientes" sino de una cadena
+ * fija que se llena en orden:
+ *   POOL_CLIENTES_1 (10.X.1.3-10.X.1.252) → si se llena salta a
+ *   POOL_CLIENTES_2 (10.X.2.3-10.X.2.252) → salta a POOL_CLIENTES_3…
+ * Los huecos de un pool anterior se reaprovechan antes de pasar al siguiente.
+ * Se saltan los /24 que son de interfaces del router (DHCP, gestión) salvo que
+ * ya sean red de clientes. Los pools se crean también en el Mikrotik
+ * (`/ip/pool`, encadenados con next-pool) a medida que se van necesitando; son
+ * declarativos: los secrets siguen llevando la IP fija en remote-address.
+ * Routers sin X (EOC/EPON de Villanueva, 80.0.x) siguen con el reparto anterior.
  */
 
 /** Números de host que nunca se entregan dentro de un /24. */
@@ -44,6 +56,26 @@ const HOST_RESERVADOS = new Set([0, 1, 255]);
  */
 const MIN_SECRETS_POR_RED = 20;
 
+/** Rango de host de cada POOL_CLIENTES_n: 10.X.n.3 – 10.X.n.252. */
+const POOL_HOST_MIN = 3;
+const POOL_HOST_MAX = 252;
+export const POOL_PREFIJO = 'POOL_CLIENTES_';
+
+type Censo = {
+  ocupadas: Set<number>;
+  /** Redes de clientes que ya usa el router (≥ MIN_SECRETS_POR_RED). */
+  redes: number[];
+  /** Secrets por /24 en el router propio. */
+  porRed: Map<number, number>;
+  /** Secrets por /24 en toda la sede. */
+  porRedSede: Map<number, number>;
+  /** /24 ocupados por interfaces de algún router de la sede. */
+  infra: Set<number>;
+};
+
+/** De qué redes y con qué rango de host se reparte en un router. */
+type Plan = { redes: number[]; hostMin: number; hostMax: number; secuencial: boolean };
+
 const esIp = (v: unknown): v is string => typeof v === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(v);
 const aNumero = (ip: string) => ip.split('.').reduce((acc, oct) => acc * 256 + Number(oct), 0);
 const aIp = (n: number) => [24, 16, 8, 0].map((s) => (n >>> s) & 255).join('.');
@@ -54,6 +86,8 @@ export type ResultadoIp = {
   /** Cuántas quedaban libres tras entregar ésta (para avisar antes de que se agote). */
   libres?: number;
 };
+
+type RouterIp = Pick<Mikrotik, 'ip' | 'port'> & Partial<Pick<Mikrotik, 'poolOctet' | 'name'>>;
 
 export class IpAllocatorService {
   private readonly logger = new Logger('IpAllocatorService');
@@ -78,21 +112,20 @@ export class IpAllocatorService {
    * alta tiene que poder seguir sin IP y avisar, no reventar a medias.
    */
   async asignar(mk: Mikrotik, subscriberId: string): Promise<ResultadoIp> {
-    let ocupadas: Set<number>;
-    let redes: number[];
-    let porRed: Map<number, number>;
+    let censo: Censo;
     try {
-      ({ ocupadas, redes, porRed } = await this.censo(mk));
+      censo = await this.censo(mk);
     } catch (e) {
       return { ip: null, motivo: `No se pudo leer el router para elegir IP: ${(e as Error).message}` };
     }
-    if (!redes.length) {
+    const plan = this.plan(mk, censo);
+    if (!plan.redes.length) {
       return { ip: null, motivo: 'El router no tiene ninguna red en uso de la que sacar una IP libre.' };
     }
 
-    const libres = this.candidatas(redes, ocupadas, porRed);
+    const libres = this.candidatas(plan, censo.ocupadas, censo.porRed);
     if (!libres.length) {
-      return { ip: null, motivo: 'No quedan IPs libres en las redes que usa este router.' };
+      return { ip: null, motivo: plan.secuencial ? 'No quedan IPs libres en los POOL_CLIENTES de este router.' : 'No quedan IPs libres en las redes que usa este router.' };
     }
 
     // Se intenta reservar en orden. Si otra alta ganó la carrera, Postgres rechaza
@@ -104,6 +137,9 @@ export class IpAllocatorService {
         await this.prisma.ipAssignment.create({
           data: { routerHost, ip, subscriberId, state: 'RESERVADA' },
         });
+        // Que el pool de esta IP y el siguiente («salta a») existan en el router.
+        // En segundo plano: el alta no espera ni falla por esto.
+        if (plan.secuencial) void this.escribirPools(mk, plan, n & 0xffffff00).catch(() => undefined);
         return { ip, libres: libres.length - 1 };
       } catch {
         continue; // ya reservada por otro; siguiente candidata
@@ -127,12 +163,13 @@ export class IpAllocatorService {
    *     bloque de verdad del router y no un residuo de tres direcciones sueltas.
    */
   private candidatas(
-    redes: number[],
+    plan: Plan,
     ocupadas: Set<number>,
     porRed: Map<number, number>,
     cerca?: number,
   ): number[] {
-    const orden = [...redes].sort((a, b) => {
+    // Plan por pools: POOL_CLIENTES_1, luego _2, _3… en ese orden fijo.
+    const orden = plan.secuencial && cerca === undefined ? [...plan.redes] : [...plan.redes].sort((a, b) => {
       if (cerca !== undefined) {
         const da = Math.abs(a - cerca);
         const db = Math.abs(b - cerca);
@@ -142,13 +179,124 @@ export class IpAllocatorService {
     });
     const libres: number[] = [];
     for (const red of orden) {
-      for (let host = 2; host <= 254; host++) {
+      for (let host = plan.hostMin; host <= plan.hostMax; host++) {
         if (HOST_RESERVADOS.has(host)) continue;
         const n = red + host;
         if (!ocupadas.has(n)) libres.push(n);
       }
     }
     return libres;
+  }
+
+  /**
+   * Con X (`poolOctet`): 10.X.1 … 10.X.254, hosts 3–252, en orden. Se salta un
+   * /24 que sea de una interfaz de algún router de la sede (DHCP, gestión…)
+   * salvo que ya tenga ≥ MIN_SECRETS_POR_RED clientes: entregar ahí sería darle
+   * a un cliente la dirección de un equipo.
+   * Sin X: las redes que ya usa el router, como antes del 2026-10-17.
+   */
+  private plan(mk: RouterIp, c: Censo): Plan {
+    const x = mk.poolOctet;
+    if (x === null || x === undefined || x < 0 || x > 255) {
+      return { redes: c.redes, hostMin: 2, hostMax: 254, secuencial: false };
+    }
+    const base = aNumero(`10.${x}.0.0`);
+    const redes: number[] = [];
+    for (let n = 1; n <= 254; n++) {
+      const red = base + n * 256;
+      if (c.infra.has(red) && (c.porRedSede.get(red) ?? 0) < MIN_SECRETS_POR_RED) continue;
+      redes.push(red);
+    }
+    return { redes, hostMin: POOL_HOST_MIN, hostMax: POOL_HOST_MAX, secuencial: true };
+  }
+
+  /**
+   * Crea en el Mikrotik los `/ip/pool` POOL_CLIENTES_n desde el 1 hasta el que
+   * sigue a `redActual`, encadenados con next-pool (el _1 salta al _2…). Solo
+   * añade lo que falta y corrige un next-pool desfasado; no borra nada.
+   */
+  private async escribirPools(mk: RouterIp & Pick<Mikrotik, 'username' | 'password'>, plan: Plan, redActual: number) {
+    if (!plan.secuencial) return { creados: [] as string[], encadenados: [] as string[] };
+    const idx = plan.redes.indexOf(redActual);
+    const incluir = plan.redes.slice(0, (idx < 0 ? 0 : idx) + 2);
+    const nombre = (red: number) => `${POOL_PREFIJO}${(red >>> 8) & 255}`;
+    const creados: string[] = [];
+    const encadenados: string[] = [];
+    const api = new RouterosClient();
+    try {
+      await api.connect(mk.ip, Number(mk.port), mk.username, decryptSecret(mk.password), { timeoutMs: 15000 });
+      const existentes = await api.comm('/ip/pool/getall', { '.proplist': '.id,name,ranges,next-pool' });
+      const porNombre = new Map(existentes.map((p) => [p.name, p]));
+      for (const red of incluir) {
+        if (porNombre.has(nombre(red))) continue;
+        await api.comm('/ip/pool/add', { name: nombre(red), ranges: `${aIp(red + POOL_HOST_MIN)}-${aIp(red + POOL_HOST_MAX)}` });
+        creados.push(nombre(red));
+      }
+      const ahora = await api.comm('/ip/pool/getall', { '.proplist': '.id,name,next-pool' });
+      const ids = new Map(ahora.map((p) => [p.name, p]));
+      for (let i = 0; i < incluir.length - 1; i++) {
+        const p = ids.get(nombre(incluir[i]));
+        const sig = nombre(incluir[i + 1]);
+        if (p && p['next-pool'] !== sig) {
+          await api.comm('/ip/pool/set', { '.id': p['.id'], 'next-pool': sig });
+          encadenados.push(`${p.name} → ${sig}`);
+        }
+      }
+      if (creados.length) this.logger.log(`${mk.name ?? this.host(mk)}: pools creados ${creados.join(', ')}`);
+    } catch (e) {
+      this.logger.warn(`${mk.name ?? this.host(mk)}: no se pudieron escribir los POOL_CLIENTES: ${(e as Error).message}`);
+      throw e;
+    } finally {
+      api.close();
+    }
+    return { creados, encadenados };
+  }
+
+  /**
+   * Deja en el router la cadena POOL_CLIENTES_1 … hasta el pool del que sale la
+   * próxima IP y el siguiente. Para el script de puesta en marcha.
+   */
+  async asegurarPools(mk: Mikrotik) {
+    if (mk.poolOctet === null || mk.poolOctet === undefined) return { router: mk.name, sinPlan: true };
+    const censo = await this.censo(mk);
+    const plan = this.plan(mk, censo);
+    const [primera] = this.candidatas(plan, censo.ocupadas, censo.porRed);
+    const redActual = primera !== undefined ? primera & 0xffffff00 : plan.redes[plan.redes.length - 1];
+    const r = await this.escribirPools(mk, plan, redActual);
+    return { router: mk.name, proxima: primera !== undefined ? aIp(primera) : null, ...r };
+  }
+
+  /**
+   * La primera IP libre del router, SIN reservarla: es lo que el formulario
+   * propone al cambiar de tecnología. La reserva llega al guardar (`reservar`).
+   */
+  async sugerir(mk: Mikrotik): Promise<ResultadoIp> {
+    try {
+      const censo = await this.censo(mk);
+      const plan = this.plan(mk, censo);
+      if (!plan.redes.length) return { ip: null, motivo: 'El router no tiene ninguna red en uso de la que sacar una IP libre.' };
+      const libres = this.candidatas(plan, censo.ocupadas, censo.porRed);
+      if (!libres.length) return { ip: null, motivo: 'No quedan IPs libres en las redes que usa este router.' };
+      return { ip: aIp(libres[0]), libres: libres.length };
+    } catch (e) {
+      return { ip: null, motivo: `No se pudo leer el router para elegir IP: ${(e as Error).message}` };
+    }
+  }
+
+  /**
+   * Reserva una IP concreta (la que propuso `sugerir` o una tecleada) para este
+   * abonado. false si ya la tiene reservada OTRO: entre proponerla y guardar,
+   * otra alta se la pudo llevar.
+   */
+  async reservar(mk: Pick<Mikrotik, 'ip' | 'port'>, ip: string, subscriberId: string): Promise<boolean> {
+    const routerHost = this.host(mk);
+    try {
+      await this.prisma.ipAssignment.create({ data: { routerHost, ip, subscriberId, state: 'RESERVADA' } });
+      return true;
+    } catch {
+      const fila = await this.prisma.ipAssignment.findFirst({ where: { routerHost, ip }, select: { subscriberId: true } });
+      return !fila || fila.subscriberId === subscriberId;
+    }
   }
 
   /** La IP ya está escrita en el `/ppp/secret`: la reserva pasa a definitiva. */
@@ -178,7 +326,7 @@ export class IpAllocatorService {
    * sede podían acabar con la misma IP, y entonces cortar a uno mete en MOROSOS
    * una dirección que también es del otro.
    */
-  private async censo(mk: Mikrotik): Promise<{ ocupadas: Set<number>; redes: number[]; porRed: Map<number, number> }> {
+  private async censo(mk: Mikrotik): Promise<Censo> {
     const hermanos = await this.prisma.mikrotik.findMany({ where: { sedeLegacy: mk.sedeLegacy } });
     // Un equipo físico puede estar dado de alta varias veces (EOC y EPON son la
     // misma caja): se consulta una sola vez por host y no una por fila.
@@ -187,6 +335,7 @@ export class IpAllocatorService {
 
     const ocupadas = new Set<number>();
     const porRed = new Map<number, number>();
+    const infra = new Set<number>();
     /** Cuántos secrets tiene el /24 en el router al que se le va a repartir. */
     const porRedPropio = new Map<number, number>();
 
@@ -197,7 +346,7 @@ export class IpAllocatorService {
       try {
         await api.connect(router.ip, Number(router.port), router.username, decryptSecret(router.password), { timeoutMs: 15000 });
         secrets = await api.comm('/ppp/secret/getall', { '.proplist': 'name,remote-address' });
-        direcciones = await api.comm('/ip/address/getall', { '.proplist': 'address' });
+        direcciones = await api.comm('/ip/address/getall', { '.proplist': 'address,dynamic,disabled' });
       } catch (e) {
         // El router propio es obligatorio: sin su censo no se puede repartir sin
         // riesgo. Un hermano caído sólo se avisa — bloquear todas las altas de la
@@ -221,8 +370,18 @@ export class IpAllocatorService {
       }
       // Las direcciones de los interfaces del equipo (llegan como 10.20.0.1/24).
       for (const d of direcciones) {
-        const ip = (d.address || '').split('/')[0];
-        if (esIp(ip)) ocupadas.add(aNumero(ip));
+        const [ip, pref] = (d.address || '').split('/');
+        if (!esIp(ip)) continue;
+        ocupadas.add(aNumero(ip));
+        // El /24 de una interfaz de equipo (DHCP, gestión, enlaces /29…). Las
+        // dinámicas son sesiones PPP y no cuentan. Una máscara más ancha que /24
+        // es la propia red de clientes (Tauramena tiene 10.100.0.0/16 en ether5),
+        // no infraestructura.
+        const p = Number(pref ?? 32);
+        if (d.dynamic === 'true' || d.disabled === 'true' || !(p >= 24 && p <= 32)) continue;
+        const tam = 2 ** (32 - p);
+        const red = Math.floor(aNumero(ip) / tam) * tam;
+        for (let r = Math.floor(red / 256) * 256; r < red + tam; r += 256) infra.add(r);
       }
     }
 
@@ -246,7 +405,7 @@ export class IpAllocatorService {
       .map(([red]) => red)
       .sort((a, b) => a - b);
 
-    return { ocupadas, redes, porRed: porRedPropio };
+    return { ocupadas, redes, porRed: porRedPropio, porRedSede: porRed, infra };
   }
 
   /**
@@ -297,7 +456,10 @@ export class IpAllocatorService {
    * `dryRun` (por defecto) NO toca nada: devuelve el plan para revisarlo.
    */
   async repararDuplicadas(mk: Mikrotik, { dryRun = true, limite = 0 } = {}) {
+    // La reparación mueve solo el último octeto dentro de SU red: sigue con las
+    // redes que el router ya usa, no con el plan de pools.
     const { ocupadas, redes, porRed } = await this.censo(mk);
+    const planUso: Plan = { redes, hostMin: 2, hostMax: 254, secuencial: false };
     const routerHost = this.host(mk);
 
     const api = new RouterosClient();
@@ -339,7 +501,7 @@ export class IpAllocatorService {
 
           // Se busca hueco EN SU PROPIA RED primero: mudarlo de sector sería
           // cambiarle la red a un cliente que sólo tenía el último octeto repetido.
-          const nuevaN = this.candidatas(redes, ocupadas, porRed, aNumero(ip) & 0xffffff00)[0];
+          const nuevaN = this.candidatas(planUso, ocupadas, porRed, aNumero(ip) & 0xffffff00)[0];
           if (nuevaN === undefined) {
             acciones.push({ usuario: s.name, ipVieja: ip, ipNueva: null, cortado, activo, ok: false, motivo: 'sin IPs libres' });
             continue;
@@ -402,10 +564,19 @@ export class IpAllocatorService {
 
   /** Cuántas IPs libres le quedan a un router (para avisar antes de que se agote). */
   async disponibilidad(mk: Mikrotik) {
-    const { ocupadas, redes } = await this.censo(mk);
+    const censo = await this.censo(mk);
+    const { ocupadas } = censo;
+    const plan = this.plan(mk, censo);
+    // Con plan de pools solo se listan los /24 ya empezados y el siguiente, no los 254.
+    const redes = plan.secuencial
+      ? (() => {
+          const vacia = plan.redes.findIndex((r) => (censo.porRedSede.get(r) ?? 0) === 0);
+          return plan.redes.slice(0, vacia < 0 ? plan.redes.length : vacia + 1);
+        })()
+      : plan.redes;
     let libres = 0;
-    for (const red of redes) {
-      for (let host = 2; host <= 254; host++) {
+    for (const red of plan.redes) {
+      for (let host = plan.hostMin; host <= plan.hostMax; host++) {
         if (HOST_RESERVADOS.has(host)) continue;
         if (!ocupadas.has(red + host)) libres++;
       }
@@ -413,7 +584,7 @@ export class IpAllocatorService {
     return {
       router: mk.name,
       host: this.host(mk),
-      redes: redes.map((r) => `${aIp(r)}/24`),
+      redes: redes.map((r) => (plan.secuencial ? `${POOL_PREFIJO}${(r >>> 8) & 255} ${aIp(r)}/24` : `${aIp(r)}/24`)),
       ocupadas: ocupadas.size,
       libres,
     };

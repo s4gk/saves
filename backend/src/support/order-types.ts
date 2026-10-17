@@ -350,6 +350,13 @@ export const esTraslado = (tipo?: string | null): boolean =>
   normalizar(tipo ?? '') === normalizar(TRASLADO);
 
 /**
+ * ¿Esta orden pasa al cliente de una red a otra (EOC → GPON, típicamente)?
+ * Por fragmento: en `tickets.detalle` viene 'Migracion', 'Migración' o 'MIGRACION'.
+ */
+export const esMigracion = (tipo?: string | null): boolean =>
+  normalizar(tipo ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').includes('migracion');
+
+/**
  * AGREGAR INTERNET: al cliente que hoy solo tiene televisión se le monta también el
  * internet (758 órdenes en el histórico del legacy).
  *
@@ -373,11 +380,15 @@ export const esAgregarInternet = (tipo?: string | null): boolean =>
  *
  * Cae dentro del fragmento 'instalac' y por eso venía heredando, sin que nadie lo
  * decidiera, todo lo que se hizo para la instalación nueva. El usuario lo separó
- * el 2026-09-08: una reinstalación NO saca una caja de la bodega y NO lleva el
- * bloque de autenticación de la ONU. El equipo ya está en casa del cliente y ya
- * está dado de alta en la OLT; apartarle una unidad restaba stock para nada y
+ * el 2026-09-08: una reinstalación NO saca una caja de la bodega. El equipo ya
+ * está en casa del cliente; apartarle una unidad restaba stock para nada y
  * mandaba al técnico a recoger un aparato que no iba a instalar, igual que pasaba
  * con los traslados (ver `TIPOS_CON_RESERVA` en `equipo-reserva.service.ts`).
+ *
+ * El bloque de autenticación de la ONU también se le quitó ese día, pero VOLVIÓ el
+ * 2026-10-15: tras un corte largo o una fibra rota la ONU puede no estar en la OLT
+ * (orden 512117, cartera desde marzo y sin ONU) y el técnico no tenía cómo darla
+ * de alta desde la orden.
  *
  * Lo que SÍ sigue siendo: trabajo de campo (`esTrabajoDeCampo`) y trabajo de
  * conexión (`esTrabajoDeConexion`, abajo) — al cerrarla el abonado no puede
@@ -404,8 +415,7 @@ export function esReinstalacion(tipo?: string | null): boolean {
  *
  * Vive aquí, y no en cada módulo, porque de esta lista dependen dos cosas que
  * tienen que decir lo mismo:
- *   · desde estas órdenes SE PUEDE AUTENTICAR el equipo (`modoDeOrden`), con la
- *     única excepción de la reinstalación (ver `esReinstalacion`, arriba);
+ *   · desde estas órdenes SE PUEDE AUTENTICAR el equipo (`modoDeOrden`);
  *   · al cerrarlas ninguna puede dejar al abonado en 'INSTALAR' — el trabajo se
  *     hizo, el cliente quedó conectado, y en 'INSTALAR' no se le factura. Es el
  *     agujero que dejó a nueve abonados "por instalar" navegando (02→05-09-2026)
@@ -422,9 +432,8 @@ export function esTrabajoDeConexion(tipo?: string | null): boolean {
 /**
  * ¿En esta orden el abonado EMPIEZA A NAVEGAR?
  *
- * Son la instalación y 'AgregarInternet'. La reinstalación calza con el fragmento
- * pero nunca llega aquí: su bloque de ONU no existe (ver `esReinstalacion`), y
- * quien pregunta esto es justo el alta en la Mikrotik que va antes de autenticar. Se separan del resto porque son las únicas en las que el
+ * Son la instalación (y la reinstalación, que calza con el fragmento: tras un
+ * retiro el secret puede no existir) y 'AgregarInternet'. Se separan del resto porque son las únicas en las que el
  * cliente puede llegar SIN datos de integración con la Mikrotik: en un cambio de
  * equipo, un traslado o un cambio de megas el `/ppp/secret` existe desde que se
  * le vendió el servicio, aquí puede no existir todavía.
